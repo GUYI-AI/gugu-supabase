@@ -67,10 +67,7 @@ beforeEach(async () => {
     VALUES($1,$2,$3,'Read revision fixture','text') RETURNING seq`, [message, group, owner])).rows[0]!.seq
   await clearRevisions()
 })
-afterEach(async () => {
-  try { await db.query('SET CONSTRAINTS ALL IMMEDIATE') }
-  finally { await db.query('ROLLBACK') }
-})
+afterEach(async () => { await db.query('ROLLBACK') })
 
 describe('private member state revision budget', () => {
   it('marks a human stream read without broadcasting a roster revision to peers', async () => {
@@ -128,7 +125,7 @@ describe('roster and read receipt fanout controls', () => {
     fanout(await revisions(), [owner, peer, viewer, newcomer])
     await clearRevisions()
     await asUser(peer)
-    await db.query('DELETE FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, peer])
+    await db.query('SELECT chat.remove_group_member_as($1,$2,$2)', [group, peer])
     fanout(await revisions(), [owner, peer, viewer, newcomer], true)
   })
 
