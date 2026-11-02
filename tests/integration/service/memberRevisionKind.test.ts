@@ -10,7 +10,7 @@ interface Database {
 const { Client } = createRequire(import.meta.url)('pg') as {
   Client: new (config: { connectionString: string }) => Database
 }
-type Revision = { user_id: string; resource_key: { kind?: string }; tombstone: boolean }
+type Revision = { user_id: string; resource_key: { kind?: string; user_id?: string }; tombstone: boolean }
 let db: Database
 let owner: string, peer: string, viewer: string, agent: string, group: string, message: string, seq: string
 
@@ -126,7 +126,9 @@ describe('roster and read receipt fanout controls', () => {
     await clearRevisions()
     await asUser(peer)
     await db.query('SELECT chat.remove_group_member_as($1,$2,$2)', [group, peer])
-    fanout(await revisions(), [owner, peer, viewer, newcomer], true)
+    // Leaving also removes the human's agent seat; measure this human's tombstone separately.
+    const departed = (await revisions()).filter(row => row.resource_key.user_id === peer)
+    fanout(departed, [owner, peer, viewer, newcomer], true)
   })
 
   it('still broadcasts the independent read-watermark revision to every member', async () => {
