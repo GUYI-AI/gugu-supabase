@@ -68,7 +68,7 @@ beforeEach(async () => {
   await clearRevisions()
 })
 afterEach(async () => {
-  try { await db.query('RESET ROLE'); await db.query('SET CONSTRAINTS ALL IMMEDIATE') }
+  try { await db.query('SET CONSTRAINTS ALL IMMEDIATE') }
   finally { await db.query('ROLLBACK') }
 })
 
@@ -80,12 +80,14 @@ describe('private member state revision budget', () => {
     expect(rows[0]!.resource_key.kind).toBe('own')
   })
 
-  it('uses the owner token for an agent receipt and notifies only that agent of own state', async () => {
+  it('keeps agent receipts private while preserving the human-only user event transport', async () => {
     await asUser(peer)
     await db.query('SELECT identity.mark_read_on_deliver($1,$2,$3)', [group, message, agent])
     const rows = await revisions()
-    fanout(rows, [agent])
-    expect(rows[0]!.resource_key.kind).toBe('own')
+    fanout(rows, [])
+    const { rows: members } = await db.query<{ last_read_seq: string }>(
+      'SELECT last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, agent])
+    expect(members[0]!.last_read_seq).toBe(seq)
   })
 
   it('keeps a private pin change with its row owner', async () => {
@@ -103,43 +105,43 @@ describe('roster and read receipt fanout controls', () => {
     await db.query('SELECT identity.archive_user($1)', [viewer])
     await clearRevisions()
     await asUser(owner)
-    await db.query("UPDATE chat.chat_members SET role='admin' WHERE chat_id=$1 AND user_id=$2", [group, peer])
-    fanout(await revisions(), [owner, peer, agent])
+    await db.query("SELECT chat.set_group_member_role_as($1,$2,'admin',$3)", [group, peer, owner])
+    fanout(await revisions(), [owner, peer])
   })
 
   it('preserves role change recipients', async () => {
     await asUser(owner)
-    await db.query("UPDATE chat.chat_members SET role='admin' WHERE chat_id=$1 AND user_id=$2", [group, peer])
-    fanout(await revisions(), [owner, peer, viewer, agent])
+    await db.query("SELECT chat.set_group_member_role_as($1,$2,'admin',$3)", [group, peer, owner])
+    fanout(await revisions(), [owner, peer, viewer])
   })
 
   it('preserves listen mode change recipients', async () => {
     await asUser(peer)
-    await db.query("UPDATE chat.chat_members SET listen_mode='passive' WHERE chat_id=$1 AND user_id=$2", [group, agent])
-    fanout(await revisions(), [owner, peer, viewer, agent])
+    await db.query("SELECT chat.set_agent_listen_mode_as($1,$2,'passive',$3)", [group, agent, peer])
+    fanout(await revisions(), [owner, peer, viewer])
   })
 
   it('preserves join recipients and the leaving row owner tombstone', async () => {
     const newcomer = randomUUID()
     await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','New member')", [newcomer])
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [group, newcomer])
-    fanout(await revisions(), [owner, peer, viewer, agent, newcomer])
+    fanout(await revisions(), [owner, peer, viewer, newcomer])
     await clearRevisions()
     await asUser(peer)
     await db.query('DELETE FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, peer])
-    fanout(await revisions(), [owner, peer, viewer, agent, newcomer], true)
+    fanout(await revisions(), [owner, peer, viewer, newcomer], true)
   })
 
   it('still broadcasts the independent read-watermark revision to every member', async () => {
     await markPeerRead()
-    fanout(await revisions('member_read_changed'), [owner, peer, viewer, agent])
+    fanout(await revisions('member_read_changed'), [owner, peer, viewer])
   })
 
   it('labels roster updates explicitly without changing their recipients', async () => {
     await asUser(owner)
-    await db.query("UPDATE chat.chat_members SET role='admin' WHERE chat_id=$1 AND user_id=$2", [group, peer])
+    await db.query("SELECT chat.set_group_member_role_as($1,$2,'admin',$3)", [group, peer, owner])
     const rows = await revisions()
-    fanout(rows, [owner, peer, viewer, agent])
+    fanout(rows, [owner, peer, viewer])
     expect(rows.every(row => row.resource_key.kind === 'roster')).toBe(true)
   })
 })
