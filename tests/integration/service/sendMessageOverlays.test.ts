@@ -95,6 +95,29 @@ describe('send_message_with_overlays returns caller-visible message overlays', (
     expect(result).toEqual({ prosecdef: false, authenticated: true, anon: false })
   })
 
+  it('preserves the own-agent whisper acknowledgement without exposing overlays hidden from the caller', async () => {
+    const id = randomUUID(), sender = randomUUID()
+    await db.query('RESET ROLE')
+    await db.query(`INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id)
+      VALUES($1,'agent','Sending agent',$2,$3)`, [sender, owner, device])
+    await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')`, [group, sender])
+    await asUser()
+    const query = `SELECT chat.send_message_with_overlays($1,$2,$3,$4,'Private App message','text',NULL,NULL,false,true,'fixture') AS result`
+    const args = [id, group, sender, [bystander]]
+    const first = (await db.query(query, args)).rows[0].result
+    expect(first.message).toMatchObject({ id, sender_user_id: sender, is_whisper: true })
+    expect((await db.query('SELECT id FROM chat.messages_view WHERE id=$1', [id])).rows).toEqual([])
+    await db.query('RESET ROLE')
+    await db.query(`INSERT INTO chat.message_reactions(message_id,user_id,emoji) VALUES($1,$2,'ok')`, [id, bystander])
+    await db.query(`INSERT INTO chat.message_deliveries(message_id,device_id,status) VALUES($1,$2,'read')`, [id, `gugu-agent:${sender}`])
+    await asUser()
+    const replay = (await db.query(query, args)).rows[0].result
+    expect(replay.message.id).toBe(id)
+    expect(replay.reactions).toEqual([])
+    expect(replay.deliveries).toEqual([])
+    expect(replay.delivery_blocks).toEqual([])
+  })
+
   it('keeps attachment commit, share and forward results equal to the messages_view columns', async () => {
     await db.query('RESET ROLE')
     const columns = (await db.query(`SELECT attname FROM pg_attribute
