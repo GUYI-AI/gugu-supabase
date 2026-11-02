@@ -97,4 +97,4 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION chat.clear_messages_for_me(TEXT), chat.delete_message(TEXT) FROM PUBLIC, anon;
-GRANT EXECUTE ON FUNCTION chat.clear_messages_for_me(TEXT), chat.delete_message(TEXT) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION chat.clear_messages_for_me(TEXT), chat.delete_message(TEXT) TO authenticated;
