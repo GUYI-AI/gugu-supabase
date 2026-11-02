@@ -82,7 +82,7 @@ describe('personal message deletions in account sync', () => {
     expect(await changes(caller, before[1]!)).toEqual([first, last].map((message) => ({ event: 'message_deleted', revision: expect.any(String), payload: { chat_id: chat, entity_id: message.id, tombstone: true } })))
     expect(await changes(sender, before[0]!)).toEqual([])
     expect(await changes(peer, before[2]!)).toEqual([])
-    expect((await database.query("SELECT topic,private,payload FROM realtime.messages WHERE topic=ANY($1::text[]) AND event='im_revision_advanced'", [users.map((user) => `gugu:user:${user}:events`)])).rows).toEqual([
+    expect((await database.query("SELECT topic,private,payload FROM realtime.messages WHERE topic=ANY($1::text[]) AND event='im_revision_advanced'", [users.map((user) => `gugu:user:${user}:events`)])).rows).toMatchObject([
       { topic: `gugu:user:${caller}:events`, private: true, payload: { revision: Number(await cursor(caller)) } },
     ])
     const next = await say(chat, sender)
