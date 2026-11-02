@@ -37,13 +37,13 @@ afterEach(async () => {
   try { await db.query('RESET role'); await db.query('SET CONSTRAINTS ALL IMMEDIATE') } finally { await db.query('ROLLBACK') }
 })
 
-async function insert(agent: string, input: { id?: string; account?: string; room?: string; root?: string | null; status?: string; at?: string } = {}) {
+async function insert(agent: string, input: { id?: string; account?: string; room?: string; root?: string | null; status?: string; at?: string; reason?: string } = {}) {
   const id = input.id ?? randomUUID(), account = input.account ?? owner
   await db.query(`INSERT INTO identity.gugu_device_commands(id,user_id,device_id,type,status,payload,result,error,created_at,completed_at)
     VALUES ($1,$2,$3,'agent.deliver',$4,$5::jsonb,$6::jsonb,'weekly limit reached',$7,$7)`, [
     id, account, `outcome-${account}`, input.status ?? 'error',
     JSON.stringify({ agent_user_id: agent, chat_id: input.room ?? chat, thread_root_id: input.root ?? null, content: 'Private prompt', extra: 'Not an outcome field' }),
-    JSON.stringify({ reply_notice: 'context', private_trace: 'Not an outcome field' }), input.at ?? '2026-11-01T00:00:00Z',
+    JSON.stringify({ reply_notice: 'context', ...(input.reason !== undefined ? { reason: input.reason } : {}), private_trace: 'Not an outcome field' }), input.at ?? '2026-11-01T00:00:00Z',
   ])
   return id
 }
@@ -52,7 +52,7 @@ async function asUser(account: string | null = owner) {
   await db.query("SELECT set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: account, role: 'authenticated' })])
 }
 type Outcome = { id: string; status: string; payload: Record<string, unknown>; result: Record<string, unknown> }
-const read = async (room = chat, root: string | null = null) => (await db.query<{ value: Outcome[] }>(
+const read = async (room: string | null = chat, root: string | null = null) => (await db.query<{ value: Outcome[] }>(
   'SELECT identity.read_agent_turn_outcomes($1,$2) AS value', [room, root],
 )).rows[0]!.value
 
@@ -99,6 +99,32 @@ describe('conversation-scoped latest agent delivery outcomes', () => {
     await asUser()
     expect((await read()).map(row => [row.id, row.status])).toEqual([[pending, 'pending'], [success, 'done']])
   })
+  it('preserves the stored reason without classifying the error again', async () => {
+    await insert('agent', { reason: 'undelivered' })
+    await asUser()
+    expect((await read())[0]!.result.reason).toBe('undelivered')
+  })
+  it('projects a null reason for a legacy command without a stored reason', async () => {
+    await insert('agent')
+    await asUser()
+    expect((await read())[0]!.result.reason).toBeNull()
+  })
+  it('reads the owner latest outcome across chats and threads only when chat is null', async () => {
+    const main = await insert('agent')
+    const otherChat = randomUUID()
+    const latest = await insert('agent', { room: otherChat, root: thread, at: '2026-11-01T01:00:00Z' })
+    const another = await insert('another-agent', { room: otherChat, at: '2026-11-01T02:00:00Z' })
+    const foreign = await insert('agent', { account: otherOwner, at: '2026-11-01T03:00:00Z' })
+    await asUser()
+    expect((await read(null)).map(row => row.id)).toEqual([another, latest])
+    const defaults = await db.query<{ value: Outcome[] }>('SELECT identity.read_agent_turn_outcomes() AS value')
+    expect(defaults.rows[0]!.value.map(row => row.id)).toEqual([another, latest])
+    expect((await read()).map(row => row.id)).toEqual([main])
+    expect((await read(otherChat, thread)).map(row => row.id)).toEqual([latest])
+    expect((await read(otherChat)).map(row => row.id)).toEqual([another])
+    await db.query('RESET role'); await asUser(otherOwner)
+    expect((await read(null)).map(row => row.id)).toEqual([foreign])
+  })
   it('isolates owner, conversation and exact thread without a caller-supplied owner or roster', async () => {
     const main = await insert('agent')
     const scoped = await insert('agent', { root: thread })
@@ -119,7 +145,7 @@ describe('conversation-scoped latest agent delivery outcomes', () => {
     const rows = await read()
     expect(rows).toHaveLength(1); expect(rows[0]!.id).toBe(latest)
     expect(rows[0]!.payload).toEqual({ agent_user_id: 'agent' })
-    expect(rows[0]!.result).toEqual({ reply_notice: 'context' })
+    expect(rows[0]!.result).toEqual({ reply_notice: 'context', reason: null })
   })
   it('keeps the older client table read available under its existing owner RLS', async () => {
     const own = await insert('agent'); await insert('agent', { account: otherOwner })
