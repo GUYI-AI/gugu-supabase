@@ -92,10 +92,10 @@ describe('download input and signed throttles',()=>{
 
 describe('one download contract with optional provider throttling',()=>{
   const request='11111111-1111-4111-8111-111111111111',at='2026-10-24T00:00:00Z'
-  function fixture(bucket='oss',settings:Record<string,unknown>={}) {
+  function fixture(bucket='oss',settings:Record<string,unknown>={},metadata:Record<string,unknown>={}) {
     const userRpc=vi.fn<AttachmentsDeps['userRpc']>(async()=>({data:{status:'ready',bucket_id:bucket,object_name:'ab/object',
-      download_id:request,signed_at:at,expires_at:'2026-10-24T00:01:00Z',content_type:'application/octet-stream'},error:null}))
-    const sign=vi.fn(async()=>({url:'https://bytes.example/file',thumbUrl:null,expiresAt:'2026-10-24T00:01:00Z'}))
+      download_id:request,signed_at:at,expires_at:'2026-10-24T00:01:00Z',content_type:'application/octet-stream',...metadata},error:null}))
+    const sign=vi.fn(async(_key:string,image:boolean)=>({url:'https://bytes.example/file',thumbUrl:image?'https://bytes.example/thumb':null,expiresAt:'2026-10-24T00:01:00Z'}))
     const storageSignedUrl=vi.fn(async()=> 'https://storage.example/file')
     const deps={userRpc,serviceRpc:vi.fn(async()=>({data:settings,error:null})),objects:{sign},storageSignedUrl} as unknown as Parameters<typeof handleFileDownload>[0]
     return {deps,userRpc,sign,storageSignedUrl}
@@ -121,6 +121,36 @@ describe('one download contract with optional provider throttling',()=>{
       await expect(handleFileDownload(bad.deps,'reader',{ref:{message_id:'m'},request_id:request})).rejects.toMatchObject({status:503,code:'not_configured'})
       expect(bad.sign).not.toHaveBeenCalled();expect(bad.storageSignedUrl).not.toHaveBeenCalled()
     }
+  })
+  it.each([
+    {label:'small image',size:2_971_868,thumbnail:true},
+    {label:'image just below the provider limit',size:20_164_008,thumbnail:true},
+    {label:'exactly 20 MiB',size:20_971_520,thumbnail:true},
+    {label:'20 MiB plus one byte',size:20_971_521,thumbnail:false},
+    {label:'reported 43 MB image',size:43_327_173,thumbnail:false},
+    {label:'missing size',size:undefined,thumbnail:false},
+    {label:'null size',size:null,thumbnail:false},
+    {label:'empty image',size:0,thumbnail:false},
+    {label:'negative size',size:-1,thumbnail:false},
+    {label:'fractional size',size:1.5,thumbnail:false},
+    {label:'numeric string',size:'100',thumbnail:false},
+    {label:'NaN size',size:NaN,thumbnail:false},
+    {label:'infinite size',size:Infinity,thumbnail:false},
+    {label:'unsafe integer',size:Number.MAX_SAFE_INTEGER+1,thumbnail:false},
+  ])('signs the original and limits thumbnails for $label',async({size,thumbnail})=>{
+    const f=fixture('oss',{}, {content_type:'image/png',...(size===undefined?{}:{size_bytes:size})})
+    const result=await handleFileDownload(f.deps,'reader',{ref:{message_id:'m'},request_id:request})
+    expect(f.sign.mock.calls[0]?.[1]).toBe(thumbnail)
+    expect(result).toHaveProperty('thumb_url')
+    expect('thumb_url'in result&&result.thumb_url!==null).toBe(thumbnail)
+    expect(result).toHaveProperty('url','https://bytes.example/file')
+  })
+  it('keeps SVG on the original-only path even when its known size is below the image-processing limit',async()=>{
+    const f=fixture('oss',{}, {content_type:'image/svg+xml',size_bytes:1024})
+    const result=await handleFileDownload(f.deps,'reader',{ref:{message_id:'m'},request_id:request})
+    expect(f.sign.mock.calls[0]?.[1]).toBe(false)
+    expect(result).toHaveProperty('thumb_url',null)
+    expect(result).toHaveProperty('url','https://bytes.example/file')
   })
   it('does not bypass denied or expired metadata when a rate is absent',async()=>{
     const denied=fixture()
