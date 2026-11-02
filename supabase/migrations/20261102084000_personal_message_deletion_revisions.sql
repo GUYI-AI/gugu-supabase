@@ -8,6 +8,7 @@ DECLARE
     v_uid TEXT := (SELECT auth.uid()::text);
     v_through_seq BIGINT;
     v_message_id TEXT;
+    v_last_revision BIGINT;
 BEGIN
     IF NOT chat.is_member(p_chat_id) THEN
         RAISE EXCEPTION 'not a member of chat: %', p_chat_id;
@@ -29,9 +30,15 @@ BEGIN
         )
         SELECT id FROM cleared ORDER BY seq
     LOOP
-        PERFORM chat.publish_user_revision(v_uid, 'message_deleted',
+        v_last_revision := chat.append_user_revision(v_uid, 'message_deleted',
             jsonb_build_object('chat_id', p_chat_id, 'entity_id', v_message_id), true);
     END LOOP;
+
+    IF v_last_revision IS NOT NULL THEN
+        PERFORM chat.send_user_event(
+            jsonb_build_object('revision', v_last_revision), 'im_revision_advanced',
+            'gugu:user:' || v_uid || ':events', true);
+    END IF;
 END;
 $$;
 

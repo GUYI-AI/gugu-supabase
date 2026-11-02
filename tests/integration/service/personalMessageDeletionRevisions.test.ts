@@ -77,10 +77,14 @@ describe('personal message deletions in account sync', () => {
     const first = await say(chat, sender)
     const last = await say(chat, caller)
     const users = [sender, caller, peer], before = await Promise.all(users.map(cursor))
+    await database.query('DELETE FROM realtime.messages WHERE topic=ANY($1::text[])', [users.map((user) => `gugu:user:${user}:events`)])
     await asUser(caller, 'SELECT chat.clear_messages_for_me($1)', [chat])
     expect(await changes(caller, before[1]!)).toEqual([first, last].map((message) => ({ event: 'message_deleted', revision: expect.any(String), payload: { chat_id: chat, entity_id: message.id, tombstone: true } })))
     expect(await changes(sender, before[0]!)).toEqual([])
     expect(await changes(peer, before[2]!)).toEqual([])
+    expect((await database.query("SELECT topic,private,payload FROM realtime.messages WHERE topic=ANY($1::text[]) AND event='im_revision_advanced'", [users.map((user) => `gugu:user:${user}:events`)])).rows).toEqual([
+      { topic: `gugu:user:${caller}:events`, private: true, payload: { revision: Number(await cursor(caller)) } },
+    ])
     const next = await say(chat, sender)
     expect(Number(next.seq)).toBeGreaterThan(Number(last.seq))
     expect((await database.query('SELECT id FROM chat.messages WHERE chat_id=$1 AND deleted_for_user_ids @> jsonb_build_array($2::text) ORDER BY seq', [chat, caller])).rows).toHaveLength(2)
