@@ -1,4 +1,9 @@
 -- Preserve recorded reasons and allow owner-scoped outcomes across conversations.
+-- Match the owner/agent latest-delivery order without sorting all owner deliveries.
+CREATE INDEX idx_gugu_device_commands_agent_latest
+    ON identity.gugu_device_commands (user_id, (payload->>'agent_user_id'), created_at DESC, id DESC)
+    WHERE type = 'agent.deliver' AND jsonb_typeof(payload->'agent_user_id') = 'string';
+
 CREATE OR REPLACE FUNCTION identity.read_agent_turn_outcomes(
     p_chat_id text DEFAULT NULL,
     p_thread_root_id text DEFAULT NULL
