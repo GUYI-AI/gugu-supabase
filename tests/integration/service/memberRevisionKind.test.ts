@@ -98,6 +98,15 @@ describe('private member state revision budget', () => {
 })
 
 describe('roster and read receipt fanout controls', () => {
+  it('does not send roster revisions to an archived member retained in the physical roster', async () => {
+    await asUser(viewer)
+    await db.query('SELECT identity.archive_user($1)', [viewer])
+    await clearRevisions()
+    await asUser(owner)
+    await db.query("UPDATE chat.chat_members SET role='admin' WHERE chat_id=$1 AND user_id=$2", [group, peer])
+    fanout(await revisions(), [owner, peer, agent])
+  })
+
   it('preserves role change recipients', async () => {
     await asUser(owner)
     await db.query("UPDATE chat.chat_members SET role='admin' WHERE chat_id=$1 AND user_id=$2", [group, peer])

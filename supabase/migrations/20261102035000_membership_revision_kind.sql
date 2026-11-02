@@ -25,7 +25,7 @@ BEGIN
     FOR target_user_id IN
       SELECT DISTINCT recipient.user_id
         FROM (
-          SELECT cm.user_id FROM chat.chat_members cm WHERE cm.chat_id = target_chat_id
+          SELECT cm.user_id FROM chat.active_members cm WHERE cm.chat_id = target_chat_id
           UNION ALL
           SELECT affected_user_id
         ) recipient
