@@ -72,10 +72,9 @@ describe('thread read account revisions', () => {
     expect(String(state.last_read_seq)).toBe(seq)
     expect(state.is_marked_unread).toBe(false)
     const page = await changes(reader, before)
-    expect(page.operations.length).toBeGreaterThan(0)
-    expect(page.operations.every(op => op.event === 'member_stream_read_changed')).toBe(true)
-    expect(page.operations.at(-1)!.payload).toEqual(readPayload(state))
-    expect(BigInt(page.operations.at(-1)!.revision)).toBeGreaterThan(BigInt(before))
+    expect(page.operations).toEqual([
+      { revision: String(BigInt(before) + 1n), event: 'member_stream_read_changed', payload: readPayload(state) },
+    ])
     expect(await cursor(reader)).toBe(page.operations.at(-1)!.revision)
     expect(page.has_more).toBe(false)
     expect((await changes(reader, await cursor(reader))).operations).toEqual([])
@@ -104,6 +103,51 @@ describe('thread read account revisions', () => {
     expect(state.version).toBe(first.version + 1)
     expect((await changes(reader, before)).operations).toEqual([
       { revision: String(BigInt(before) + 1n), event: 'member_stream_read_changed', payload: readPayload(state) },
+    ])
+  })
+
+  it.each([
+    { lastRead: 'reply', unread: false, version: 0 },
+    { lastRead: '0', unread: true, version: 0 },
+    { lastRead: '0', unread: false, version: 1 },
+  ])('publishes a nondefault cursor insertion: %j', async ({ lastRead, unread, version }) => {
+    const before = await cursor(reader)
+    const state = (await asUser<ReadState>(reader, `INSERT INTO chat.chat_member_stream_read_state
+      (chat_id,user_id,stream_id,stream_kind,thread_root_id,last_read_seq,is_marked_unread,version)
+      VALUES($1,$2,$3,'thread',$4,$5,$6,$7) RETURNING stream_id,last_read_seq,is_marked_unread,version`,
+      [group, reader, stream, root, lastRead === 'reply' ? seq : lastRead, unread, version]))[0]!
+    expect((await changes(reader, before)).operations).toEqual([
+      { revision: String(BigInt(before) + 1n), event: 'member_stream_read_changed', payload: readPayload(state) },
+    ])
+  })
+
+  it('publishes a private tombstone when the reader deletes a cursor and exposes unread replies again', async () => {
+    const state = await markRead()
+    const before = await cursor(reader), peerBefore = await cursor(owner)
+    expect(await asUser(owner, `DELETE FROM chat.chat_member_stream_read_state
+      WHERE chat_id=$1 AND user_id=$2 AND stream_id=$3 RETURNING stream_id`, [group, reader, stream])).toEqual([])
+    expect((await asUser(reader, 'SELECT stream_id FROM chat.list_unread_locators($1)', [group])).map(row => row.stream_id)).not.toContain(stream)
+    await db.query('DELETE FROM realtime.messages WHERE topic=ANY($1::text[])', [[owner, reader].map(user => `gugu:user:${user}:events`)])
+    expect(await asUser(reader, `DELETE FROM chat.chat_member_stream_read_state
+      WHERE chat_id=$1 AND user_id=$2 AND stream_id=$3 RETURNING stream_id`, [group, reader, stream])).toEqual([{ stream_id: stream }])
+    const expectedRevision = String(BigInt(before) + 1n)
+    expect((await changes(reader, before)).operations).toEqual([
+      { revision: expectedRevision, event: 'member_stream_read_changed', payload: { ...readPayload(state), tombstone: true } },
+    ])
+    expect(await cursor(reader)).toBe(expectedRevision)
+    expect((await changes(owner, peerBefore)).operations).toEqual([])
+    expect(await cursor(owner)).toBe(peerBefore)
+    const wakes = (await db.query('SELECT topic,private,payload FROM realtime.messages WHERE topic=ANY($1::text[]) AND event=$2',
+      [[owner, reader].map(user => `gugu:user:${user}:events`), 'im_revision_advanced'])).rows
+    expect(wakes).toHaveLength(1)
+    expect(wakes[0]).toMatchObject({ topic: `gugu:user:${reader}:events`, private: true, payload: { revision: Number(expectedRevision) } })
+    const unread = await asUser<{ cursor_seq: string; unread_count: string }>(reader,
+      'SELECT cursor_seq,unread_count FROM chat.list_unread_locators($1) WHERE stream_id=$2', [group, stream])
+    expect(unread).toEqual([{ cursor_seq: '0', unread_count: '1' }])
+    // Recreating the cursor through the same RPC is another single effective read.
+    const restored = await markRead()
+    expect((await changes(reader, expectedRevision)).operations).toEqual([
+      { revision: String(BigInt(expectedRevision) + 1n), event: 'member_stream_read_changed', payload: readPayload(restored) },
     ])
   })
 
