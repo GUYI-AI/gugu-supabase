@@ -11,13 +11,13 @@ DO $list$ DECLARE definition text; BEGIN
     END IF;
     definition:=replace(definition,'v_parent UUID;',
         'v_parent UUID; v_transfer_group TEXT; v_transfer_account TEXT;');
+    definition:=replace(definition,'chat.file_transfer_group(w.chat_id)','v_transfer_group');
+    definition:=replace(definition,'chat.file_transfer_account(v_actor)','v_transfer_account');
     definition:=replace(definition,'    RETURN QUERY' || chr(10) || '    WITH RECURSIVE tree AS (',
         $query$    v_transfer_group := chat.file_transfer_group(p_chat_id);
     v_transfer_account := chat.file_transfer_account(v_actor);
     RETURN QUERY
     WITH RECURSIVE tree AS ($query$);
-    definition:=replace(definition,'chat.file_transfer_group(w.chat_id)','v_transfer_group');
-    definition:=replace(definition,'chat.file_transfer_account(v_actor)','v_transfer_account');
     EXECUTE definition;
 END $list$;
 REVOKE ALL ON FUNCTION chat.workspace_list_as(text,text,integer,integer,text,text,text,boolean) FROM PUBLIC,anon,service_role;
