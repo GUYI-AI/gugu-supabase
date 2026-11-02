@@ -9,7 +9,7 @@ interface DatabaseClient {
 }
 interface Operation {
   event: string
-  payload: { chat_id?: string; entity_id?: string; through_seq?: number; tombstone?: boolean }
+  payload: { chat_id?: string; entity_id?: string; tombstone?: boolean }
 }
 const { Client } = createRequire(import.meta.url)('pg') as {
   Client: new (config: { connectionString: string }) => DatabaseClient
@@ -71,14 +71,14 @@ describe('personal message deletions in account sync', () => {
     expect((await database.query('SELECT deleted_at,deleted_for_user_ids FROM chat.messages WHERE id=$1', [message.id])).rows).toEqual([{ deleted_at: null, deleted_for_user_ids: [caller] }])
   })
 
-  it('r2: publishes one private clear boundary at the maximum seq and keeps subsequent messages', async () => {
+  it('r2: publishes each cleared message only to the caller and keeps subsequent messages', async () => {
     const sender = await human(), caller = await human(), peer = await human()
     const chat = await room(sender, [caller, peer])
-    await say(chat, sender)
+    const first = await say(chat, sender)
     const last = await say(chat, caller)
     const users = [sender, caller, peer], before = await Promise.all(users.map(cursor))
     await asUser(caller, 'SELECT chat.clear_messages_for_me($1)', [chat])
-    expect(await changes(caller, before[1]!)).toEqual([{ event: 'messages_cleared', revision: expect.any(String), payload: { chat_id: chat, through_seq: Number(last.seq), tombstone: true } }])
+    expect(await changes(caller, before[1]!)).toEqual([first, last].map((message) => ({ event: 'message_deleted', revision: expect.any(String), payload: { chat_id: chat, entity_id: message.id, tombstone: true } })))
     expect(await changes(sender, before[0]!)).toEqual([])
     expect(await changes(peer, before[2]!)).toEqual([])
     const next = await say(chat, sender)
@@ -104,20 +104,25 @@ describe('personal message deletions in account sync', () => {
     await database.query("INSERT INTO chat.chats(id,kind,name,creator_user_id,source_chat_id,source_message_id) VALUES ($1,'topic','Topic fixture',$2,$3,$4)", [topic, sender, chat, root.id])
     const reply = await say(topic, sender), before = await cursor(caller)
     await asUser(caller, 'SELECT chat.clear_messages_for_me($1)', [chat])
-    expect((await changes(caller, before)).filter((operation) => operation.event === 'messages_cleared')).toEqual([{ event: 'messages_cleared', revision: expect.any(String), payload: { chat_id: chat, through_seq: Number(root.seq), tombstone: true } }])
+    expect(await changes(caller, before)).toEqual([{ event: 'message_deleted', revision: expect.any(String), payload: { chat_id: chat, entity_id: root.id, tombstone: true } }])
     expect((await database.query('SELECT deleted_for_user_ids FROM chat.messages WHERE id=$1', [reply.id])).rows).toEqual([{ deleted_for_user_ids: [] }])
   })
 
-  it('emits boundary zero for an empty chat and includes already soft-deleted rows in the maximum', async () => {
+  it('does not publish empty, already personally deleted or soft-deleted rows again', async () => {
     const sender = await human(), caller = await human(), chat = await room(sender, [caller])
     let before = await cursor(caller)
     await asUser(caller, 'SELECT chat.clear_messages_for_me($1)', [chat])
-    expect(await changes(caller, before)).toEqual([{ event: 'messages_cleared', revision: expect.any(String), payload: { chat_id: chat, through_seq: 0, tombstone: true } }])
-    const last = await say(chat, sender)
-    await asUser(sender, 'SELECT * FROM chat.delete_message($1)', [last.id])
+    expect(await changes(caller, before)).toEqual([])
+    const personal = await say(chat, sender), global = await say(chat, sender)
+    await asUser(caller, 'SELECT * FROM chat.delete_message($1)', [personal.id])
+    await asUser(sender, 'SELECT * FROM chat.delete_message($1)', [global.id])
+    const remaining = await say(chat, sender)
     before = await cursor(caller)
     await asUser(caller, 'SELECT chat.clear_messages_for_me($1)', [chat])
-    expect(await changes(caller, before)).toEqual([{ event: 'messages_cleared', revision: expect.any(String), payload: { chat_id: chat, through_seq: Number(last.seq), tombstone: true } }])
+    expect(await changes(caller, before)).toEqual([{ event: 'message_deleted', revision: expect.any(String), payload: { chat_id: chat, entity_id: remaining.id, tombstone: true } }])
+    before = await cursor(caller)
+    await asUser(caller, 'SELECT chat.clear_messages_for_me($1)', [chat])
+    expect(await changes(caller, before)).toEqual([])
   })
 
   it('still refuses nonmembers without publishing a personal deletion', async () => {

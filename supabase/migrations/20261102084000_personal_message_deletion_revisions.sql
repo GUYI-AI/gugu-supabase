@@ -1,18 +1,5 @@
--- publish_user_revision delegates validation and writes to append_user_revision.
--- Keep the installed human-only recipient rule and the existing function attributes.
-DO $migration$
-DECLARE
-    definition TEXT := pg_get_functiondef('chat.append_user_revision(text,text,jsonb,boolean)'::regprocedure);
-    anchor CONSTANT TEXT := '''message_deleted'',';
-BEGIN
-    IF length(definition) - length(replace(definition, anchor, '')) <> length(anchor) THEN
-        RAISE EXCEPTION 'expected one message_deleted event in append_user_revision';
-    END IF;
-    EXECUTE replace(definition, anchor, anchor || E'\n      ''messages_cleared'',');
-END;
-$migration$;
-
--- The same captured boundary governs both the update and the private revision.
+-- Clearing a chat reuses the deletion event understood by every client.
+-- Publish only rows marked by this update, within the captured seq boundary.
 CREATE OR REPLACE FUNCTION chat.clear_messages_for_me(p_chat_id text) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'chat', 'public'
@@ -20,6 +7,7 @@ CREATE OR REPLACE FUNCTION chat.clear_messages_for_me(p_chat_id text) RETURNS vo
 DECLARE
     v_uid TEXT := (SELECT auth.uid()::text);
     v_through_seq BIGINT;
+    v_message_id TEXT;
 BEGIN
     IF NOT chat.is_member(p_chat_id) THEN
         RAISE EXCEPTION 'not a member of chat: %', p_chat_id;
@@ -28,20 +16,22 @@ BEGIN
     SELECT COALESCE(MAX(m.seq), 0) INTO v_through_seq
     FROM chat.messages m WHERE m.chat_id = p_chat_id;
 
-    UPDATE chat.messages
-    SET
-        deleted_for_user_ids =
-            CASE
-                WHEN deleted_for_user_ids @> jsonb_build_array(v_uid) THEN deleted_for_user_ids
-                ELSE deleted_for_user_ids || jsonb_build_array(v_uid)
-            END,
-        updated_at = now()
-    WHERE chat_id = p_chat_id
-      AND seq <= v_through_seq
-      AND deleted_at IS NULL;
-
-    PERFORM chat.publish_user_revision(v_uid, 'messages_cleared',
-        jsonb_build_object('chat_id', p_chat_id, 'through_seq', v_through_seq), true);
+    FOR v_message_id IN
+        WITH cleared AS (
+            UPDATE chat.messages
+            SET deleted_for_user_ids = deleted_for_user_ids || jsonb_build_array(v_uid),
+                updated_at = now()
+            WHERE chat_id = p_chat_id
+              AND seq <= v_through_seq
+              AND deleted_at IS NULL
+              AND NOT deleted_for_user_ids @> jsonb_build_array(v_uid)
+            RETURNING id, seq
+        )
+        SELECT id FROM cleared ORDER BY seq
+    LOOP
+        PERFORM chat.publish_user_revision(v_uid, 'message_deleted',
+            jsonb_build_object('chat_id', p_chat_id, 'entity_id', v_message_id), true);
+    END LOOP;
 END;
 $$;
 

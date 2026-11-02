@@ -192,7 +192,7 @@ describe('all eleven community user-event producers', () => {
       'delivery_changed', 'device_changed', 'friend_requests_changed', 'friendship_changed',
       'group_collab_changed', 'group_invitations_changed', 'gugu_decision_event',
       'member_read_changed', 'member_stream_read_changed', 'message_created',
-      'message_deleted', 'messages_cleared', 'presence_changed', 'reaction_changed', 'workspace_changed',
+      'message_deleted', 'presence_changed', 'reaction_changed', 'workspace_changed',
     ]
     for (const event of allowed) {
       const { rows: headBefore } = await db.query<{ revision: string }>('SELECT revision FROM chat.account_revision_heads WHERE user_id=$1', [human])
