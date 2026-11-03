@@ -82,6 +82,10 @@ export const budgetCases = [
     const message = await w.post(w.busy, 'from-sync')
     const next = (await as(db, w.viewer, 'SELECT chat.sync_since($1,100) AS page', [messageCursor]))[0].page.operations
     assert.equal(next.find(operation => operation.event === 'message_created' && operation.payload.entity_id === message).payload.message.preview, 'from-sync')
+    await db.query('UPDATE chat.chat_members SET conversation_deleted_at=now() WHERE chat_id=$1 AND user_id=$2', [w.busy,w.viewer])
+    assert.deepEqual(await as(db, w.viewer, 'SELECT * FROM chat.list_unread_locators($1)', [w.busy]), [])
+    assert.deepEqual(await as(db, w.viewer, 'SELECT * FROM chat.list_unread_locators_for_chats($1)', [[w.busy]]), [])
+    assert.deepEqual((await as(db, w.viewer, 'SELECT * FROM chat.list_unread_locators_for_chats($1)', [[w.busy,w.quiet]])).map(row => row.chat_id), [w.quiet])
   }],
   ['unread hydrate runs one shared set query while the legacy signature delegates once', async db => {
     const w = await world(db)

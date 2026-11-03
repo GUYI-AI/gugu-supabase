@@ -10,7 +10,7 @@ test('presence DDL and its ledger retain the installer transaction and lock unti
     const url = new URL(process.env.GUGU_INSTALL_TEST_DATABASE_URL ?? '')
     assert.ok(['postgres:', 'postgresql:'].includes(url.protocol))
     assert.ok(['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname))
-    const release = releases.find(row => row.version === '20261103010100_presence_publication_budget')
+    const release = releases.find(row => row.version === '20261103140100_presence_publication_budget')
     assert.ok(release)
     let wrapped
     // Obtain the exact request emitted by the real installer, without changing its implementation.

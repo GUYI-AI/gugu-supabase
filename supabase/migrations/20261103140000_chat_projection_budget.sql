@@ -146,6 +146,7 @@ BEGIN
       JOIN chat.chats conversation ON conversation.id = member.chat_id
       WHERE member.user_id = v_user
         AND member.inbox_published_at IS NOT NULL
+        AND member.conversation_deleted_at IS NULL
         AND conversation.status IN ('active', 'stopped', 'paused')
         AND (p_chat_ids IS NULL OR member.chat_id = ANY(p_chat_ids))
       UNION ALL
@@ -158,6 +159,7 @@ BEGIN
       WHERE stream.user_id = v_user
         AND stream.stream_kind = 'thread'
         AND member.inbox_published_at IS NOT NULL
+        AND member.conversation_deleted_at IS NULL
         AND conversation.status IN ('active', 'stopped', 'paused')
         AND (p_chat_ids IS NULL OR stream.chat_id = ANY(p_chat_ids))
       UNION ALL
@@ -174,6 +176,7 @@ BEGIN
         )
         AND root.deleted_at IS NULL
         AND member.inbox_published_at IS NOT NULL
+        AND member.conversation_deleted_at IS NULL
         AND conversation.kind = 'group'
         AND conversation.status IN ('active', 'stopped', 'paused')
         AND (p_chat_ids IS NULL OR root.chat_id = ANY(p_chat_ids))

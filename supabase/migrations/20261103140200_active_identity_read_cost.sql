@@ -58,7 +58,8 @@ UPDATE chat.chat_members m SET user_removed_at=u.removed_at
 CREATE OR REPLACE VIEW chat.active_members WITH (security_invoker=true) AS
   SELECT m.chat_id,m.user_id,m.role,m.last_read_seq,m.version,m.joined_at,m.updated_at,
     m.is_pinned,m.contract,m.triggers,m.notification_level,m.listen_mode,m.hide_history_before,
-    m.is_marked_unread,m.inbox_published_at,m.join_context_shown_at,m.joined_ingest_seq
+    m.is_marked_unread,m.inbox_published_at,m.join_context_shown_at,m.joined_ingest_seq,
+    m.conversation_deleted_at
   FROM chat.chat_members m WHERE m.user_removed_at IS NULL;
 
 CREATE OR REPLACE VIEW identity.active_users WITH (security_invoker=true) AS
