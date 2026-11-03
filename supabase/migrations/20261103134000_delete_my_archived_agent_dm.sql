@@ -20,13 +20,12 @@ BEGIN
     SELECT 1 FROM identity.users u WHERE u.id = caller AND u.type = 'human' AND u.removed_at IS NULL
   ) THEN RAISE EXCEPTION 'conversation_delete_owner_required' USING ERRCODE = '42501'; END IF;
 
-  -- Locate without locks, then acquire identity -> chat -> member locks in the shared order.
+  -- Do not lock identity rows: archival locks revision heads before updating identity.
+  -- This path locks chat -> own member -> revision heads, then rechecks archival under the shared head.
   -- Physical seats are intentional here: a removed agent's historical identity still belongs to its owner.
   SELECT u.* INTO peer FROM chat.chat_members m JOIN identity.users u ON u.id = m.user_id
   WHERE m.chat_id = p_chat_id AND u.type = 'agent' AND u.owner_user_id = caller;
   IF NOT FOUND THEN RAISE EXCEPTION 'conversation_dm_identity_unverified' USING ERRCODE = '42501'; END IF;
-  PERFORM 1 FROM identity.users u WHERE u.id IN (caller, peer.id) ORDER BY u.id FOR SHARE;
-  SELECT u.* INTO peer FROM identity.users u WHERE u.id = peer.id;
   PERFORM 1 FROM chat.chats c WHERE c.id = p_chat_id AND c.kind = 'dm' FOR UPDATE;
   IF NOT FOUND OR NOT EXISTS (
     SELECT 1 FROM chat.chat_members m WHERE m.chat_id = p_chat_id AND m.user_id = caller
@@ -35,23 +34,36 @@ BEGIN
     OR peer.owner_user_id IS DISTINCT FROM caller THEN
     RAISE EXCEPTION 'conversation_dm_identity_unverified' USING ERRCODE = '42501';
   END IF;
-  IF EXISTS (
-    SELECT 1 FROM identity.agent_provisions p WHERE p.agent_user_id = peer.id
-      AND p.owner_user_id = caller AND p.member_key = 'assistant'
-  ) THEN RAISE EXCEPTION 'conversation_assistant_in_use' USING ERRCODE = '55000'; END IF;
-  IF peer.session_archived_at IS NULL AND peer.removed_at IS NULL THEN
-    RAISE EXCEPTION 'conversation_agent_in_use' USING ERRCODE = '55000';
-  END IF;
-
   SELECT m.conversation_deleted_at INTO deleted_at FROM chat.chat_members m
   WHERE m.chat_id = p_chat_id AND m.user_id = caller FOR UPDATE;
-  IF NOT FOUND THEN RAISE EXCEPTION 'conversation_delete_owner_required' USING ERRCODE = '42501'; END IF;
+  IF NOT FOUND OR NOT EXISTS (
+    SELECT 1 FROM identity.users u WHERE u.id = caller AND u.type = 'human' AND u.removed_at IS NULL
+  ) THEN RAISE EXCEPTION 'conversation_delete_owner_required' USING ERRCODE = '42501'; END IF;
   already_deleted := deleted_at IS NOT NULL;
   IF NOT already_deleted THEN
+    SELECT u.* INTO peer FROM identity.users u WHERE u.id = peer.id;
+    IF peer.owner_user_id IS DISTINCT FROM caller THEN
+      RAISE EXCEPTION 'conversation_dm_identity_unverified' USING ERRCODE = '42501';
+    END IF;
+    IF EXISTS (
+      SELECT 1 FROM identity.agent_provisions p WHERE p.agent_user_id = peer.id
+        AND p.owner_user_id = caller AND p.member_key = 'assistant'
+    ) THEN RAISE EXCEPTION 'conversation_assistant_in_use' USING ERRCODE = '55000'; END IF;
+    IF peer.session_archived_at IS NULL AND peer.removed_at IS NULL THEN
+      RAISE EXCEPTION 'conversation_agent_in_use' USING ERRCODE = '55000';
+    END IF;
     UPDATE chat.chat_members m SET conversation_deleted_at = clock_timestamp()
     WHERE m.chat_id = p_chat_id AND m.user_id = caller
     RETURNING m.conversation_deleted_at INTO deleted_at;
-    -- Existing own-member revision carries the same membership key; no new event or permission change.
+    -- The existing member trigger holds the same ordered revision heads as archival.
+    -- A restore/removal committed while we waited must win; an exception rolls back the update and revision.
+    IF NOT EXISTS (
+      SELECT 1 FROM identity.users u WHERE u.id = caller AND u.type = 'human' AND u.removed_at IS NULL
+    ) THEN RAISE EXCEPTION 'conversation_delete_owner_required' USING ERRCODE = '42501'; END IF;
+    IF EXISTS (SELECT 1 FROM identity.users u WHERE u.id = peer.id
+      AND u.session_archived_at IS NULL AND u.removed_at IS NULL) THEN
+      RAISE EXCEPTION 'conversation_agent_in_use' USING ERRCODE = '55000';
+    END IF;
   END IF;
   RETURN jsonb_build_object('chat_id', p_chat_id, 'deleted_at', deleted_at, 'already', already_deleted);
 END;

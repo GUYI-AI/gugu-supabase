@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
 
@@ -62,6 +63,7 @@ it('durably deletes only the owner list record and preserves membership, identit
 
 it('replays the original deletion receipt without publishing a second revision', async () => {
   const first = await remove()
+  await db.query('UPDATE identity.users SET session_archived_at=NULL WHERE id=$1',[agent])
   const revision = (await db.query('SELECT revision FROM chat.account_revision_heads WHERE user_id=$1',[owner])).rows
   expect(await remove()).toEqual({...first,already:true})
   expect((await db.query('SELECT revision FROM chat.account_revision_heads WHERE user_id=$1',[owner])).rows).toEqual(revision)
@@ -98,7 +100,60 @@ it('retains deletion access to an already removed historical agent identity', as
   expect((await as(owner, () => db.query('SELECT sender_user_id FROM chat.messages_view WHERE id=$1',[message]))).rows).toEqual([{sender_user_id:agent}])
 })
 
+it.each(['restore','remove-owner'])('serializes deletion against a competing %s without a deadlock', async (operation) => {
+  await db.query('COMMIT')
+  const restoring = new pg.Client({connectionString:process.env.GUGU_INTEGRATION_DATABASE_URL})
+  await restoring.connect()
+  await restoring.query("SET statement_timeout='5s'")
+  let outcome: Promise<unknown> | undefined
+  try {
+    await restoring.query('BEGIN')
+    await restoring.query('SELECT 1 FROM chat.account_revision_heads WHERE user_id=$1 FOR NO KEY UPDATE',[owner])
+    await db.query('BEGIN')
+    const pid = (await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+    const blocker = (await restoring.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+    outcome = remove().then(() => 'deleted', (error: Error) => error.message)
+    const deadline = Date.now()+5000
+    for (;;) {
+      if ((await restoring.query('SELECT $2::int=ANY(pg_blocking_pids($1::int)) AS waiting',[pid,blocker])).rows[0].waiting) break
+      if (Date.now()>deadline) throw new Error('Deletion did not reach the competing revision head')
+      await new Promise(resolve => setTimeout(resolve,10))
+    }
+    await restoring.query("SELECT set_config('request.jwt.claims',$1,true)",[JSON.stringify({sub:owner,role:'authenticated'})])
+    await restoring.query('SET LOCAL ROLE authenticated')
+    if (operation === 'restore') await restoring.query('SELECT identity.set_agent_session_archival($1,$2,$3,1,NULL,$4)',
+      [agent,device,randomUUID(),JSON.stringify([{id:randomUUID(),archived_at:'2026-11-02T08:41:00Z',restored_at:'2026-11-03T03:48:01Z'}])])
+    else await restoring.query('SELECT identity.archive_user($1,true)',[owner])
+    await restoring.query('COMMIT')
+    expect(await outcome).toBe(operation === 'restore' ? 'conversation_agent_in_use' : 'conversation_delete_owner_required')
+    await db.query('ROLLBACK')
+    expect((await db.query('SELECT conversation_deleted_at FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[dm,owner])).rows[0].conversation_deleted_at).toBeNull()
+  } finally {
+    await restoring.query('ROLLBACK'); await outcome; await restoring.end(); await db.query('ROLLBACK')
+    await db.query('DELETE FROM chat.chats WHERE id=ANY($1)',[[dm,group]])
+    await db.query('DELETE FROM identity.users WHERE id=$1',[agent])
+    await db.query('DELETE FROM identity.gugu_devices WHERE device_id=$1',[device])
+    await db.query('DELETE FROM auth.users WHERE id=ANY($1::uuid[])',[[owner,stranger]])
+  }
+})
+
 it('keeps API roles from updating the personal deletion field or invoking the RPC anonymously', async () => {
   expect((await db.query("SELECT has_column_privilege('authenticated','chat.chat_members','conversation_deleted_at','UPDATE') AS allowed")).rows[0].allowed).toBe(false)
   for (const role of ['anon','service_role']) expect((await db.query('SELECT has_function_privilege($1,$2,$3) AS allowed',[role,'chat.delete_my_dm_conversation(text)','EXECUTE'])).rows[0].allowed).toBe(false)
+})
+
+// Execute the operational SQL inside the test transaction so the shared disposable fixture is restored afterwards.
+it('rolls back list behavior with the original API grants and retains deletion state for forward recovery', async () => {
+  await remove()
+  await db.query('SAVEPOINT operational_rollback')
+  const rollback = readFileSync(new URL('../../../ops/rollback-delete-my-archived-agent-dm.sql',import.meta.url),'utf8')
+    .replace(/^BEGIN;$/m,'').replace(/^COMMIT;$/m,'')
+  await db.query(rollback)
+  expect(await listed()).toContain(dm)
+  expect((await db.query("SELECT has_function_privilege('authenticated','chat.delete_my_dm_conversation(text)','EXECUTE') AS allowed")).rows[0].allowed).toBe(false)
+  for (const role of ['anon','service_role']) expect((await db.query('SELECT has_function_privilege($1,$2,$3) AS allowed',[role,'chat.list_my_chats_as(text)','EXECUTE'])).rows[0].allowed).toBe(false)
+  expect((await db.query('SELECT conversation_deleted_at FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[dm,owner])).rows[0].conversation_deleted_at).not.toBeNull()
+  await db.query('ROLLBACK TO SAVEPOINT operational_rollback')
+  expect(await listed()).not.toContain(dm)
+  expect(await remove()).toMatchObject({already:true})
 })

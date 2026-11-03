@@ -19,4 +19,6 @@ BEGIN
     ORDER BY c.last_message_at DESC NULLS LAST,c.created_at DESC;
 END;
 $$;
+REVOKE ALL ON FUNCTION chat.list_my_chats_as(text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION chat.list_my_chats_as(text) TO authenticated;
 COMMIT;
