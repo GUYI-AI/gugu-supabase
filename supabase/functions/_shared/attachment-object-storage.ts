@@ -42,7 +42,11 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
         if(!config.directSign) throw new ObjectStorageError(503,'not_configured','Origin signing is not configured')
         return config.directSign(key,false,now,permit)
       }
-      return cdnSignedUrl(cdn,key,{image,now,rand:permit?.requestId.replace(/-/g,''),expiresSeconds:permit?.expiresSeconds})
+      const signed=cdnSignedUrl(cdn,key,{image,now,rand:permit?.requestId.replace(/-/g,''),expiresSeconds:permit?.expiresSeconds})
+      if(!permit||!config.directSign) return signed
+      // Both capabilities refer to this authenticated reservation and immutable object, with the same limits.
+      const origin=await config.directSign(key,false,now,{...permit,direct:true})
+      return {...signed,originUrl:origin.url,originExpiresAt:origin.expiresAt}
     },
     invalidate: async (key, image) => { await refreshCdn(oss, fetch, cdn, key, image) },
   }

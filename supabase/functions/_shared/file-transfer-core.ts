@@ -38,7 +38,7 @@ export async function handleFileDownload(deps:AttachmentsDeps,user:string,body:R
       })
       :{url:await deps.storageSignedUrl(row.bucket_id,row.object_name,60,traffic),thumbUrl:null}
     const key=row.transfer_id?await call(deps.serviceRpc,'file_temporary_key_for',{p_download:row.download_id,p_account:user}):undefined
-    return {...row,url:signed.url,thumb_url:signed.thumbUrl,expires_at:row.expires_at,...(key?{key,codec:'secretstream-v1'}:{})}
+    return {...row,url:signed.url,thumb_url:signed.thumbUrl,expires_at:row.expires_at,...('originUrl' in signed&&signed.originUrl?{origin_url:signed.originUrl,origin_expires_at:signed.originExpiresAt}:{}),...(key?{key,codec:'secretstream-v1'}:{})}
   } catch(error) {
     if(error instanceof ObjectStorageError&&error.status===503) throw new Refusal(503,'not_configured',error.message)
     if(error instanceof ObjectStorageError&&error.status===410) throw new Refusal(410,'expired',error.message)
