@@ -99,7 +99,7 @@ afterAll(async () => { await database?.end() })
 beforeEach(async () => {
   await database.query('BEGIN')
   owner = await human('Owner')
-  agent = await agentOf(owner, 'Owner Agent')
+  agent = await agentOf(await human('Agent owner'), 'Friend Agent')
 })
 afterEach(async () => {
   if (!database) return
