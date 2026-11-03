@@ -21,6 +21,8 @@ beforeEach(async () => {
     await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,$2,'Personal deletion fixture',$3)", [id,kind,owner])
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [id,owner,agent])
   }
+  // This is an already opened legacy DM, not an unpublished freshly allocated seat.
+  await db.query('UPDATE chat.chat_members SET inbox_published_at=clock_timestamp() WHERE chat_id=$1',[dm])
   await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,created_at) VALUES($1,$2,$3,'Retained historical sender','2026-11-01T03:48:01.246266Z')", [message,dm,agent])
   await db.query(`INSERT INTO chat.workspace_items(id,chat_id,kind,filename,content_type,inline_text,size_bytes,created_by)
     VALUES($1,$2,'document','retained.html','text/html','<h1>Retained version 1</h1>',27,$3)`, [file,dm,owner])
@@ -170,6 +172,7 @@ it('keeps deletion out of cold snapshots, unread locators and new-message projec
   // Incremental sync names the original membership key. Read its authoritative personal state, not a membership tombstone.
   expect((await as(owner,() => db.query('SELECT conversation_deleted_at FROM chat.active_members WHERE chat_id=$1 AND user_id=$2',[dm,owner]))).rows[0].conversation_deleted_at.toISOString()).toBe(new Date(receipt.deleted_at).toISOString())
   await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'After personal deletion')",[randomUUID(),dm,owner])
+  expect((await as(owner,() => db.query('SELECT chat.open_dm($1) AS id',[agent]))).rows[0].id).toBe(dm)
   const cold = await snapshot()
   expect(cold.chats.map((row: {id:string}) => row.id)).not.toContain(dm)
   for (const family of ['memberships','previews','unread']) expect(cold[family].map((row: {chat_id:string}) => row.chat_id)).not.toContain(dm)
