@@ -92,6 +92,22 @@ it('maintains one identity fact synchronously, with no member writes, and follow
 })
 
 it('restores predecessor views on operational rollback without changing source rows, ledger or view access', async () => {
+  const definitions = async () => (await db.query(`SELECT oid::regclass::text AS name,pg_get_viewdef(oid) AS definition
+    FROM pg_class WHERE oid IN ('chat.active_members'::regclass,'identity.active_users'::regclass) ORDER BY 1`)).rows
+  // Compare the complete canonical definitions from the immutable predecessors;
+  // pg_get_viewdef may omit a redundant qualifier such as m.user_id.
+  await db.query('SAVEPOINT predecessor_views')
+  for (const [name, file] of [
+    ['chat.active_members', '20261103134000_delete_my_archived_agent_dm.sql'],
+    ['identity.active_users', '20261103061000_task_agent_clash_suffix.sql'],
+  ]) {
+    const source = readFileSync(new URL(`../../../supabase/migrations/${file}`, import.meta.url), 'utf8')
+    const start = source.indexOf(`CREATE OR REPLACE VIEW ${name} `)
+    expect(start).toBeGreaterThanOrEqual(0)
+    await db.query(source.slice(start, source.indexOf(';', start) + 1))
+  }
+  const predecessors = await definitions()
+  await db.query('ROLLBACK TO SAVEPOINT predecessor_views')
   const viewAccess = async () => (await db.query(`SELECT oid::regclass::text AS name,relacl::text,reloptions,
     (SELECT jsonb_agg(attname ORDER BY attnum) FROM pg_attribute WHERE attrelid=c.oid AND attnum>0 AND NOT attisdropped) AS columns
     FROM pg_class c WHERE oid IN ('chat.active_members'::regclass,'identity.active_users'::regclass) ORDER BY 1`)).rows
@@ -106,8 +122,7 @@ it('restores predecessor views on operational rollback without changing source r
   await db.query(rollback)
   expect((await db.query("SELECT to_regclass('identity.member_liveness') AS cache,to_regprocedure('identity.sync_member_liveness()') AS sync")).rows).toEqual([{ cache: null, sync: null }])
   expect(await viewAccess()).toEqual(access)
-  expect((await db.query("SELECT pg_get_viewdef('chat.active_members'::regclass) AS definition")).rows[0].definition).toContain('identity.user_is_live(m.user_id)')
-  expect((await db.query("SELECT pg_get_viewdef('identity.active_users'::regclass) AS definition")).rows[0].definition).toContain('identity.user_is_live(users.id)')
+  expect(await definitions()).toEqual(predecessors)
   expect(await as('authenticated', owner, 'SELECT * FROM chat.active_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[room, secondRoom]])).toEqual(expected)
   expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[room, secondRoom]])).rows).toEqual(seats)
   expect((await db.query('SELECT * FROM identity.users WHERE id=ANY($1) ORDER BY id', [[owner, peer, outsider, agent]])).rows).toEqual(identities)
