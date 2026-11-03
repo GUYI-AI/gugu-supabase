@@ -25,8 +25,11 @@ async function rejected(action: () => Promise<unknown>) {
 }
 async function agent(archived = false, account = owner) {
   const id = randomUUID()
-  await db.query(`INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id)
-    VALUES($1,'agent','Device removal agent',$2,$3)`, [id, account, device])
+  const row = (await db.query(`INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id,mycel_id)
+    VALUES($1,'agent','Device removal agent',$2,$3,nextval('identity.mycel_id_seq'))
+    RETURNING mycel_id,gugu_number`, [id, account, device])).rows[0]
+  expect(row.gugu_number).toBeTypeOf('number')
+  expect(row.gugu_number).toBe(row.mycel_id)
   if (archived) {
     await asOwner()
     if (account !== owner) await db.query("SELECT set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: account, role: 'authenticated' })])
@@ -35,7 +38,7 @@ async function agent(archived = false, account = owner) {
   return id
 }
 async function identities(ids: string[]) {
-  return (await db.query('SELECT id,device_id,removed_at FROM identity.users WHERE id=ANY($1) ORDER BY id', [ids])).rows
+  return (await db.query('SELECT id,device_id,removed_at,mycel_id,gugu_number FROM identity.users WHERE id=ANY($1) ORDER BY id', [ids])).rows
 }
 async function setting(value: string) { await db.query('SELECT set_config($1,$2,true)', [switchName, value]) }
 
@@ -81,6 +84,8 @@ describe('remove_device with retained archived identities', () => {
       expect(row.removed_at).not.toBeNull()
       const prior = before.find(item => item.id === row.id)!
       if (prior.removed_at) expect(row.removed_at).toEqual(prior.removed_at)
+      expect(row.gugu_number).toBe(prior.gugu_number)
+      expect(row.mycel_id).toBe(prior.mycel_id)
     }
     expect((await db.query('SELECT id FROM identity.active_users WHERE id=ANY($1)', [ids])).rows).toEqual([])
     expect((await db.query('SELECT current_setting($1,true) AS value', [switchName])).rows[0].value).toBe('')
@@ -119,6 +124,30 @@ describe('remove_device with retained archived identities', () => {
     const id = await agent(true)
     await setting(otherDevice)
     expect((await rejected(() => db.query('UPDATE identity.users SET device_id=NULL WHERE id=$1', [id]))).message).toContain('device_id is immutable')
+  })
+
+  it('P1 detaches a numbered archived identity without changing any other column', async () => {
+    const id = await agent(true)
+    const before = (await identities([id]))[0]
+    expect(before.gugu_number).toBeTypeOf('number')
+    await setting(device)
+    await db.query('UPDATE identity.users SET device_id=NULL WHERE id=$1', [id])
+    expect((await identities([id]))[0]).toEqual({ ...before, device_id: null })
+  })
+
+  it('discovers generated columns dynamically while still protecting mycel_id', async () => {
+    await db.query(`ALTER TABLE identity.users ADD COLUMN remove_device_generated_fixture bigint
+      GENERATED ALWAYS AS (mycel_id::bigint + 1) STORED`)
+    const id = await agent(true)
+    const before = (await identities([id]))[0]
+    await setting(device)
+    const error = await rejected(() => db.query('UPDATE identity.users SET device_id=NULL,mycel_id=mycel_id+1000000 WHERE id=$1', [id]))
+    expect(error.code).toBe('55000')
+    expect((await identities([id]))[0]).toEqual(before)
+    await db.query('UPDATE identity.users SET device_id=NULL WHERE id=$1', [id])
+    expect((await identities([id]))[0]).toEqual({ ...before, device_id: null })
+    expect((await db.query('SELECT remove_device_generated_fixture FROM identity.users WHERE id=$1', [id])).rows[0].remove_device_generated_fixture)
+      .toBe(String(before.mycel_id + 1))
   })
 
   it('the CHECK still rejects a live agent with no device', async () => {

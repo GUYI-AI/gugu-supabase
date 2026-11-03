@@ -48,13 +48,19 @@ BEGIN
     END IF;
     IF OLD.device_id IS DISTINCT FROM NEW.device_id$guard$);
       WHEN 'guard_removed_identity' THEN
+        definition := replace(definition, 'BEGIN', 'DECLARE v_detach_columns text[];' || chr(10) || 'BEGIN');
         definition := replace(definition,
           '  IF OLD.removed_at IS NOT NULL AND NEW IS DISTINCT FROM OLD THEN', $guard$
   IF OLD.type = 'agent' AND OLD.removed_at IS NOT NULL
      AND OLD.device_id = NULLIF(current_setting('identity.device_removal_device_id', true), '')
-     AND NEW.device_id IS NULL
-     AND to_jsonb(NEW) - 'device_id' = to_jsonb(OLD) - 'device_id' THEN
-    RETURN NEW;
+     AND NEW.device_id IS NULL THEN
+    -- BEFORE triggers see NULL for generated columns; compare their sources.
+    SELECT ARRAY['device_id'] || COALESCE(array_agg(a.attname::text), ARRAY[]::text[])
+      INTO v_detach_columns FROM pg_catalog.pg_attribute a
+      WHERE a.attrelid = TG_RELID AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated <> '';
+    IF to_jsonb(NEW) - v_detach_columns = to_jsonb(OLD) - v_detach_columns THEN
+      RETURN NEW;
+    END IF;
   END IF;
   IF OLD.removed_at IS NOT NULL AND NEW IS DISTINCT FROM OLD THEN$guard$);
       WHEN 'assistant_panel_home_changed' THEN
