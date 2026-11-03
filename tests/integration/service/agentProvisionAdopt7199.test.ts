@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
  *   · complete 不发欢迎消息(message_id / client_message_id 为 NULL);
  *   · cancel 在 ready 之前只撤这次搬家,原有的 agent 不动;ready 之后拒绝;
  *   · users.device_id 照旧不可改 —— 只有 settle 这条路径、且只对被搬的那一个 agent 放行;
- *   · 不带 existing 的普通开通原样不受影响。
+ *   · 普通开通完成但不再往旧私聊写欢迎语;助理仍写欢迎语。
  */
 
 interface QueryResult<Row> { rows: Row[] }
@@ -465,8 +465,8 @@ describe('开通 saga 收养已有的 agent(搬家)', () => {
     })
   })
 
-  describe('不带 existing 的普通开通原样不变', () => {
-    it('start → claim → prepare → settle → complete:铸新身份、欢迎消息落进私聊、没有 adopt 标记、没有 retire', async () => {
+  describe('不带 existing 的开通与旧私聊只读边界', () => {
+    it('start → claim → prepare → settle → complete:铸新身份、跳过旧私聊欢迎语、没有 adopt 标记、没有 retire', async () => {
       await world(async (w) => {
         const provision = randomUUID()
         const op = randomUUID()
@@ -492,17 +492,18 @@ describe('开通 saga 收养已有的 agent(搬家)', () => {
         expect(await commandsOf(r.agent_user_id!, 'agent.retire')).toHaveLength(0)
         const completed = await asUser(w.owner, async () =>
           (await db.query<{ message_id: string | null; already: boolean }>('SELECT * FROM identity.complete_agent_provision($1)', [provision])).rows[0])
-        expect(completed.message_id).toBeTruthy()
+        expect(completed.message_id).toBeNull()
+        expect((await db.query('SELECT 1 FROM chat.messages WHERE chat_id=$1', [r.dm_chat_id])).rows).toEqual([])
         expect(completed.already).toBe(false)
       })
     })
 
-    // 欢迎模板是开通一完成就秒回的那一句:每个 agent 都发,助理也发;写成开通时的界面语言(blueprint.locale)。
+    // 只有权威 member_key=assistant 的欢迎模板仍写进私聊,并保留 locale 与重放语义。
     const provisionWithLocale = async (w: World, locale: string | null, firstTask: string | null) => {
       const provision = randomUUID()
       const op = randomUUID()
       const m = {
-        provision_id: provision, member_key: 'single', display_name: 'Gugu', agent_type: 'claude-code',
+        provision_id: provision, member_key: firstTask ? 'assistant' : 'single', display_name: 'Gugu', agent_type: 'claude-code',
         project_path: '', inherit_memory: false, history_import_required: false,
       }
       const blueprint = { kind: 'single', members: [m], ...(locale ? { locale } : {}) }
@@ -512,7 +513,7 @@ describe('开通 saga 收养已有的 agent(搬家)', () => {
           [op, w.newDevice, JSON.stringify(blueprint), firstTask ? 'claude' : null, firstTask],
         )
         await db.query('SELECT identity.claim_provision_slots($1)', [op])
-        await db.query('SELECT identity.prepare_agent_provision($1, $2, $3, $4, $5, $6, $7, NULL, NULL, NULL, NULL)', [provision, op, 'single', w.newDevice, 'Gugu', 'claude-code', ''])
+        await db.query('SELECT identity.prepare_agent_provision($1, $2, $3, $4, $5, $6, $7, NULL, NULL, NULL, NULL)', [provision, op, m.member_key, w.newDevice, 'Gugu', 'claude-code', ''])
       })
       const r = await row(provision)
       await finishCreate(provision)
@@ -532,10 +533,10 @@ describe('开通 saga 收养已有的 agent(搬家)', () => {
       })
     })
 
-    it('普通 agent:中文界面写中文;没带 locale(旧客户端)照旧中文', async () => {
+    it('普通 agent:任何 locale 或旧客户端都不往旧私聊写欢迎语', async () => {
       await world(async (w) => {
-        expect(await provisionWithLocale(w, 'zh-CN', null)).toEqual(['我是 Gugu，已就位。有什么可以帮你的，直接说。'])
-        expect(await provisionWithLocale(w, null, null)).toEqual(['我是 Gugu，已就位。有什么可以帮你的，直接说。'])
+        expect(await provisionWithLocale(w, 'zh-CN', null)).toEqual([])
+        expect(await provisionWithLocale(w, null, null)).toEqual([])
       })
     })
 

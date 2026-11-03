@@ -86,7 +86,7 @@ async function seed(): Promise<void> {
   )
   await database.query(
     `INSERT INTO chat.chat_members (chat_id, user_id, role)
-     VALUES ($1,$3,'owner'),($1,$4,'member'),($1,$5,'member'),($2,$3,'owner'),($2,$5,'member')`,
+     VALUES ($1,$3,'owner'),($1,$4,'member'),($1,$5,'member'),($2,$3,'owner')`,
     [GROUP, DM, OWNER, BYSTANDER, AGENT],
   )
   const messages: Array<[string, string, string, string[] | null, string | null, string[]]> = [
@@ -104,6 +104,8 @@ async function seed(): Promise<void> {
       [`${id}-it-5919`, chatId, sender, to, replyTo && `${replyTo}-it-5919`, JSON.stringify(deletedFor)],
     )
   }
+  // Complete the retained ordinary-agent DM only after its historical messages exist.
+  await database.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [DM, AGENT])
   await database.query(
     `INSERT INTO chat.message_reactions (message_id, user_id, emoji)
      VALUES ('m3-it-5919',$1,'+1'),('m3-it-5919',$2,'tada'),('m2-it-5919',$3,'heart')`,

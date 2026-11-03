@@ -39,8 +39,10 @@ beforeAll(async () => {
     await must(owner.schema('chat').rpc('add_group_agent', { p_chat_id: id, p_agent_user_id: agent, p_message: null, p_as_user_id: ownerId }))
   }
   await must(admin.schema('chat').from('chats').insert({ id: dm, kind: 'dm', creator_user_id: ownerId }))
-  await must(admin.schema('chat').from('chat_members').insert([{ chat_id: dm, user_id: ownerId, role: 'owner' }, { chat_id: dm, user_id: agent, role: 'member' }]))
-  await must(owner.schema('chat').from('messages').insert({ id: randomUUID(), chat_id: dm, sender_user_id: agent, content: 'Historical sender survives' }))
+  await must(admin.schema('chat').from('chat_members').insert({ chat_id: dm, user_id: ownerId, role: 'owner' }))
+  // Historical fixture predates the complete ordinary-agent DM; do not bypass the write guard.
+  await must(admin.schema('chat').from('messages').insert({ id: randomUUID(), chat_id: dm, sender_user_id: agent, content: 'Historical sender survives' }))
+  await must(admin.schema('chat').from('chat_members').insert({ chat_id: dm, user_id: agent, role: 'member' }))
 }, 60_000)
 afterAll(async () => {
   if (!admin) return

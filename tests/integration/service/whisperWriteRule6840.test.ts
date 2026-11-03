@@ -133,13 +133,18 @@ describe('whisper write rule (#6840)', () => {
 
   // L2 在 #84 上挡下的一格:私聊里人给 agent 的消息点表情,chat.notify_agent_of_reaction() 在私聊里写一条
   // is_whisper 的系统提醒(sender 为 NULL)。按 chat 种类拦会让这次点表情整个失败。
-  it('lets the reaction notice in a DM through: the person reacts, the agent gets told', async () => {
+  it('lets the reaction notice in a personal assistant DM through: the person reacts, the assistant gets told', async () => {
     await inRollback(async () => {
       await seed()
       await database.query(`INSERT INTO chat.chats (id, kind, name, creator_user_id) VALUES ($1,'dm',NULL,$2)`, [agentDm, owner])
       for (const user of [owner, agent]) {
         await database.query(`INSERT INTO chat.chat_members (chat_id, user_id, role) VALUES ($1,$2,'member')`, [agentDm, user])
       }
+      // Only the personal assistant retains a writable own-agent DM.
+      const operation = uid(31)
+      await database.query("INSERT INTO identity.agent_provision_operations(id,owner_user_id,device_id,kind,payload_hash,blueprint,phase) VALUES($1,$2,$3,'single','fixture','{}','completed')", [operation, owner, 'dev-6840'])
+      await database.query(`INSERT INTO identity.agent_provisions(id,owner_user_id,operation_id,member_key,device_id,display_name,agent_type,inherit_memory,history_import_required,payload_hash,agent_user_id,provisioned_agent_user_id,dm_chat_id,phase)
+        VALUES($1,$2,$3,'assistant',$4,'Assistant fixture','claude-code',false,false,'fixture',$5::text,$5::uuid,$6,'completed')`, [uid(32), owner, operation, 'dev-6840', agent, agentDm])
       await database.query(`INSERT INTO chat.messages (id, chat_id, sender_user_id, content, content_type) VALUES ($1,$2,$3,'干完了','text')`,
         [agentLine, agentDm, agent])
       expect(await attempt(`INSERT INTO chat.message_reactions (message_id, user_id, emoji) VALUES ($1,$2,'👍')`, [agentLine, owner])).toBeNull()

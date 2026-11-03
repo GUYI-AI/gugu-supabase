@@ -456,11 +456,11 @@ describe('#5856 话题的访问控制(对着真库跑)', () => {
       await asService()
       await database.query(
         `INSERT INTO identity.gugu_devices (device_id, user_id, label, hostname, platform)
-         VALUES ('dev-a7',$1,'本机','mbp','darwin')`, [f.owner],
+         VALUES ('dev-a7',$1,'本机','mbp','darwin')`, [f.bob],
       )
       await database.query(
         `INSERT INTO identity.users (id, type, display_name, owner_user_id, device_id)
-         VALUES ($1,'agent','我的Agent',$2,'dev-a7')`, [agent, f.owner],
+         VALUES ($1,'agent','我的Agent',$2,'dev-a7')`, [agent, f.bob],
       )
       const topic = await createTopic(f.owner, f, '对照话题')
       await asService()

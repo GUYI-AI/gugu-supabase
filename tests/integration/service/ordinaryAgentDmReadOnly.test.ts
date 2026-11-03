@@ -45,6 +45,7 @@ it('blocks both senders, direct inserts, definer sends and service-role inserts'
   await denied(() => as(owner, () => insert(dm)))
   await denied(() => as(owner, () => insert(dm, agent)))
   await denied(() => as(owner, () => send(dm)))
+  await denied(() => db.query("INSERT INTO chat.messages(id,chat_id,content,content_type) VALUES($1,$2,'System notice','system')", [randomUUID(), dm]))
   await denied(async () => { await db.query('SET LOCAL ROLE service_role'); return insert(dm, agent) })
   expect((await db.query('SELECT count(*)::int AS n FROM chat.messages WHERE chat_id=$1', [dm])).rows[0].n).toBe(1)
 })

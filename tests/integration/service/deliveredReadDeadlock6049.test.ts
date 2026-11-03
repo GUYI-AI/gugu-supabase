@@ -77,11 +77,11 @@ describe('delivered read member/revision lock order #6049', () => {
   it.each(['attach', 'replay', 'retry', 'drift'])('keeps nested prepare %s before revision fanout', async mode => fixture(async f => {
     const c = await connect(), a = await connect(), b = await connect()
     const operation = randomUUID(), provision = randomUUID(), initial = randomUUID()
-    const member = { provision_id: provision, member_key: 'single', display_name: 'nested receipt', agent_type: 'codex', project_path: '/isolated', inherit_memory: false, history_import_required: false }
+    const member = { provision_id: provision, member_key: 'assistant', display_name: 'nested receipt', agent_type: 'codex', project_path: '/isolated', inherit_memory: false, history_import_required: false }
     await rpc(c, f.owner, 'SELECT identity.start_agent_provision_operation($1,$2,$3::jsonb)', [operation, f.device, JSON.stringify({ kind: 'single', members: [member] })])
     await rpc(c, f.owner, 'SELECT identity.claim_provision_slots($1)', [operation])
     const prepare = 'SELECT identity.prepare_agent_provision($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)'
-    const args = [provision, operation, 'single', f.device, member.display_name, member.agent_type, member.project_path, null, null, mode === 'replay' ? initial : null, mode === 'replay' ? 'first prompt' : null]
+    const args = [provision, operation, 'assistant', f.device, member.display_name, member.agent_type, member.project_path, null, null, mode === 'replay' ? initial : null, mode === 'replay' ? 'first prompt' : null]
     await rpc(c, f.owner, prepare, args)
     const row = (await db.query<{ agent_user_id: string; dm_chat_id: string; create_command_id: string }>('SELECT agent_user_id,dm_chat_id,create_command_id FROM identity.agent_provisions WHERE id=$1', [provision])).rows[0]!
     f.chats.push(row.dm_chat_id); f.extraUsers.push(row.agent_user_id)
