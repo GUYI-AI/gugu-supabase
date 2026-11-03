@@ -33,7 +33,29 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     assert.ok(downloadLockRelease)
     const firstFileRelease = releases.find((release) => release.version === '20261029114000_project_first_file_policy')
     assert.ok(firstFileRelease)
+    const deviceCheckRelease = releases.find((release) => release.version.endsWith('_remove_archived_device_agents'))
+    const validationRelease = releases.find((release) => release.constraintValidation)
+    assert.ok(deviceCheckRelease && validationRelease)
     const releaseQuery = async (sql) => {
+      if (sql.includes(deviceCheckRelease.sql)) {
+        const beforeTimeout = await query('SHOW lock_timeout')
+        const result = await query(sql)
+        await t.test('device CHECK replacement skips validation and restores the previous lock timeout', async () => {
+          assert.equal((await query("SELECT convalidated FROM pg_constraint WHERE conrelid='identity.users'::regclass AND conname='users_agent_device_required'"))[0].convalidated, false)
+          assert.deepEqual(await query('SHOW lock_timeout'), beforeTimeout)
+        })
+        return result
+      }
+      if (sql === validationRelease.sql) {
+        const transaction = (await query('SELECT txid_current() AS id'))[0].id
+        const result = await query(sql)
+        await t.test('device CHECK validates in a later transaction with no retained ACCESS EXCLUSIVE lock', async () => {
+          assert.equal((await query("SELECT convalidated FROM pg_constraint WHERE conrelid='identity.users'::regclass AND conname='users_agent_device_required'"))[0].convalidated, true)
+          assert.notEqual((await query('SELECT txid_current() AS id'))[0].id, transaction)
+          assert.equal((await query("SELECT count(*)::int AS n FROM pg_locks WHERE pid=pg_backend_pid() AND relation='identity.users'::regclass AND mode='AccessExclusiveLock'"))[0].n, 0)
+        })
+        return result
+      }
       if (sql.includes(releases.find(release => release.version.endsWith('_widget_message_shape'))?.sql)) {
         const owner = randomUUID(), group = randomUUID(), legacy = randomUUID(), deep = randomUUID(), deepGroup = randomUUID()
         await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Widget upgrade fixture')", [owner])

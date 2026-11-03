@@ -1,7 +1,15 @@
 -- Archived identities retain history, but no longer require an execution device.
-ALTER TABLE identity.users DROP CONSTRAINT users_agent_device_required;
-ALTER TABLE identity.users ADD CONSTRAINT users_agent_device_required
-  CHECK (type <> 'agent' OR device_id IS NOT NULL OR removed_at IS NOT NULL);
+-- Replace the CHECK atomically without scanning while holding ACCESS EXCLUSIVE.
+-- The separate validation release must run after the installer's outer COMMIT.
+DO $device_check$
+DECLARE previous_lock_timeout text := current_setting('lock_timeout');
+BEGIN
+  PERFORM set_config('lock_timeout', '1s', true);
+  ALTER TABLE identity.users DROP CONSTRAINT users_agent_device_required;
+  ALTER TABLE identity.users ADD CONSTRAINT users_agent_device_required
+    CHECK (type <> 'agent' OR device_id IS NOT NULL OR removed_at IS NOT NULL) NOT VALID;
+  PERFORM set_config('lock_timeout', previous_lock_timeout, true);
+END $device_check$;
 
 -- Start with the installed definitions, including any earlier release rewrites.
 -- CREATE OR REPLACE preserves owners and signatures. The DDL event trigger
