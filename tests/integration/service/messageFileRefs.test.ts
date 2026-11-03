@@ -115,10 +115,10 @@ async function upload(by: string, content: string, type = 'image/png', size = 12
   return { key, blob: rows[0]!.blob_id }
 }
 type Message = { id: string; chat_id: string; sender_user_id: string; content: string; content_type: string; file_item_id: string | null; file_version: number | null; forwarded_from_message_id: string | null }
-const COMMIT = 'SELECT * FROM chat.attachment_commit($1,$2,$3,$4,$5,$6,NULL,NULL,false,$7)'
-async function commit(caller: string, key: string, messageId: string, chatId: string, sender: string, name: string, opts: { to?: string[]; whisper?: boolean } = {}): Promise<Message> {
+const COMMIT = 'SELECT * FROM chat.attachment_commit($1,$2,$3,$4,$5,$6,NULL,NULL,false,$7,NULL,$8)'
+async function commit(caller: string, key: string, messageId: string, chatId: string, sender: string, name: string, opts: { to?: string[]; whisper?: boolean; caption?: string } = {}): Promise<Message> {
   await asUser(caller)
-  const { rows } = await database.query<Message>(COMMIT, [key, messageId, chatId, sender, name, opts.to ?? [], opts.whisper ?? false])
+  const { rows } = await database.query<Message>(COMMIT, [key, messageId, chatId, sender, name, opts.to ?? [], opts.whisper ?? false, opts.caption ?? null])
   await asOwner()
   return rows[0]!
 }
@@ -185,7 +185,7 @@ describe('提交(chat.attachment_commit)', () => {
     expect(await commit(owner, up.key, id, group, owner, 'shot.png')).toMatchObject({ id, file_item_id: sent.file_item_id, file_version: 1 })
     expect(await inAttachments(group)).toEqual(['shot.png'])
     await asUser(owner)
-    expect(await fails(COMMIT, [up.key, randomUUID(), group, owner, 'shot.png', [], false])).toMatch(/hint: attachment_upload_used/)
+    expect(await fails(COMMIT, [up.key, randomUUID(), group, owner, 'shot.png', [], false, null])).toMatch(/hint: attachment_upload_used/)
     await asOwner()
   })
 
@@ -237,7 +237,7 @@ describe('提交(chat.attachment_commit)', () => {
     const before = await inAttachments(group)
     for (const [why, caller, args, expected] of tries) {
       await asUser(caller)
-      expect(await fails(COMMIT, args), why).toMatch(expected)
+      expect(await fails(COMMIT, [...args, null]), why).toMatch(expected)
       await asOwner()
     }
     expect(await inAttachments(group), '拒了什么都不留').toEqual(before)
@@ -551,6 +551,62 @@ describe('attachment message metadata', () => {
     const text = randomUUID()
     await database.query('INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,$4)', [text, group, owner, 'ordinary text'])
     expect((await read(text))[0]!.file_metadata).toBeNull()
+  })
+
+  it.each([
+    { whisper: true, caption: 'hi' },
+    { whisper: true, caption: undefined },
+    { whisper: false, caption: 'hi' },
+  ])('preserves attachment names with whisper=$whisper and caption=$caption', async ({ whisper, caption }) => {
+    const group = await newGroup(owner, [member, outsider])
+    const content = `caption-${randomUUID()}`
+    const sent = await commit(owner, (await upload(owner, content)).key, randomUUID(), group, owner, 'shot.png',
+      { whisper, to: whisper ? [member] : [], caption })
+    const expected = { status: 'ready', file_name: 'shot.png', width: 640, height: 480 }
+    expect(sent).toMatchObject({ file_metadata: expected,
+      content: envelope('shot.png', 'image/png', 1234) + (caption ? `\n[Caption]\n${caption}` : '') })
+    expect((await read(sent.id))[0]!.file_metadata).toMatchObject(expected)
+    if (whisper) {
+      const ask = async (actor: string) => {
+        await asUser(actor)
+        return (await database.query('SELECT * FROM chat.file_urls_as($1::jsonb,$2)',
+          [JSON.stringify([{ message_id: sent.id }]), actor])).rows
+      }
+      expect(await ask(member)).toMatchObject([{ file_name: 'shot.png', width: 640, height: 480 }])
+      expect(await read(sent.id, outsider)).toEqual([])
+      expect(await ask(outsider)).toEqual([])
+    }
+  })
+
+  it.each([false, true])('forwards a captioned whisper to another group with whisper=%s', async (whisper) => {
+    const source = await newGroup(owner, [member])
+    const target = await newGroup(member, [owner, outsider])
+    const sent = await commit(owner, (await upload(owner, `forward-caption-${randomUUID()}`)).key,
+      randomUUID(), source, owner, 'shot.png', { whisper: true, to: [member], caption: 'hi' })
+    await asUser(member)
+    const [moved] = (await database.query<Message>(
+      'SELECT * FROM chat.attachment_forward($1,$2,$3,$4,$5,NULL,false,$6)',
+      [sent.id, randomUUID(), target, member, whisper ? [owner] : [], whisper])).rows
+    expect(moved).toMatchObject({ forwarded_from_message_id: sent.id,
+      content: envelope('shot.png', 'image/png', 1234) + '\n[Caption]\nhi',
+      file_metadata: { status: 'ready', file_name: 'shot.png', width: 640, height: 480 } })
+    expect((await read(moved!.id, owner))[0]!.file_metadata).toMatchObject({ file_name: 'shot.png' })
+    if (whisper) expect(await read(moved!.id, outsider)).toEqual([])
+  })
+
+  it.each<[string, string, string | null]>([
+    ['shot.png', '', 'shot.png'],
+    ['shot.png', '\n[Caption]\nhi', 'shot.png'],
+    ['shot.png', '\n[Caption]\n hi', null],
+    ['shot.png', '\n[Caption]\nhi ', null],
+    ['shot\n.png', '', null],
+    ['shot\n.png', '\n[Caption]\nhi', null],
+  ])('parses envelope name %j with suffix %j as %j', async (name, suffix, expected) => {
+    await asOwner()
+    const [row] = (await database.query<{ name: string | null }>(
+      'SELECT chat.attachment_envelope_name($1,1234,\'image/png\') AS name',
+      [envelope(name, 'image/png', 1234) + suffix])).rows
+    expect(row!.name).toBe(expected)
   })
 
   it('preserves whisper visibility and stops advertising a ready file after retraction or deletion', async () => {
