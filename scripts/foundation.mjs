@@ -33,7 +33,9 @@ export const releases = readdirSync(migrationsDir)
     const normalizedSql = sql.replace(/\r\n?/g, '\n')
     if (normalizedSql.startsWith('-- gugu:transaction off\n')) {
       // A single statement is required: even a multi-statement simple query creates an implicit transaction.
-      const statement = normalizedSql.replace(/^--[^\n]*(?:\n|$)/gm, '').trim()
+      // Only strip leading comments, before SQL starts. Removing comment-looking
+      // lines inside a quoted value or block comment could hide a real separator.
+      const statement = normalizedSql.replace(/^(?:[ \t]*--[^\n]*(?:\n|$)|[ \t]*\n)+/, '').trim()
       const match = /^CREATE INDEX CONCURRENTLY IF NOT EXISTS ([a-z_][a-z_0-9]*) ON ([a-z_][a-z_0-9]*)\.[a-z_][a-z_0-9]*\b[^;]+;$/i.exec(statement)
       const validation = /^ALTER TABLE ([a-z_][a-z_0-9]*)\.([a-z_][a-z_0-9]*) VALIDATE CONSTRAINT ([a-z_][a-z_0-9]*);$/i.exec(statement)
       if (match) release.concurrentIndex = match[2] + '.' + match[1]

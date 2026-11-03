@@ -99,4 +99,18 @@ describe('archived-agent device CHECK validation release', () => {
       await expect(import(pathToFileURL(path.join(root, 'scripts/foundation.mjs')).href)).rejects.toThrow(/Nontransactional release must contain one/)
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
+  it.each([
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS test_idx ON chat.workspace_items (id)\n/*\n-- */; SELECT 158; /*\n*/\n;\n",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS test_idx ON chat.workspace_items ((length('\n-- '))); SELECT 158; SELECT '\nx';\n",
+  ])('does not erase comment-looking lines inside SQL body contexts', async (body) => {
+    const root = mkdtempSync(path.join(tmpdir(), 'gugu-index-comments-'))
+    try {
+      const source = path.resolve(import.meta.dirname, '../../..')
+      cpSync(path.join(source, 'scripts'), path.join(root, 'scripts'), { recursive: true })
+      cpSync(path.join(source, 'supabase/migrations'), path.join(root, 'supabase/migrations'), { recursive: true })
+      const index = releases.find((r) => r.concurrentIndex)!
+      writeFileSync(path.join(root, 'supabase/migrations', index.version + '.sql'), '-- gugu:transaction off\n' + body)
+      await expect(import(pathToFileURL(path.join(root, 'scripts/foundation.mjs')).href)).rejects.toThrow(/Nontransactional release must contain one/)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
 })
