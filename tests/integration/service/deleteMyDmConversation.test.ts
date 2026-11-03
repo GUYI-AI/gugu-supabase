@@ -108,6 +108,7 @@ it.each(['restore','remove-owner'])('serializes deletion against a competing %s 
   await restoring.connect()
   await restoring.query("SET statement_timeout='5s'")
   let outcome: Promise<unknown> | undefined
+  let failureCode: string | undefined
   try {
     await restoring.query('BEGIN')
     // Match lifecycle's complete globally ordered head set; locking only owner could manufacture an inverse order.
@@ -115,7 +116,10 @@ it.each(['restore','remove-owner'])('serializes deletion against a competing %s 
     await db.query('BEGIN')
     const pid = (await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
     const blocker = (await restoring.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
-    outcome = remove().then(() => 'deleted', (error: Error) => error.message)
+    outcome = remove().then(() => 'deleted', (error: Error & { code?: string }) => {
+      failureCode = error.code
+      return error.message
+    })
     const deadline = Date.now()+5000
     for (;;) {
       if ((await restoring.query('SELECT $2::int=ANY(pg_blocking_pids($1::int)) AS waiting',[pid,blocker])).rows[0].waiting) break
@@ -128,7 +132,9 @@ it.each(['restore','remove-owner'])('serializes deletion against a competing %s 
       [agent,device,randomUUID(),JSON.stringify([{id:randomUUID(),archived_at:'2026-11-02T08:41:00Z',restored_at:'2026-11-03T03:48:01Z'}])])
     else await restoring.query('SELECT identity.archive_user($1,true)',[owner])
     await restoring.query('COMMIT')
-    expect(await outcome).toBe(operation === 'restore' ? 'conversation_agent_in_use' : 'conversation_delete_owner_required')
+    const result = await outcome
+    expect(failureCode).toBe(operation === 'restore' ? '55000' : '42501')
+    expect(result).toBe(operation === 'restore' ? 'conversation_agent_in_use' : 'conversation_delete_owner_required')
     await db.query('ROLLBACK')
     expect((await db.query('SELECT conversation_deleted_at FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[dm,owner])).rows[0].conversation_deleted_at).toBeNull()
   } finally {
