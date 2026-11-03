@@ -521,6 +521,7 @@ describe('开通 saga 收养已有的 agent(搬家)', () => {
       const complete = () => asUser(w.owner, async () =>
         (await db.query<{ message_id: string | null; already: boolean }>('SELECT * FROM identity.complete_agent_provision($1)', [provision])).rows[0])
       const first = await complete()
+      if (!firstTask) expect(first).toMatchObject({ message_id: null, client_message_id: null })
       expect(first.already).toBe(false)
       expect(await complete()).toEqual({ ...first, already: true })
       const { rows } = await db.query<{ content: string }>('SELECT content FROM chat.messages WHERE sender_user_id = $1', [r.agent_user_id])
