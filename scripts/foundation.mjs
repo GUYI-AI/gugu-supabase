@@ -28,12 +28,19 @@ export const releases = readdirSync(migrationsDir)
       if (digest !== workspaceSplit.digest) throw new Error('Workspace release split differs from the reviewed body')
       release.previousDigest = workspaceSplit.previousDigest
     }
-    if (sql.startsWith('-- gugu:transaction off\n')) {
+    // PostgreSQL ends line comments at CR as well as LF. Normalize before both
+    // directive detection and comment removal so a CR cannot hide another statement.
+    const normalizedSql = sql.replace(/\r\n?/g, '\n')
+    if (normalizedSql.startsWith('-- gugu:transaction off\n')) {
       // A single statement is required: even a multi-statement simple query creates an implicit transaction.
-      const statement = sql.replace(/^--[^\n]*(?:\n|$)/gm, '').trim()
+      // Only strip leading comments, before SQL starts. Removing comment-looking
+      // lines inside a quoted value or block comment could hide a real separator.
+      const statement = normalizedSql.replace(/^(?:[ \t]*--[^\n]*(?:\n|$)|[ \t]*\n)+/, '').trim()
       const match = /^CREATE INDEX CONCURRENTLY IF NOT EXISTS ([a-z_][a-z_0-9]*) ON ([a-z_][a-z_0-9]*)\.[a-z_][a-z_0-9]*\b[^;]+;$/i.exec(statement)
-      if (!match) throw new Error('Nontransactional release must contain one CREATE INDEX CONCURRENTLY IF NOT EXISTS: ' + version)
-      release.concurrentIndex = match[2] + '.' + match[1]
+      const validation = /^ALTER TABLE ([a-z_][a-z_0-9]*)\.([a-z_][a-z_0-9]*) VALIDATE CONSTRAINT ([a-z_][a-z_0-9]*);$/i.exec(statement)
+      if (match) release.concurrentIndex = match[2] + '.' + match[1]
+      else if (validation) release.constraintValidation = { table: (validation[1] + '.' + validation[2]).toLowerCase(), constraint: validation[3].toLowerCase() }
+      else throw new Error('Nontransactional release must contain one CREATE INDEX CONCURRENTLY IF NOT EXISTS or ALTER TABLE VALIDATE CONSTRAINT: ' + version)
     }
     return release
   })
@@ -74,10 +81,10 @@ COMMIT;`)
   return { installed: true, digest: foundationDigest }
 }
 
-/** Ordinary releases are transactional; explicitly marked concurrent indexes run as single requests.
- * Official installers defer those indexes until their community + official transaction has committed.
+/** Ordinary releases are transactional; explicitly marked indexes/validations run as single requests.
+ * Official installers defer those statements until their community + official transaction has committed.
  */
-export async function installReleases(query, { deferConcurrentIndexes = false } = {}) {
+export async function installReleases(query, { deferConcurrentIndexes = false, deferNontransactional = deferConcurrentIndexes } = {}) {
   const rows = await query("SELECT version,digest FROM gugu_install.releases WHERE version<>'foundation-v1'", true)
   const installed = new Map(rows.map((row) => [row.version, row.digest]))
   for (const version of installed.keys()) {
@@ -89,11 +96,18 @@ export async function installReleases(query, { deferConcurrentIndexes = false } 
   const applied = []
   for (const release of releases) {
     if (installed.has(release.version)) continue
-    if (release.concurrentIndex && deferConcurrentIndexes) continue
+    const standalone = release.concurrentIndex || release.constraintValidation
+    if (standalone && deferNontransactional) continue
     if (release.concurrentIndex) {
       await verifyConcurrentIndex(query, release, false)
       await query(release.sql)
       await verifyConcurrentIndex(query, release, true)
+    }
+    if (release.constraintValidation) {
+      await query(release.sql)
+      const { table, constraint } = release.constraintValidation
+      const [state] = await query(`SELECT convalidated FROM pg_constraint WHERE conrelid=to_regclass('${table}') AND conname='${constraint}'`, true)
+      if (!state?.convalidated) throw new Error('Constraint was not validated: ' + table + '.' + constraint)
     }
     await query(`BEGIN;
 SELECT pg_advisory_xact_lock(hashtextextended('gugu:foundation-install:v1',0));
@@ -102,7 +116,7 @@ DO $guard$ BEGIN
     RAISE EXCEPTION 'Release ${release.version} was installed concurrently';
   END IF;
 END $guard$;
-${release.concurrentIndex ? '' : release.sql}
+${standalone ? '' : release.sql}
 INSERT INTO gugu_install.releases(version,digest) VALUES('${release.version}','${release.digest}');
 COMMIT;`)
     applied.push(release.version)
