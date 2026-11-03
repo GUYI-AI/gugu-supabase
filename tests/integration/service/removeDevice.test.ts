@@ -60,7 +60,7 @@ beforeEach(async () => {
   await db.query(`INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at)
     VALUES($1,$2,'fixture','Fixture','/fixture',now())`, [device, owner])
 })
-afterEach(async () => { if (db) { await admin(); await db.query('ROLLBACK') } })
+afterEach(async () => { if (db) { await db.query('ROLLBACK'); await admin() } })
 
 describe('remove_device with retained archived identities', () => {
   it.each([
@@ -88,7 +88,7 @@ describe('remove_device with retained archived identities', () => {
       expect(row.mycel_id).toBe(prior.mycel_id)
     }
     expect((await db.query('SELECT id FROM identity.active_users WHERE id=ANY($1)', [ids])).rows).toEqual([])
-    expect((await db.query('SELECT current_setting($1,true) AS value', [switchName])).rows[0].value).toBe('')
+    expect((await db.query('SELECT current_setting($1,true) AS value', [switchName])).rows[0].value ?? '').toBe('')
   })
 
   it('C1 preserves the DEVICE_HAS_AGENTS error and live identities without cascade', async () => {
@@ -203,7 +203,7 @@ describe('remove_device with retained archived identities', () => {
   it('keeps effective owners, definer/search_path settings, ACLs and the restrictive FK', async () => {
     const rows = (await db.query(`SELECT p.proname,p.prosecdef,p.proconfig,
       p.proowner=(SELECT proowner FROM pg_proc WHERE oid='identity.archive_user(text,boolean)'::regprocedure) AS same_owner,
-      ARRAY(SELECT CASE WHEN a.grantee=p.proowner THEN 'owner' ELSE pg_get_userbyid(a.grantee) END
+      ARRAY(SELECT CASE WHEN a.grantee=p.proowner THEN 'owner'::text ELSE pg_get_userbyid(a.grantee)::text END
         FROM aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a
         WHERE privilege_type='EXECUTE' ORDER BY 1) AS executors
       FROM pg_proc p WHERE p.oid IN ('identity.remove_device(text,boolean)'::regprocedure,
