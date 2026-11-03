@@ -96,4 +96,34 @@ describe('stable task agent name serial metadata', () => {
     await db.query('ROLLBACK TO SAVEPOINT rejected_write')
     expect(await serial(id)).toBe(1)
   })
+
+  it('allocates a serial to explicitly named tasks without a harness base', async () => {
+    const id = randomUUID(), next = randomUUID()
+    const sql = `SELECT * FROM identity.provision_taskpage_agent($1::uuid,$2,'explicit','codex',$3)`
+    expect((await db.query(sql, [id, 'Fix login', device])).rows[0].display_name).toBe('Fix login')
+    expect(await serial(id)).toBe(1)
+    await db.query('UPDATE identity.users SET display_name=$2 WHERE id=$1', [id, 'Renamed task'])
+    await db.query(sql, [id, 'Fix login', device])
+    expect(await serial(id)).toBe(1)
+    expect((await db.query(sql, [next, 'Fix login', device])).rows[0].display_name).toBe('Fix login')
+    expect(await serial(next)).toBe(2)
+    const directory = await db.query('SELECT name_serial FROM identity.active_users WHERE id=$1', [id])
+    expect(directory.rows).toEqual([{ name_serial: 1 }])
+  })
+
+  it('keeps the legacy collision name while assigning its stable serial', async () => {
+    const a = randomUUID(), b = randomUUID()
+    const sql = `SELECT * FROM identity.provision_taskpage_agent($1::uuid,'Same name','explicit','codex',$2)`
+    expect((await db.query(sql, [a, device])).rows[0].display_name).toBe('Same name')
+    expect((await db.query(sql, [b, device])).rows[0].display_name).toBe('Same name 2')
+    expect([await serial(a), await serial(b)]).toEqual([1, 2])
+  })
+
+  it('does not backfill renamed identities or persistent identities', async () => {
+    const id = randomUUID()
+    await db.query(`SELECT * FROM identity.create_owned_agent('Existing task',NULL,'codex',$1,NULL,NULL,true,NULL,$2::uuid)`, [device, id])
+    await db.query(`SELECT * FROM identity.provision_taskpage_agent($1::uuid,'Existing task','explicit','codex',$2)`, [id, device])
+    expect(await serial(id)).toBeNull()
+    expect((await db.query('SELECT name_serial FROM identity.active_users WHERE id=$1', [id])).rows).toEqual([{ name_serial: null }])
+  })
 })
