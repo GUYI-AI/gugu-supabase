@@ -86,6 +86,8 @@ export const budgetCases = [
     assert.deepEqual(await as(db, w.viewer, 'SELECT * FROM chat.list_unread_locators($1)', [w.busy]), [])
     assert.deepEqual(await as(db, w.viewer, 'SELECT * FROM chat.list_unread_locators_for_chats($1)', [[w.busy]]), [])
     assert.deepEqual((await as(db, w.viewer, 'SELECT * FROM chat.list_unread_locators_for_chats($1)', [[w.busy,w.quiet]])).map(row => row.chat_id), [w.quiet])
+    assert.deepEqual(await as(db, w.viewer, 'SELECT * FROM chat.list_chat_previews($1)', [[w.busy]]), [])
+    assert.deepEqual((await as(db, w.viewer, 'SELECT * FROM chat.list_chat_previews($1)', [[w.busy,w.quiet]])).map(row => row.chat_id), [w.quiet])
   }],
   ['unread hydrate runs one shared set query while the legacy signature delegates once', async db => {
     const w = await world(db)

@@ -94,7 +94,12 @@ BEGIN
     SELECT latest.id, latest.chat_id, latest.created_at,
            chat.message_preview(latest.content, latest.content_type), latest.seq,
            latest.content_type, latest.sender_user_id, latest.client_message_id
-    FROM (SELECT DISTINCT unnest(p_chat_ids) AS id) requested
+    FROM (
+        SELECT DISTINCT member.chat_id AS id
+        FROM chat.active_members member
+        WHERE member.chat_id = ANY(p_chat_ids) AND member.user_id = (SELECT auth.uid()::text)
+          AND member.conversation_deleted_at IS NULL
+    ) requested
     CROSS JOIN LATERAL (
         SELECT m.id, m.chat_id, m.created_at, m.seq, m.content, m.content_type,
                m.sender_user_id, m.client_message_id
