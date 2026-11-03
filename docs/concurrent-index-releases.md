@@ -8,7 +8,7 @@ The earlier release is the single explicit exception to release immutability. Th
 - An installation with the original release keeps its existing digest and skips its body. The new concurrent release uses `IF NOT EXISTS`, verifies the existing index is valid and ready, then records its own digest.
 - Both end with the same function, grants, index and new release version. Only the earlier release digest reflects which reviewed body actually ran.
 
-`-- gugu:transaction off` accepts exactly one `CREATE INDEX CONCURRENTLY IF NOT EXISTS` statement. The installer sends it separately from the ledger transaction and checks `pg_index.indisvalid` and `indisready` before and after. An official wrapper must use the matching installer that defers these statements until the ordinary community/official transaction has committed. The complete operation is therefore no longer one atomic transaction: an index failure preserves the committed ordinary changes and leaves its index release unrecorded.
+`-- gugu:transaction off` accepts exactly one `CREATE INDEX CONCURRENTLY IF NOT EXISTS` or `ALTER TABLE ... VALIDATE CONSTRAINT` statement. The installer sends it separately from the ledger transaction and checks `pg_index.indisvalid` and `indisready` before and after an index build. See [constraint validation releases](constraint-validation-releases.md) for the validation path. An official wrapper must use the matching installer that defers these statements until the ordinary community/official transaction has committed. The complete operation is therefore no longer one atomic transaction: an index failure preserves the committed ordinary changes and leaves its index release unrecorded.
 
 ## Failure and retry
 
