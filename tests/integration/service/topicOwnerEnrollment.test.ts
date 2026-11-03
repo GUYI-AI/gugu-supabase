@@ -75,7 +75,11 @@ describe('Opening a topic includes its source author', () => {
   it.each(['agent', 'human'])('includes a still-present %s author without explicit recipients', async (kind) => {
     const author = kind === 'agent' ? agent : owner
     await db.query('UPDATE chat.messages SET sender_user_id=$1 WHERE id=$2', [author, anchor])
+    const sourceSeats = (await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows
     topic = await open()
+    expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows).toEqual(sourceSeats)
+    expect((await db.query('SELECT source_chat_id,source_message_id,creator_user_id FROM chat.chats WHERE id=$1', [topic])).rows)
+      .toEqual([{ source_chat_id: source, source_message_id: anchor, creator_user_id: admin }])
     expect(await member(admin)).toMatchObject({ role: 'member' })
     expect(await member(author)).toMatchObject({ role: 'member' })
     if (kind === 'agent') {
@@ -91,7 +95,9 @@ describe('Opening a topic includes its source author', () => {
     await asUser(admin)
     await db.query('SELECT chat.remove_group_member_as($1,$2,$3)', [source, author, admin])
     await db.query('RESET ROLE')
+    const sourceSeats = (await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows
     topic = await open()
+    expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows).toEqual(sourceSeats)
     expect(await member(admin)).toBeTruthy()
     expect(await member(author)).toBeUndefined()
     expect(await member(author, source)).toBeUndefined()
@@ -101,6 +107,16 @@ describe('Opening a topic includes its source author', () => {
   it('keeps one seat when the opener is also the source author and an explicit recipient', async () => {
     topic = await open(admin, [admin, admin])
     expect((await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1', [topic])).rows).toEqual([{ user_id: admin }])
+  })
+
+  it.each(['agent', 'human'])('does not let a %s source author admit an unrelated opener', async (kind) => {
+    const author = kind === 'agent' ? agent : owner
+    await db.query('UPDATE chat.messages SET sender_user_id=$1 WHERE id=$2', [author, anchor])
+    const topics = (await db.query("SELECT id FROM chat.chats WHERE kind='topic' AND source_chat_id=$1 ORDER BY id", [source])).rows
+    const sourceSeats = (await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows
+    expect(await denied(() => open(outsider))).toContain('Not a member of the source chat')
+    expect((await db.query("SELECT id FROM chat.chats WHERE kind='topic' AND source_chat_id=$1 ORDER BY id", [source])).rows).toEqual(topics)
+    expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows).toEqual(sourceSeats)
   })
 
   it('preserves explicit recipients while deduplicating an already-listed source author', async () => {
