@@ -45,7 +45,7 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
         const ledger = () => query('SELECT version,digest,installed_at FROM gugu_install.releases ORDER BY version')
         const before = await snapshot(), beforeLedger = await ledger()
         await t.test('project metadata failure rolls back its function and release ledger together', async () => {
-          await assert.rejects(query(sql.replace(projectMetadataRelease.sql, projectMetadataRelease.sql + '\nSELECT 1/0;')), { code: '22012' })
+          await assert.rejects(query(sql.replace(projectMetadataRelease.sql, () => projectMetadataRelease.sql + '\nSELECT 1/0;')), { code: '22012' })
           await query('ROLLBACK')
           assert.deepEqual(await snapshot(), before)
           assert.deepEqual(await ledger(), beforeLedger)
