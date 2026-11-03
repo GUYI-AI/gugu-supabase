@@ -25,7 +25,7 @@ Re-running only accepts an installation with matching versions and digests; an u
 ## Foundation, releases and permissions
 
 - `supabase/migrations/20261021000000_foundation.sql` is the foundation: RLS, Auth triggers, Realtime authorization, Storage policies and three maintenance jobs. It is for new projects only.
-- Every later `supabase/migrations/<version>_<name>.sql` is a release, installed in order and recorded in `gugu_install.releases`. Published files are never edited; changes ship as new files.
+- Every later `supabase/migrations/<version>_<name>.sql` is a release, installed in order and recorded in `gugu_install.releases`. Published files are never edited, except for the explicitly checked [workspace index split](docs/concurrent-index-releases.md); other changes ship as new files.
 - New API functions are closed to clients by default and granted explicitly in the release that adds them.
 - `identity.machine_limits_for(uuid)` is the installation policy hook; the community edition uses installation-level settings. Device ownership, group membership, message and file permissions are all enforced by the database.
 
