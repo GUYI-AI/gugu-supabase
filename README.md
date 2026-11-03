@@ -31,6 +31,9 @@ Re-running only accepts an installation with matching versions and digests; an u
 
 The topic-resource release requires coordinated file-service and client updates; see [topic resource containers and upgrade behavior](docs/topic-resources.md).
 
+The archived-device CHECK is replaced without scanning under its strong lock, then
+validated after COMMIT; see [constraint validation releases](docs/constraint-validation-releases.md).
+
 ## File service
 
 Attachment upload, commit and signed download use your own Supabase Storage.
