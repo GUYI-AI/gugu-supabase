@@ -38,12 +38,19 @@ $old$;
         ) INTO v_name_clash;
         v_serial := CASE WHEN p_name_mode = 'explicit' AND (NULLIF(btrim(p_name_serial_base), '') IS NOT NULL OR NOT v_name_clash)
             THEN 1 ELSE COALESCE(v_parts[2]::INTEGER, CASE WHEN p_name_mode = 'serial' THEN 1 ELSE 2 END) END;
-        -- 原子占号:起号 = GREATEST(这个前缀用过的最大号 + 1, 候选号)。
-        INSERT INTO identity.agent_name_serials AS s (owner_user_id, base, high_water)
-        VALUES (v_owner, v_base, v_serial)
-        ON CONFLICT (owner_user_id, base) DO UPDATE
-            SET high_water = GREATEST(s.high_water + 1, EXCLUDED.high_water), updated_at = now()
-        RETURNING s.high_water INTO v_serial;
+        IF p_name_mode = 'explicit' AND NULLIF(btrim(p_name_serial_base), '') IS NULL
+            AND NOT v_name_clash AND v_parts[2]::integer > 0 THEN
+            -- An old host already issued this numbered name offline. Attest that number;
+            -- the existing users trigger records it without consuming another counter value.
+            v_serial := v_parts[2]::integer;
+        ELSE
+            -- 原子占号:起号 = GREATEST(这个前缀用过的最大号 + 1, 候选号)。
+            INSERT INTO identity.agent_name_serials AS s (owner_user_id, base, high_water)
+            VALUES (v_owner, v_base, v_serial)
+            ON CONFLICT (owner_user_id, base) DO UPDATE
+                SET high_water = GREATEST(s.high_water + 1, EXCLUDED.high_water), updated_at = now()
+            RETURNING s.high_water INTO v_serial;
+        END IF;
         IF p_name_mode = 'serial' OR (NULLIF(btrim(p_name_serial_base), '') IS NULL AND v_name_clash) THEN
             -- Only the new explicit task API permits duplicate chosen names.
             WHILE EXISTS (

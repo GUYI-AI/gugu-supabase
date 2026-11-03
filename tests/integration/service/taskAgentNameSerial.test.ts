@@ -119,6 +119,18 @@ describe('stable task agent name serial metadata', () => {
     expect([await serial(a), await serial(b)]).toEqual([1, 2])
   })
 
+  it('attests an offline-issued legacy number without consuming a second serial', async () => {
+    const first = randomUUID(), offline = randomUUID(), next = randomUUID()
+    const sql = `SELECT * FROM identity.provision_taskpage_agent($1::uuid,$2,$3,'codex',$4)`
+    await db.query(sql, [first, 'Codex 30', 'serial', device])
+    expect((await db.query(sql, [offline, 'Codex 29', 'explicit', device])).rows[0].display_name).toBe('Codex 29')
+    expect(await serial(offline)).toBe(29)
+    expect((await db.query('SELECT high_water FROM identity.agent_name_serials WHERE owner_user_id=$1 AND base=$2', [owner, 'Codex'])).rows)
+      .toEqual([{ high_water: 30 }])
+    expect((await db.query(sql, [next, 'Codex 29', 'serial', device])).rows[0].display_name).toBe('Codex 31')
+    expect(await serial(next)).toBe(31)
+  })
+
   it('does not backfill renamed identities or persistent identities', async () => {
     const id = randomUUID()
     await db.query(`SELECT * FROM identity.create_owned_agent('Existing task',NULL,'codex',$1,NULL,NULL,true,NULL,$2::uuid)`, [device, id])
