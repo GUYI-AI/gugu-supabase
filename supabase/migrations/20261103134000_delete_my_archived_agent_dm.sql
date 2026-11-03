@@ -89,3 +89,34 @@ END;
 $$;
 REVOKE ALL ON FUNCTION chat.list_my_chats_as(text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION chat.list_my_chats_as(text) TO authenticated;
+
+-- Keep account snapshots and unread/list projections aligned, without filtering authorization views.
+-- Preserve installed function attributes/bodies and restore their exact ACLs after the DDL guard runs.
+DO $personal_list_reads$
+DECLARE target regprocedure; definition text; previous text; prior_acl aclitem[]; permission record;
+BEGIN
+  FOREACH target IN ARRAY ARRAY['chat.sync_snapshot()'::regprocedure,'chat.list_unread_locators(text)'::regprocedure] LOOP
+    SELECT pg_get_functiondef(p.oid),COALESCE(p.proacl,acldefault('f',p.proowner))
+      INTO definition,prior_acl FROM pg_proc p WHERE p.oid=target;
+    previous := definition;
+    IF target='chat.sync_snapshot()'::regprocedure THEN
+      definition := replace(definition,'WHERE own.inbox_published_at IS NOT NULL',
+        'WHERE own.inbox_published_at IS NOT NULL AND own.conversation_deleted_at IS NULL');
+      IF definition=previous THEN RAISE EXCEPTION 'Unexpected account snapshot predecessor'; END IF;
+      previous := definition;
+      definition := replace(definition,'m.inbox_published_at, m.role','m.inbox_published_at, m.role, m.conversation_deleted_at');
+      IF definition=previous THEN RAISE EXCEPTION 'Unexpected snapshot membership predecessor'; END IF;
+    ELSE
+      definition := replace(definition,'AND member.inbox_published_at IS NOT NULL',
+        'AND member.inbox_published_at IS NOT NULL AND member.conversation_deleted_at IS NULL');
+      IF definition=previous THEN RAISE EXCEPTION 'Unexpected unread locator predecessor'; END IF;
+    END IF;
+    EXECUTE definition;
+    FOR permission IN SELECT grantee,bool_or(is_grantable) AS grantable FROM aclexplode(prior_acl)
+      WHERE privilege_type='EXECUTE' GROUP BY grantee LOOP
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %s%s',target,
+        CASE WHEN permission.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(permission.grantee)) END,
+        CASE WHEN permission.grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+    END LOOP;
+  END LOOP;
+END $personal_list_reads$;
