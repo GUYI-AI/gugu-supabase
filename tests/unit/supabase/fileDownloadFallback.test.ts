@@ -15,26 +15,44 @@ function fixture() {
   return { deps, directSign, userRpc }
 }
 describe('authorized CDN and origin download capabilities', () => {
-  it('keeps the CDN field and independently signs the same object/reservation at the origin', async () => {
-    const f = fixture(), row = await handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request })
-    expect(row).toMatchObject({ url: expect.stringContaining('https://cdn.example/same-object?auth_key='),
-      origin_url: 'https://origin.example/same-object?x-oss-signature=fixture', origin_expires_at: '2026-11-03T00:00:30Z', expires_at: '2026-11-03T00:01:00Z' })
+  it('returns the CDN capability without calling or waiting for the origin signer', async () => {
+    const f = fixture(); f.directSign.mockRejectedValue(new Error('origin signing failed'))
+    const row = await handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request })
+    expect(row).toMatchObject({ url: expect.stringContaining('https://cdn.example/same-object?auth_key='), origin_available: true, expires_at: '2026-11-03T00:01:00Z' })
+    expect(row).not.toHaveProperty('origin_url')
+    expect(f.directSign).not.toHaveBeenCalled()
     expect(f.userRpc).toHaveBeenCalledExactlyOnceWith('file_transfer_download_as', { p_ref: { message_id: 'message' }, p_as: 'reader', p_id: request })
-    expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', false, at, { requestId: request, expiresSeconds: 60, trafficBits: 819200, direct: true })
-    expect(new URL(String('url' in row && row.url)).searchParams.get('x-oss-signature')).toBeNull()
   })
-  it('checks the existing ACL before either signature and does not sign unavailable files', async () => {
+  it('signs the origin only on explicit fallback through the same ACL and reservation', async () => {
+    const f = fixture()
+    await handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request })
+    expect(f.directSign).not.toHaveBeenCalled()
+    const row = await handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request, origin: true })
+    expect(row).toMatchObject({ url: 'https://origin.example/same-object?x-oss-signature=fixture', expires_at: '2026-11-03T00:00:30Z' })
+    expect(f.userRpc.mock.calls).toEqual(Array(2).fill(['file_transfer_download_as', { p_ref: { message_id: 'message' }, p_as: 'reader', p_id: request }]))
+    expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', false, at, { requestId: request, expiresSeconds: 60, trafficBits: 819200, direct: true })
+  })
+  it.each([false, true])('checks the ACL and unavailable state before signing (origin=%s)', async origin => {
     const f = fixture()
     f.userRpc.mockResolvedValueOnce({ data: null, error: { hint: 'file_transfer_denied', message: 'Denied' } })
-    await expect(handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request })).rejects.toMatchObject({ status: 403 })
+    await expect(handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request, origin })).rejects.toMatchObject({ status: 403 })
     expect(f.directSign).not.toHaveBeenCalled(); expect(f.deps.serviceRpc).not.toHaveBeenCalled()
     f.userRpc.mockResolvedValueOnce({ data: { status: 'gone' }, error: null })
-    expect(await handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request })).toEqual({ status: 'gone' })
+    expect(await handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request, origin })).toEqual({ status: 'gone' })
     expect(f.directSign).not.toHaveBeenCalled()
   })
-  it('does not invent an origin URL if the provider cannot sign a valid capability', async () => {
+  it('reports a required fallback signing failure without blocking the first CDN capability', async () => {
     const f = fixture(); f.directSign.mockRejectedValueOnce(new Error('origin signing failed'))
-    await expect(handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request })).rejects.toThrow('origin signing failed')
+    await expect(handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request })).resolves.toMatchObject({ status: 'ready' })
+    await expect(handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request, origin: true })).rejects.toThrow('origin signing failed')
     expect(f.directSign).toHaveBeenCalledTimes(1)
+  })
+  it('rejects malformed origin requests before authorization and unsupported storage before signing', async () => {
+    const f = fixture()
+    await expect(handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request, origin: 'true' })).rejects.toMatchObject({ status: 400 })
+    expect(f.userRpc).not.toHaveBeenCalled()
+    f.userRpc.mockResolvedValueOnce({ data: { status: 'ready', bucket_id: 'workspace' }, error: null })
+    await expect(handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request, origin: true })).rejects.toMatchObject({ status: 400 })
+    expect(f.directSign).not.toHaveBeenCalled()
   })
 })
