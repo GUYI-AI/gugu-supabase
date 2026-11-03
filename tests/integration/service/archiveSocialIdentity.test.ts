@@ -42,11 +42,13 @@ beforeEach(async () => {
     VALUES($1,'agent','Archive fixture',$2,$3,true)`, [agent, owner, device])
   for (const id of [...rooms, dm]) {
     await db.query(`INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,$2,'Archive fixture',$3)`, [id, id === dm ? 'dm' : 'group', owner])
-    await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')`, [id, owner, agent])
-    if (id !== dm) await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')`, [id, peer])
+    await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner')`, [id, owner])
+    if (id !== dm) await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member'),($1,$3,'member')`, [id, agent, peer])
   }
   await db.query(`INSERT INTO identity.friendships(user_a_id,user_b_id) VALUES(LEAST($1,$2),GREATEST($1,$2))`, [agent, peer])
   await db.query(`INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'Retained history')`, [randomUUID(), dm, agent])
+  // The fixture is retained history, before the ordinary owner/agent pair became read-only.
+  await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')`, [dm, agent])
 })
 afterEach(async () => { if (db) { await admin(); await db.query('ROLLBACK') } })
 
@@ -130,7 +132,8 @@ describe('archive terminates identity without touching seats or history', () => 
     const functions = (await db.query(`SELECT n.nspname||'.'||p.proname AS name,p.prosrc FROM pg_proc p
       JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
       WHERE n.nspname IN ('chat','identity','file_private','public') AND l.lanname IN ('sql','plpgsql') AND p.prokind='f'`)).rows
-    const physical = new Set(['chat.chats_membership_invariants','chat.chats_status_invariants','chat.historical_dm_peer'])
+    // This denial-only guard must also stop writes to removed agents' retained DM seats; it grants no access.
+    const physical = new Set(['chat.chats_membership_invariants','chat.chats_status_invariants','chat.historical_dm_peer','chat.reject_ordinary_agent_dm_message'])
     expect(functions.filter(r => !physical.has(r.name) && /\b(?:FROM|JOIN|USING)\s+chat\.chat_members\b/i.test(
       r.prosrc.replace(/\bDELETE\s+FROM\s+chat\.chat_members\b/gi, 'DELETE TARGET'))).map(r => r.name)).toEqual([])
     expect(functions.find(r => r.name === 'chat.chats_membership_invariants')?.prosrc).toContain('FROM chat.active_members m')
