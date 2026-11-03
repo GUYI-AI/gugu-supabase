@@ -29,6 +29,12 @@ function isSvg(b: Uint8Array): boolean {
 /** 这种图片在 CDN 上有没有缩略图(x-oss-process):SVG 没有,客户端直接用原图。 */
 export const hasThumbnail = (contentType: string): boolean => contentType.startsWith('image/') && contentType !== SVG
 
+// OSS rejects image processing above 20 MiB (ImageTooLarge, 0040-00000001).
+export const OSS_IMAGE_PROCESS_MAX_BYTES = 20 * 1024 * 1024
+export const canSignThumbnail = (contentType: string, sizeBytes: unknown): boolean =>
+  hasThumbnail(contentType) && typeof sizeBytes === 'number' && Number.isSafeInteger(sizeBytes)
+    && sizeBytes > 0 && sizeBytes <= OSS_IMAGE_PROCESS_MAX_BYTES
+
 function jpegSize(b: Uint8Array): Sniffed {
   let i = 2
   while (i + 9 < b.length) {
