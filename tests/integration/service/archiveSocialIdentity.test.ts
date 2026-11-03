@@ -51,8 +51,8 @@ beforeEach(async () => {
 afterEach(async () => { if (db) { await admin(); await db.query('ROLLBACK') } })
 
 describe('archive terminates identity without touching seats or history', () => {
-  it('one update removes N=3 rosters/mentions/counts/send permission, zero semantic seat changes, retry is idempotent', async () => {
-    const seats = (await db.query("SELECT to_jsonb(m)-'user_removed_at' AS seat FROM chat.chat_members m WHERE user_id=$1 ORDER BY chat_id", [agent])).rows
+  it('one update removes N=3 rosters/mentions/counts/send permission, zero member DML, retry is idempotent', async () => {
+    const seats = (await db.query('SELECT * FROM chat.chat_members WHERE user_id=$1 ORDER BY chat_id', [agent])).rows
     const history = (await db.query('SELECT * FROM chat.messages WHERE chat_id=$1 ORDER BY id', [dm])).rows
     const heads = (await db.query('SELECT * FROM chat.account_revision_heads WHERE user_id=ANY($1) ORDER BY user_id', [[owner, peer]])).rows
     // This suite is serial: transactional trigger DDL and counters roll back.
@@ -62,9 +62,7 @@ describe('archive terminates identity without touching seats or history', () => 
         IF TG_TABLE_NAME='users' THEN
           IF NEW.id=current_setting('archive.fixture_id') THEN INSERT INTO pg_temp.archive_write_log VALUES('identity'); END IF;
         ELSE
-          IF TG_OP <> 'UPDATE' OR (to_jsonb(OLD)-'user_removed_at') IS DISTINCT FROM (to_jsonb(NEW)-'user_removed_at') THEN
-            IF COALESCE(NEW.user_id,OLD.user_id)=current_setting('archive.fixture_id') THEN INSERT INTO pg_temp.archive_write_log VALUES('member'); END IF;
-          END IF;
+          IF COALESCE(NEW.user_id,OLD.user_id)=current_setting('archive.fixture_id') THEN INSERT INTO pg_temp.archive_write_log VALUES('member'); END IF;
         END IF;
         RETURN COALESCE(NEW,OLD);
       END $$`)
@@ -76,7 +74,7 @@ describe('archive terminates identity without touching seats or history', () => 
     expect(first.removed_at).toBeTruthy()
     expect(await archive()).toEqual(first)
     expect((await db.query('SELECT kind,count(*)::int AS n FROM archive_write_log GROUP BY kind')).rows).toEqual([{ kind: 'identity', n: 1 }])
-    expect((await db.query("SELECT to_jsonb(m)-'user_removed_at' AS seat FROM chat.chat_members m WHERE user_id=$1 ORDER BY chat_id", [agent])).rows).toEqual(seats)
+    expect((await db.query('SELECT * FROM chat.chat_members WHERE user_id=$1 ORDER BY chat_id', [agent])).rows).toEqual(seats)
     expect((await db.query('SELECT * FROM chat.messages WHERE chat_id=$1 ORDER BY id', [dm])).rows).toEqual(history)
     expect((await db.query('SELECT * FROM chat.account_revision_heads WHERE user_id=ANY($1) ORDER BY user_id', [[owner, peer]])).rows).toEqual(heads)
     const events = (await db.query(`SELECT event,topic,private,payload FROM realtime.messages
@@ -109,11 +107,11 @@ describe('archive terminates identity without touching seats or history', () => 
     expect((await denied("INSERT INTO realtime.messages(topic,event,payload,extension,private) VALUES('gugu:identity:lifecycle','identity_removed','{}','broadcast',true)")).code).toBe('42501')
   })
   it('human removal uses the same predicate and retains relationships and seats', async () => {
-    const before = (await db.query("SELECT to_jsonb(m)-'user_removed_at' AS seat FROM chat.chat_members m WHERE user_id=$1 ORDER BY chat_id", [peer])).rows
+    const before = (await db.query('SELECT * FROM chat.chat_members WHERE user_id=$1 ORDER BY chat_id', [peer])).rows
     await user(peer)
     expect((await db.query('SELECT identity.archive_user($1) AS r', [peer])).rows[0].r.removed_at).toBeTruthy()
     await admin()
-    expect((await db.query("SELECT to_jsonb(m)-'user_removed_at' AS seat FROM chat.chat_members m WHERE user_id=$1 ORDER BY chat_id", [peer])).rows).toEqual(before)
+    expect((await db.query('SELECT * FROM chat.chat_members WHERE user_id=$1 ORDER BY chat_id', [peer])).rows).toEqual(before)
     expect((await db.query('SELECT identity.user_is_live($1) AS yes', [peer])).rows[0].yes).toBe(false)
     expect((await db.query('SELECT * FROM identity.friendships WHERE user_a_id=$1 OR user_b_id=$1', [peer])).rows).toHaveLength(1)
   })

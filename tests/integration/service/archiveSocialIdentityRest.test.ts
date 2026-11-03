@@ -100,10 +100,7 @@ describe('archive through authenticated PostgREST and private realtime', () => {
       expect(receipt.removed_at).toBeTruthy()
       expect(await event).toEqual({ id: agent, removed_at: receipt.removed_at })
       expect(await must(owner.schema('identity').rpc('archive_user', { p_user_id: agent }))).toEqual(receipt)
-      const after = await must<Array<Record<string, unknown>>>(admin.schema('chat').from('chat_members').select('*').eq('user_id', agent).order('chat_id'))
-      const memberFacts = (rows: Array<Record<string, unknown>>) => rows.map(row => Object.fromEntries(Object.entries(row).filter(([key]) => key !== 'user_removed_at')))
-      expect(memberFacts(after)).toEqual(memberFacts(before as Array<Record<string, unknown>>))
-      expect(after.map(row => row.user_removed_at)).toEqual(after.map(() => receipt.removed_at))
+      expect(await must(admin.schema('chat').from('chat_members').select('*').eq('user_id', agent).order('chat_id'))).toEqual(before)
       for (const room of rooms) {
         const roster = await must<{ user_id: string }[]>(owner.schema('chat').rpc('list_member_ids', { p_chat_id: room }))
         expect(roster.map(r => r.user_id)).not.toContain(agent)

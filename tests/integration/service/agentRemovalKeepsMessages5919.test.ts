@@ -133,7 +133,7 @@ describe('#5919 archive preserves the complete conversation', () => {
       await seed()
       const statements = [
         'SELECT * FROM chat.messages WHERE chat_id=ANY($1) ORDER BY id',
-        "SELECT to_jsonb(m)-'user_removed_at' AS member FROM chat.chat_members m WHERE chat_id=ANY($1) ORDER BY chat_id,user_id",
+        'SELECT * FROM chat.chat_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id',
         "SELECT * FROM chat.message_reactions WHERE message_id IN ('m2-it-5919','m3-it-5919') ORDER BY message_id,user_id",
         "SELECT * FROM chat.message_deliveries WHERE message_id IN ('m2-it-5919','m3-it-5919') ORDER BY message_id,device_id",
       ]
@@ -145,12 +145,6 @@ describe('#5919 archive preserves the complete conversation', () => {
       const identity = await database.query<{ removed_at: Date }>('SELECT removed_at FROM identity.users WHERE id=$1', [AGENT])
       expect(identity.rows).toHaveLength(1)
       expect(identity.rows[0].removed_at).not.toBeNull()
-      const cache = await database.query<{ user_id: string; user_removed_at: Date | null }>(
-        'SELECT user_id,user_removed_at FROM chat.chat_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[GROUP, DM]],
-      )
-      expect(cache.rows.map(row => row.user_removed_at)).toEqual(
-        cache.rows.map(row => row.user_id === AGENT ? identity.rows[0].removed_at : null),
-      )
     })
   })
 })
