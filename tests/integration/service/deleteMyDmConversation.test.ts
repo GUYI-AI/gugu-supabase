@@ -133,7 +133,6 @@ it.each(['restore','remove-owner'])('serializes deletion against a competing %s 
     else await restoring.query('SELECT identity.archive_user($1,true)',[owner])
     await restoring.query('COMMIT')
     const result = await outcome
-    // Cache maintenance must retain the original denial rather than introduce a deadlock.
     expect(failureCode).toBe(operation === 'restore' ? '55000' : '42501')
     expect(result).toBe(operation === 'restore' ? 'conversation_agent_in_use' : 'conversation_delete_owner_required')
     await db.query('ROLLBACK')

@@ -138,7 +138,9 @@ describe('archive terminates identity without touching seats or history', () => 
     const policies = (await db.query(`SELECT p.polname,pg_get_expr(p.polqual,p.polrelid) AS using,pg_get_expr(p.polwithcheck,p.polrelid) AS check
       FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace
       WHERE n.nspname IN ('chat','identity','storage','realtime')`)).rows
-    expect(policies.filter(r => /\bchat_members\b/.test(`${r.using} ${r.check}`)).map(r => r.polname)).toEqual([])
+    // The derived liveness table uses the physical member's own RLS as its read
+    // gate. Every pre-existing authorization policy still uses live membership.
+    expect(policies.filter(r => /\bchat_members\b/.test(`${r.using} ${r.check}`)).map(r => r.polname)).toEqual(['member_liveness_visible_member'])
     expect((await db.query("SELECT has_function_privilege('anon','identity.archive_user(text,boolean)','EXECUTE') AS anon,has_function_privilege('authenticated','identity.archive_user(text,boolean)','EXECUTE') AS user")).rows[0]).toEqual({ anon: false, user: true })
   })
 })
