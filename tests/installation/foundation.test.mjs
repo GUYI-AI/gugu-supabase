@@ -39,6 +39,30 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     const releaseQuery = async (sql) => {
       if (sql.includes(deviceCheckRelease.sql)) {
         const beforeTimeout = await query('SHOW lock_timeout')
+        await t.test('device CHECK replacement times out behind a reader and preserves its predecessor', async () => {
+          const blocker = new pg.Client({ connectionString: url.href })
+          await blocker.connect()
+          const before = await query("SELECT convalidated,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid='identity.users'::regclass AND conname='users_agent_device_required'")
+          try {
+            await blocker.query('BEGIN; SELECT id FROM identity.users LIMIT 1')
+            await assert.rejects(query(sql), { code: '55P03' })
+            await query('ROLLBACK')
+            assert.deepEqual(await query("SELECT convalidated,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid='identity.users'::regclass AND conname='users_agent_device_required'"), before)
+            assert.equal((await db.query('SELECT count(*)::int AS n FROM gugu_install.releases WHERE version=$1', [deviceCheckRelease.version])).rows[0].n, 0)
+          } finally {
+            await query('ROLLBACK')
+            await blocker.query('ROLLBACK')
+            await blocker.end()
+          }
+        })
+        await t.test('device CHECK replacement restores the outer transaction lock timeout', async () => {
+          await query('BEGIN')
+          try {
+            await query("SET LOCAL lock_timeout='7s'")
+            await query(deviceCheckRelease.sql)
+            assert.equal((await query('SHOW lock_timeout'))[0].lock_timeout, '7s')
+          } finally { await query('ROLLBACK') }
+        })
         const result = await query(sql)
         await t.test('device CHECK replacement skips validation and restores the previous lock timeout', async () => {
           assert.equal((await query("SELECT convalidated FROM pg_constraint WHERE conrelid='identity.users'::regclass AND conname='users_agent_device_required'"))[0].convalidated, false)
