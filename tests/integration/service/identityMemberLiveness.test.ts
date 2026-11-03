@@ -29,7 +29,7 @@ beforeEach(async () => {
   await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [room, agent])
 })
 afterEach(async () => {
-  await db.query('RESET ROLE'); await db.query('ROLLBACK')
+  await db.query('ROLLBACK'); await db.query('RESET ROLE')
   if (committed) {
     await db.query('DELETE FROM chat.chats WHERE id=ANY($1)', [[room, secondRoom]])
     await db.query('DELETE FROM identity.users WHERE id=$1', [agent])
@@ -64,6 +64,9 @@ it('keeps cache reads within visible member rows, denies writes and does not exp
     expect((await db.query("SELECT has_table_privilege($1,'identity.member_liveness','INSERT,UPDATE,DELETE,TRUNCATE') AS writes", [role])).rows[0].writes).toBe(false)
   }
   const original = (await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1 AND identity.user_is_live(user_id) ORDER BY user_id', [room])).rows
+  // Reuse the file-contract fixture: the installer has ADMIN, but not SET, on
+  // gugu_files. This grant belongs to this test transaction and rolls back.
+  await db.query("DO $$ BEGIN EXECUTE format('GRANT gugu_files TO %I', current_user); END $$")
   for (const role of ['authenticated', 'gugu_files'] as const) {
     expect(await as(role, owner, 'SELECT user_id FROM chat.active_members WHERE chat_id=$1 ORDER BY user_id', [room])).toEqual(original)
   }
