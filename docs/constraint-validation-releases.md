@@ -30,6 +30,8 @@ implicitly wrap them in a transaction, so the installer accepts only the exact s
 validation statement. It verifies `pg_constraint.convalidated` before recording the
 release. The official installer must also recognize constraint-validation metadata,
 defer it past its outer COMMIT, and hold the session installation lock across both phases.
+Directive detection and comment removal normalize CR and CRLF to LF first, matching
+PostgreSQL line-comment boundaries; a second statement after a CR is rejected.
 
 The existing #154 concurrent workspace index release and an installed #151 digest are
 left untouched. A deployment with the 109-entry predecessor ledger installs only the

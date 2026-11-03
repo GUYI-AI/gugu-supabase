@@ -75,4 +75,28 @@ describe('archived-agent device CHECK validation release', () => {
       await expect(import(pathToFileURL(path.join(root, 'scripts/foundation.mjs')).href)).rejects.toThrow(/Nontransactional release must contain one/)
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
+  it.each(['\r', '\r\n'])('recognizes a standalone directive and statement with %j line endings', async (ending) => {
+    const root = mkdtempSync(path.join(tmpdir(), 'gugu-validation-eol-'))
+    try {
+      const source = path.resolve(import.meta.dirname, '../../..')
+      cpSync(path.join(source, 'scripts'), path.join(root, 'scripts'), { recursive: true })
+      cpSync(path.join(source, 'supabase/migrations'), path.join(root, 'supabase/migrations'), { recursive: true })
+      const sql = validation.sql.replace(/\n/g, ending)
+      writeFileSync(path.join(root, 'supabase/migrations', validation.version + '.sql'), sql)
+      const mod = await import(pathToFileURL(path.join(root, 'scripts/foundation.mjs')).href)
+      const release = mod.releases.find((r) => r.version === validation.version)
+      expect(release.constraintValidation).toEqual(validation.constraintValidation)
+      expect(release.sql).toBe(sql)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+  it.each([validation, releases.find((r) => r.concurrentIndex)!])('rejects SQL hidden after a CR line comment in $version', async (release) => {
+    const root = mkdtempSync(path.join(tmpdir(), 'gugu-validation-cr-'))
+    try {
+      const source = path.resolve(import.meta.dirname, '../../..')
+      cpSync(path.join(source, 'scripts'), path.join(root, 'scripts'), { recursive: true })
+      cpSync(path.join(source, 'supabase/migrations'), path.join(root, 'supabase/migrations'), { recursive: true })
+      writeFileSync(path.join(root, 'supabase/migrations', release.version + '.sql'), release.sql + '-- ignored\rSELECT 158;\n')
+      await expect(import(pathToFileURL(path.join(root, 'scripts/foundation.mjs')).href)).rejects.toThrow(/Nontransactional release must contain one/)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
 })
