@@ -33,9 +33,6 @@ END $list$;
 REVOKE ALL ON FUNCTION chat.workspace_list_as(text,text,integer,integer,text,text,text,boolean) FROM PUBLIC,anon,service_role;
 GRANT EXECUTE ON FUNCTION chat.workspace_list_as(text,text,integer,integer,text,text,text,boolean) TO authenticated;
 
--- Reconnect and periodic file-service repair scan for this fixed marker. Keep
--- the existing query and its automatic index maintenance on text/state changes.
-CREATE INDEX workspace_items_pending_marks_idx ON chat.workspace_items (id)
-    WHERE kind = 'document' AND ystate IS NULL AND inline_text LIKE '%"$text"%';
+-- The marker index is installed by the separate concurrent-index release.
 
 NOTIFY pgrst,'reload schema';
