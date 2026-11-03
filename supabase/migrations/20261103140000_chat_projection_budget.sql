@@ -95,9 +95,11 @@ BEGIN
            chat.message_preview(latest.content, latest.content_type), latest.seq,
            latest.content_type, latest.sender_user_id, latest.client_message_id
     FROM (
-        SELECT DISTINCT member.chat_id AS id
-        FROM chat.active_members member
-        WHERE member.chat_id = ANY(p_chat_ids) AND member.user_id = (SELECT auth.uid()::text)
+        SELECT DISTINCT requested_chat.id
+        FROM unnest(p_chat_ids) requested_chat(id)
+        LEFT JOIN chat.active_members member
+          ON member.chat_id = requested_chat.id AND member.user_id = (SELECT auth.uid()::text)
+        WHERE requested_chat.id IS NOT NULL
           AND member.conversation_deleted_at IS NULL
     ) requested
     CROSS JOIN LATERAL (

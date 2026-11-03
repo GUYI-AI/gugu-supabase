@@ -89,6 +89,22 @@ export const budgetCases = [
     assert.deepEqual(await as(db, w.viewer, 'SELECT * FROM chat.list_chat_previews($1)', [[w.busy]]), [])
     assert.deepEqual((await as(db, w.viewer, 'SELECT * FROM chat.list_chat_previews($1)', [[w.busy,w.quiet]])).map(row => row.chat_id), [w.quiet])
   }],
+  ['source-group observers retain previews without acquiring a topic seat', async db => {
+    const w = await world(db), topic = randomUUID()
+    const anchor = await w.post(w.busy, 'observer anchor')
+    await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id,source_chat_id,source_message_id) VALUES($1,'topic','Observed topic',$2,$3,$4)", [topic,w.owner,w.busy,anchor])
+    await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role,inbox_published_at,hide_history_before) VALUES($1,$2,'owner',now(),NULL)", [topic,w.owner])
+    const message = await w.post(topic, 'visible to source observer')
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [topic,w.viewer])).rows[0].n, 0)
+    assert.deepEqual(await as(db, w.viewer, 'SELECT id FROM chat.messages WHERE id=$1', [message]), [{id:message}], 'the real messages RLS is the visibility positive control')
+    assert.equal((await as(db, w.viewer, 'SELECT chat.can_read_message($1,$2) AS allowed', [message,w.viewer]))[0].allowed, true)
+    const previews = await as(db, w.viewer, 'SELECT * FROM chat.list_chat_previews($1)', [[topic]])
+    assert.equal(previews.length, 1, 'a source observer needs no topic membership row to read its preview')
+    assert.equal(previews[0].id, message)
+    assert.equal(previews[0].preview, 'visible to source observer')
+    assert.deepEqual(await as(db, w.outsider, 'SELECT * FROM chat.list_chat_previews($1)', [[topic]]), [])
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [topic,w.viewer])).rows[0].n, 0, 'reading a preview never creates a topic seat')
+  }],
   ['unread hydrate runs one shared set query while the legacy signature delegates once', async db => {
     const w = await world(db)
     await w.post(w.busy, 'busy-unread'); await w.post(w.quiet, 'quiet-unread')
