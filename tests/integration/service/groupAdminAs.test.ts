@@ -170,6 +170,21 @@ describe('one actor authority for people and Agents', () => {
     await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [room])
     expect(await rejected(() => setSelf(owner, memberAgent))).toContain('agent_owner_or_group_manager_required')
   })
+  it('a paused Agent keeps its effective seat and may change its own listen preference', async () => {
+    const before = (await db.query('SELECT role,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows[0]
+    await asUser(owner)
+    expect((await db.query("SELECT desired_status,removed_at FROM identity.set_agent_desired_status($1,'offline')", [memberAgent])).rows)
+      .toEqual([{ desired_status: 'offline', removed_at: null }])
+    await service()
+    expect((await db.query('SELECT 1 FROM chat.active_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows).toHaveLength(1)
+    expect(await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'passive' }, owner, memberAgent))
+      .toMatchObject({ chat_id: room, user_id: memberAgent, listen_mode: 'passive' })
+    await service()
+    expect((await db.query('SELECT role,listen_mode,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows)
+      .toEqual([{ ...before, listen_mode: 'passive' }])
+    expect((await db.query('SELECT desired_status,removed_at FROM identity.users WHERE id=$1', [memberAgent])).rows)
+      .toEqual([{ desired_status: 'offline', removed_at: null }])
+  })
   it('a removed Agent cannot use its retained physical seat to keep changing itself', async () => {
     await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'passive' }, owner, memberAgent)
     await service()
