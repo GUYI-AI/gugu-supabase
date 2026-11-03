@@ -204,17 +204,21 @@ describe('inbox pull, messages_view and message row policy: same results, cost b
     expect(replies.filter((r) => r.reply_to_content !== null).length).toBeGreaterThan(BACKLOG / 2) // previews are really there
   }))
 
-  it('the chat-list preview calls the reply preview only for returned rows; unread columns never call it', async () => rollback(async () => {
+  it('chat-list top-one previews avoid reply computation while transcript reply columns share it', async () => rollback(async () => {
     await seed()
     const preview = `SELECT v.id, v.reply_to_message_id, chat.preview(v) AS preview FROM chat.messages_view v
                       WHERE v.chat_id = ANY($1) AND v.is_whisper = false ORDER BY v.seq DESC LIMIT 4`
-    const [rows, cost] = await delta(() => as<{ reply_to_message_id: string | null }>(ALICE, preview, [[GROUP]]))
+    const [rows, cost] = await delta(() => as<{ id: string; reply_to_message_id: string | null }>(ALICE, preview, [[GROUP]]))
     expect(rows).toHaveLength(4)
     const replyRows = rows.filter((r) => r.reply_to_message_id).length
     expect(replyRows).toBeGreaterThan(0) // the counter is live: returned reply rows do pay
-    // preview(v) takes the whole row: each returned reply row reads its three reply columns; the other
-    // BACKLOG reply rows of the chat are read and sorted, but never call the preview.
-    expect(cost.previewFor).toBe(3 * replyRows)
+    // Whole-row consumers retain the existing preview and reply fields, sharing one LATERAL result.
+    expect(cost.previewFor).toBe(replyRows)
+
+    const [latest, listCost] = await delta(() => as<{ id: string }>(ALICE,
+      'SELECT * FROM chat.list_chat_previews($1)', [[GROUP]]))
+    expect(latest.map(row => row.id)).toEqual([rows[0]!.id])
+    expect(listCost.previewFor).toBe(0)
 
     const [, unread] = await delta(() => as(ALICE,
       'SELECT v.id, v.seq FROM chat.messages_view v WHERE v.chat_id = ANY($1) ORDER BY v.seq DESC LIMIT 4', [[GROUP]]))
