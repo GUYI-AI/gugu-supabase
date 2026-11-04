@@ -1,6 +1,6 @@
 // gugu #6835 回复预览与逐条可见性判断的开销 —— 对着**真库**跑,用结构断言(函数的语言 / STRICT / 易变性、本事务里的
 // 函数调用次数、计划里的表达式),不用墙钟:
-//   · 没有回复的一页 30 行,预览函数一次也不被调(STRICT);有回复的那一页,每条回复按读到的回复列各调一次(只算返回的行);
+//   · 没有回复的一页 30 行,预览函数一次也不被调(STRICT);有回复的那一页,每条回复的三列共用一次 LATERAL 预览;
 //   · 批量读(history / search / 话题计数 / RLS)里悄悄话规则被内联成表达式:whisper_visible_to 的调用次数为 0,
 //     可见下界每条查询(话题计数是每个话题)只算一次;
 //   · 预览逐字符合规则:看得见被回复的那条才有预览,悄悄话从不进预览,发信人已注销写「已注销用户」。
@@ -182,7 +182,7 @@ describe('#6835 reply preview and visibility cost — structural, not wall-clock
     })
   })
 
-  it('a page of 30 rows without replies calls no preview; the next page calls it once per reply column read, per reply row', async () => {
+  it('a page of 30 rows without replies calls no preview; the next page shares one preview across all three reply columns', async () => {
     await inRollback(async () => {
       const w = await seedWorld('p1')
       for (const viewer of [w.owner, w.alice, w.peer, w.late]) {
@@ -194,15 +194,15 @@ describe('#6835 reply preview and visibility cost — structural, not wall-clock
         expect(first.previewRow).toBe(0)
         expect(first.visible).toBe(0)
 
-        // 正对照:下一页有回复 —— 计数器是活的,STRICT 不是把预览关掉了。回复列是标量子查询(只在被读、且只对返回的行求值),
-        // PAGE 读了三列,所以每条回复三次外壳、三次内核;没读回复列的查询一次也不调(见 inboxAndPreviewReadCost)。
+        // 正对照:下一页有回复 —— 计数器是活的,STRICT 不是把预览关掉了。
+        // PAGE 的三列共用一个 LATERAL 结果,每条回复只调一次外壳和内核。
         const oldestSeq = (await database.query<{ seq: string }>('SELECT seq::text FROM chat.messages WHERE id = $1', [newest.at(-1)!.id])).rows[0]!.seq
         let older: Array<{ reply_to_message_id: string | null }> = []
         const second = await delta(async () => { older = await as(viewer, PAGE, [w.group, oldestSeq]) })
         const replyRows = older.filter((r) => r.reply_to_message_id).length
         expect(replyRows).toBe(4)
-        expect(second.previewFor, `page 2 preview calls for ${viewer}`).toBe(3 * replyRows)
-        expect(second.previewRow).toBe(3 * replyRows)
+        expect(second.previewFor, `page 2 preview calls for ${viewer}`).toBe(replyRows)
+        expect(second.previewRow).toBe(replyRows)
       }
     })
   })

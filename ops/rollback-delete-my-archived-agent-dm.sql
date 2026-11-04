@@ -24,7 +24,10 @@ GRANT EXECUTE ON FUNCTION chat.list_my_chats_as(text) TO authenticated;
 DO $restore_list_reads$
 DECLARE target regprocedure; definition text; previous text; prior_acl aclitem[]; permission record;
 BEGIN
-  FOREACH target IN ARRAY ARRAY['chat.sync_snapshot()'::regprocedure,'chat.list_unread_locators(text)'::regprocedure] LOOP
+  FOREACH target IN ARRAY ARRAY['chat.sync_snapshot()'::regprocedure,
+    COALESCE(to_regprocedure('chat.list_unread_locators_for_chats(text[])'),'chat.list_unread_locators(text)'::regprocedure),
+    to_regprocedure('chat.list_chat_previews(text[])')] LOOP
+    IF target IS NULL THEN CONTINUE; END IF;
     SELECT pg_get_functiondef(p.oid),COALESCE(p.proacl,acldefault('f',p.proowner))
       INTO definition,prior_acl FROM pg_proc p WHERE p.oid=target;
     previous := definition;
