@@ -147,8 +147,54 @@ describe('one actor authority for people and Agents', () => {
   it('allows the human owner and actual group manager to choose an Agent listen mode', async () => {
     expect((await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'passive' }, owner)).listen_mode).toBe('passive')
     expect((await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'active' }, agentOwner, adminAgent)).listen_mode).toBe('active')
+    expect((await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'active' }, owner, memberAgent)).listen_mode).toBe('active')
+  })
+  it('an ordinary live Agent changes its own group listen mode without changing its read cursor', async () => {
+    const before = (await db.query('SELECT last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows[0]
+    for (const mode of ['passive', 'active']) {
+      expect(await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: mode }, owner, memberAgent))
+        .toMatchObject({ chat_id: room, user_id: memberAgent, listen_mode: mode })
+      await service()
+      expect((await db.query('SELECT listen_mode,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows)
+        .toEqual([{ ...before, listen_mode: mode }])
+    }
+  })
+  it('self listen mode does not bypass authenticated actor, actual membership or archived scope', async () => {
+    const setSelf = (account: string, actor: string) => rpc('set_agent_listen_mode_as', {
+      p_chat_id: room, p_agent_user_id: actor, p_mode: 'passive',
+    }, account, actor)
+    expect(await rejected(() => setSelf(owner, adminAgent))).toContain('group_actor_not_authorized')
+    expect(await rejected(() => setSelf(owner, freshAgent))).toContain('agent_owner_or_group_manager_required')
+    await service()
+    expect((await db.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, freshAgent])).rows).toHaveLength(0)
+    await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [room])
+    expect(await rejected(() => setSelf(owner, memberAgent))).toContain('agent_owner_or_group_manager_required')
+  })
+  it('a paused Agent keeps its effective seat and may change its own listen preference', async () => {
+    const before = (await db.query('SELECT role,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows[0]
+    await asUser(owner)
+    expect((await db.query("SELECT desired_status,removed_at FROM identity.set_agent_desired_status($1,'offline')", [memberAgent])).rows)
+      .toEqual([{ desired_status: 'offline', removed_at: null }])
+    await service()
+    expect((await db.query('SELECT 1 FROM chat.active_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows).toHaveLength(1)
+    expect(await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'passive' }, owner, memberAgent))
+      .toMatchObject({ chat_id: room, user_id: memberAgent, listen_mode: 'passive' })
+    await service()
+    expect((await db.query('SELECT role,listen_mode,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows)
+      .toEqual([{ ...before, listen_mode: 'passive' }])
+    expect((await db.query('SELECT desired_status,removed_at FROM identity.users WHERE id=$1', [memberAgent])).rows)
+      .toEqual([{ desired_status: 'offline', removed_at: null }])
+  })
+  it('a removed Agent cannot use its retained physical seat to keep changing itself', async () => {
+    await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'passive' }, owner, memberAgent)
+    await service()
+    const before = (await db.query('SELECT role,listen_mode,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows
+    await db.query('UPDATE identity.users SET removed_at=now() WHERE id=$1', [memberAgent])
+    expect((await db.query('SELECT 1 FROM chat.active_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows).toHaveLength(0)
     expect(await rejected(() => rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'active' }, owner, memberAgent)))
-      .toContain('agent_owner_or_group_manager_required')
+      .toContain('group_actor_not_authorized')
+    await service()
+    expect((await db.query('SELECT role,listen_mode,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows).toEqual(before)
   })
   it('revokes the old table mutations even for a group owner, but keeps personal preferences', async () => {
     await asUser(owner)
