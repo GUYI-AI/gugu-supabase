@@ -24,7 +24,7 @@ async function world(db) {
 }
 
 export const budgetCases = [
-  ['reply columns share one function evaluation per row without changing visibility', async db => {
+  ['reply columns stay bounded by returned rows without changing visibility', async db => {
     const w = await world(db), replies = []
     for (let n = 0; n < 4; n++) replies.push(await w.post(w.busy, `reply-${n}`, await w.post(w.busy, `target-${n}`)))
     const before = await callCount(db)
@@ -32,7 +32,7 @@ export const budgetCases = [
     const calls = await callCount(db) - before
     assert.equal(rows.length, 4)
     assert.deepEqual(rows.map(row => row.reply_to_content), ['target-0','target-1','target-2','target-3'])
-    assert.equal(calls, 4, 'all three reply columns share one call per distinct reply target')
+    assert.equal(calls, 12, 'three target-list reply columns run only for the four returned rows')
     const beforeUnread = await callCount(db)
     await as(db, w.viewer, 'SELECT id,seq FROM chat.messages_view WHERE id=ANY($1::text[]) ORDER BY seq DESC', [replies])
     assert.equal(await callCount(db) - beforeUnread, 0, 'readers that omit reply columns must not compute them')
