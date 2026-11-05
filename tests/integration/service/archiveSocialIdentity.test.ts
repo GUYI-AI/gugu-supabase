@@ -130,14 +130,17 @@ describe('archive terminates identity without touching seats or history', () => 
     const functions = (await db.query(`SELECT n.nspname||'.'||p.proname AS name,p.prosrc FROM pg_proc p
       JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
       WHERE n.nspname IN ('chat','identity','file_private','public') AND l.lanname IN ('sql','plpgsql') AND p.prokind='f'`)).rows
-    const physical = new Set(['chat.chats_membership_invariants','chat.chats_status_invariants','chat.historical_dm_peer'])
+    // Personal deletion verifies the owner's retained historical DM seats without removing their access.
+    const physical = new Set(['chat.chats_membership_invariants','chat.chats_status_invariants','chat.historical_dm_peer','chat.delete_my_dm_conversation'])
     expect(functions.filter(r => !physical.has(r.name) && /\b(?:FROM|JOIN|USING)\s+chat\.chat_members\b/i.test(
       r.prosrc.replace(/\bDELETE\s+FROM\s+chat\.chat_members\b/gi, 'DELETE TARGET'))).map(r => r.name)).toEqual([])
     expect(functions.find(r => r.name === 'chat.chats_membership_invariants')?.prosrc).toContain('FROM chat.active_members m')
     const policies = (await db.query(`SELECT p.polname,pg_get_expr(p.polqual,p.polrelid) AS using,pg_get_expr(p.polwithcheck,p.polrelid) AS check
       FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace
       WHERE n.nspname IN ('chat','identity','storage','realtime')`)).rows
-    expect(policies.filter(r => /\bchat_members\b/.test(`${r.using} ${r.check}`)).map(r => r.polname)).toEqual([])
+    // The derived liveness table uses the physical member's own RLS as its read
+    // gate. Every pre-existing authorization policy still uses live membership.
+    expect(policies.filter(r => /\bchat_members\b/.test(`${r.using} ${r.check}`)).map(r => r.polname)).toEqual(['member_liveness_visible_member'])
     expect((await db.query("SELECT has_function_privilege('anon','identity.archive_user(text,boolean)','EXECUTE') AS anon,has_function_privilege('authenticated','identity.archive_user(text,boolean)','EXECUTE') AS user")).rows[0]).toEqual({ anon: false, user: true })
   })
 })
