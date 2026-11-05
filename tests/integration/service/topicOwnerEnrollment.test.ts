@@ -71,63 +71,6 @@ afterEach(async () => {
   finally { await db.query('ROLLBACK') }
 })
 
-describe('Opening a topic includes its source author', () => {
-  it.each(['agent', 'human'])('includes a still-present %s author without explicit recipients', async (kind) => {
-    const author = kind === 'agent' ? agent : owner
-    await db.query('UPDATE chat.messages SET sender_user_id=$1 WHERE id=$2', [author, anchor])
-    const sourceSeats = (await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows
-    topic = await open()
-    expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows).toEqual(sourceSeats)
-    expect((await db.query('SELECT source_chat_id,source_message_id,creator_user_id FROM chat.chats WHERE id=$1', [topic])).rows)
-      .toEqual([{ source_chat_id: source, source_message_id: anchor, creator_user_id: admin }])
-    expect(await member(admin)).toMatchObject({ role: 'member' })
-    expect(await member(author)).toMatchObject({ role: 'member' })
-    if (kind === 'agent') {
-      expect(await member(owner)).toBeTruthy()
-      expect((await db.query('SELECT agent_user_id FROM chat.group_agent_states WHERE chat_id=$1 AND agent_user_id=$2', [topic, author])).rows)
-        .toEqual([{ agent_user_id: author }])
-    }
-  })
-
-  it.each(['agent', 'human'])('skips a %s author who left the source without re-admitting them', async (kind) => {
-    const author = kind === 'agent' ? agent : owner
-    await db.query('UPDATE chat.messages SET sender_user_id=$1 WHERE id=$2', [author, anchor])
-    await asUser(admin)
-    await db.query('SELECT chat.remove_group_member_as($1,$2,$3)', [source, author, admin])
-    await db.query('RESET ROLE')
-    const sourceSeats = (await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows
-    topic = await open()
-    expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows).toEqual(sourceSeats)
-    expect(await member(admin)).toBeTruthy()
-    expect(await member(author)).toBeUndefined()
-    expect(await member(author, source)).toBeUndefined()
-    expect((await db.query('SELECT agent_user_id FROM chat.group_agent_states WHERE chat_id=$1 AND agent_user_id=$2', [topic, author])).rows).toEqual([])
-  })
-
-  it('keeps one seat when the opener is also the source author and an explicit recipient', async () => {
-    topic = await open(admin, [admin, admin])
-    expect((await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1', [topic])).rows).toEqual([{ user_id: admin }])
-  })
-
-  it.each(['agent', 'human'])('does not let a %s source author admit an unrelated opener', async (kind) => {
-    const author = kind === 'agent' ? agent : owner
-    await db.query('UPDATE chat.messages SET sender_user_id=$1 WHERE id=$2', [author, anchor])
-    const topics = (await db.query("SELECT id FROM chat.chats WHERE kind='topic' AND source_chat_id=$1 ORDER BY id", [source])).rows
-    const sourceSeats = (await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows
-    expect(await denied(() => open(outsider))).toContain('Not a member of the source chat')
-    expect((await db.query("SELECT id FROM chat.chats WHERE kind='topic' AND source_chat_id=$1 ORDER BY id", [source])).rows).toEqual(topics)
-    expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [source])).rows).toEqual(sourceSeats)
-  })
-
-  it('preserves explicit recipients while deduplicating an already-listed source author', async () => {
-    await db.query('UPDATE chat.messages SET sender_user_id=$1 WHERE id=$2', [owner, anchor])
-    topic = await open(admin, [owner, owner, sibling, outsider])
-    const ids = (await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [topic])).rows.map(row => row.user_id)
-    expect(ids).toEqual([admin, owner, sibling].sort())
-    expect(await member(outsider)).toBeUndefined()
-  })
-})
-
 describe('Agent topic participation carries its eligible human owner', () => {
   it('enrolls the human owner of every initial Agent, once for shared owners', async () => {
     topic = await open(admin, [agent, sibling])

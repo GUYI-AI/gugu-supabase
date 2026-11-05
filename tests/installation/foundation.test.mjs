@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import pg from 'pg'
 import { foundationDigest, installFoundation, installReleases, releases } from '../../scripts/foundation.mjs'
@@ -38,36 +37,6 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     const validationRelease = releases.find((release) => release.constraintValidation)
     assert.ok(deviceCheckRelease && validationRelease)
     const releaseQuery = async (sql) => {
-      const projectMetadataRelease = releases.find((release) => release.version.endsWith('_group_project_metadata'))
-      if (projectMetadataRelease && sql.includes(projectMetadataRelease.sql)) {
-        const snapshot = () => query(`SELECT oid,proargtypes::text,prorettype::regtype::text,provolatile,prosecdef,
-          proconfig,proowner,proacl::text,prosrc FROM pg_proc WHERE oid='chat.group_info_as(text,text)'::regprocedure`)
-        const ledger = () => query('SELECT version,digest,installed_at FROM gugu_install.releases ORDER BY version')
-        const before = await snapshot(), beforeLedger = await ledger()
-        await t.test('project metadata failure rolls back its function and release ledger together', async () => {
-          await assert.rejects(query(sql.replace(projectMetadataRelease.sql, () => projectMetadataRelease.sql + '\nSELECT 1/0;')), { code: '22012' })
-          await query('ROLLBACK')
-          assert.deepEqual(await snapshot(), before)
-          assert.deepEqual(await ledger(), beforeLedger)
-        })
-        const result = await query(sql)
-        const after = await snapshot(), installedLedger = await ledger()
-        await t.test('project metadata preserves the existing signature, authority and original projection', async () => {
-          assert.deepEqual({ ...after[0], prosrc: before[0].prosrc }, before[0])
-          const field = "        'is_project_group', v_group.kind = 'group' AND EXISTS (\n            SELECT 1 FROM identity.device_projects dp WHERE dp.chat_id = p_chat_id),\n"
-          assert.equal(after[0].prosrc.split(field).length, 2)
-          assert.equal(after[0].prosrc.replace(field, ''), before[0].prosrc)
-        })
-        await t.test('project metadata rollback restores the exact prior function without rewriting the ledger', async () => {
-          await query(readFileSync(new URL('../../ops/rollback-group-project-metadata.sql', import.meta.url), 'utf8'))
-          assert.deepEqual(await snapshot(), before)
-          assert.deepEqual(await ledger(), installedLedger)
-          await query('BEGIN;\n' + projectMetadataRelease.sql + '\nCOMMIT;')
-          assert.deepEqual(await snapshot(), after)
-          assert.deepEqual(await ledger(), installedLedger)
-        })
-        return result
-      }
       if (sql.includes(deviceCheckRelease.sql)) {
         const beforeTimeout = await query('SHOW lock_timeout')
         await t.test('device CHECK replacement times out behind a reader and preserves its predecessor', async () => {

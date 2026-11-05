@@ -23,6 +23,6 @@ export interface AttachmentObjectStorage {
   put(key: string, bytes: Uint8Array): Promise<void>
   exists(key: string): Promise<boolean>
   remove(key: string): Promise<void>
-  sign(key: string, image: boolean, now: Date, permit?: DownloadPermit): Promise<{ url: string; thumbUrl: string | null; expiresAt: string; originAvailable?: boolean }>
+  sign(key: string, image: boolean, now: Date, permit?: DownloadPermit): Promise<{ url: string; thumbUrl: string | null; expiresAt: string }>
   invalidate(key: string, image: boolean): Promise<void>
 }

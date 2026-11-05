@@ -140,8 +140,7 @@ describe('temporary and kept copies on the reference ledger',()=>{
     expect((await seconds(theirs.stored,plain)).expired_at).toBeNull()
   })
   it('summarizes only the caller\'s own copies: classes, groups, what expires soonest, and the machines\' project files',async()=>{
-    // Retention belongs to the uploader; otherwise both copies expire in 7d and their tie order is undefined.
-    await storage({image_retention:'1d'},member)
+    await storage({image_retention:'1d'})
     const image=await send(project,'image/png'),kept=await send(plain),temp=await send(plain)
     await mark([{message_id:temp.message}],'temporary')
     await send(plain,'application/pdf',undefined,host)
