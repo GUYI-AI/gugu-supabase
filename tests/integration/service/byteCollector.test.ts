@@ -110,6 +110,11 @@ describe('every lost holder reaches the one collector, once', () => {
   it('an account erasure queues the erased owner\'s unreferenced objects in the same queue, once; referenced ones stay', async () => {
     const stray = `${group}/${member}/${randomUUID()}.bin`, avatar = `${member}/group-avatar/${randomUUID()}.png`
     await db.query("INSERT INTO storage.objects(bucket_id,name,owner_id,metadata) VALUES('workspace',$1,$2,'{\"size\":5,\"mimetype\":\"application/zip\"}'),('chat-media',$3,$2,NULL)", [stray, member, avatar])
+    // A third member keeps the group alive after the erasure, so the avatar is still a live reference.
+    const third = randomUUID()
+    await db.query(`INSERT INTO auth.users(id,aud,role,email,raw_app_meta_data,raw_user_meta_data,created_at,updated_at)
+      VALUES($1,'authenticated','authenticated',$2,'{"provider":"email"}','{}',now(),now())`, [third, third + '@collector.invalid'])
+    await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [group, third])
     await db.query("UPDATE chat.chats SET avatar_url=$1,avatar_storage_bucket_id='chat-media',avatar_storage_object_name=$2 WHERE id=$3",
       [`http://127.0.0.1:54321/storage/v1/object/public/chat-media/${avatar}`, avatar, group])
     // No second queue: neither erasure outbox exists.
