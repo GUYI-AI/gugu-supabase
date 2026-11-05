@@ -93,6 +93,95 @@ afterEach(async () => {
 })
 
 describe('reversible agent session archival', () => {
+  async function freshAgent() {
+    const id = randomUUID()
+    await db.query(`INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id)
+      VALUES($1,'agent','Capacity fixture',$2,$3)`, [id, owner, device])
+    return id
+  }
+
+  it('releases archived capacity without removing seats and restores an existing member above the limit', async () => {
+    await db.query('UPDATE chat.chats SET max_members=4 WHERE id=$1', [group])
+    await db.query("UPDATE identity.users SET desired_status='offline' WHERE id=$1", [agent])
+    const fresh = await freshAgent()
+    expect((await db.query('SELECT chat.group_add_denial($1,$2,$3) AS denial', [group, fresh, owner])).rows[0].denial)
+      .toBe('member_limit_reached')
+    const seat = (await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, agent])).rows
+    await archive()
+    expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, agent])).rows).toEqual(seat)
+    await asUser()
+    const added = (await db.query('SELECT chat.add_group_agent($1,$2,NULL,auth.uid()::text) AS receipt', [group, fresh])).rows[0].receipt
+    await db.query('RESET ROLE')
+    expect(added.status).toBe('joined')
+    expect((await db.query('SELECT count(*)::int AS n FROM chat.chat_members WHERE chat_id=$1', [group])).rows[0].n).toBe(5)
+    await restore()
+    expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, agent])).rows).toEqual(seat)
+    await asUser()
+    const existing = (await db.query('SELECT chat.add_group_agent($1,$2,NULL,auth.uid()::text) AS receipt', [group, agent])).rows[0].receipt
+    await db.query('RESET ROLE')
+    expect(existing.status).toBe('already_member')
+    expect((await db.query('SELECT chat.group_add_denial($1,$2,$3) AS denial', [group, await freshAgent(), owner])).rows[0].denial)
+      .toBe('member_limit_reached')
+    await db.query('SET CONSTRAINTS ALL IMMEDIATE')
+  })
+
+  it('uses the same archived capacity in the storage-level insertion guard', async () => {
+    await db.query('UPDATE chat.chats SET max_members=4 WHERE id=$1', [group])
+    const fresh = await freshAgent()
+    const insert = () => db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [group, fresh])
+    expect(await denied(insert)).toContain('member_limit_reached')
+    await archive()
+    await insert()
+    expect((await db.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, fresh])).rowCount).toBe(1)
+    await db.query('SET CONSTRAINTS ALL IMMEDIATE')
+  })
+
+  it('rechecks invitation capacity after archive without deleting the retained member', async () => {
+    await db.query('UPDATE chat.chats SET max_members=4 WHERE id=$1', [group])
+    const invited = randomUUID()
+    await db.query(`INSERT INTO auth.users(id,aud,role,email,raw_app_meta_data,raw_user_meta_data,created_at,updated_at)
+      VALUES($1,'authenticated','authenticated',$2,'{}','{}',now(),now())`, [invited, `${invited}@session-archive.invalid`])
+    await asUser()
+    const invitation = (await db.query("SELECT chat.request_group_invitation_as($1,$2,'Capacity fixture',auth.uid()::text) AS receipt", [group, invited])).rows[0].receipt
+    await db.query('RESET ROLE')
+    const accept = async () => {
+      await asUser(invited)
+      await db.query('SELECT chat.decide_group_invitation_as($1,true,auth.uid()::text)', [invitation.invitation_id])
+      await db.query('RESET ROLE')
+    }
+    expect(await denied(accept)).toContain('member_limit_reached')
+    await archive()
+    await accept()
+    expect((await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1 AND user_id=ANY($2)', [group, [agent, invited]])).rows)
+      .toHaveLength(2)
+    await db.query('SET CONSTRAINTS ALL IMMEDIATE')
+  })
+
+  it.each(['join_public_group', 'request_group_join'])('releases capacity for %s after archive', async (entry) => {
+    const token = randomUUID()
+    await db.query("UPDATE chat.chats SET max_members=4,join_mode='open',invite_link_enabled=true,join_token=$2 WHERE id=$1", [group, token])
+    const publicId = (await db.query('SELECT public_id FROM chat.chats WHERE id=$1', [group])).rows[0].public_id
+    const joining = randomUUID()
+    await db.query(`INSERT INTO auth.users(id,aud,role,email,raw_app_meta_data,raw_user_meta_data,created_at,updated_at)
+      VALUES($1,'authenticated','authenticated',$2,'{}','{}',now(),now())`, [joining, `${joining}@session-archive.invalid`])
+    const join = async () => {
+      await asUser(joining)
+      const result = await db.query(entry === 'join_public_group'
+        ? 'SELECT * FROM chat.join_public_group($1,$2)'
+        : 'SELECT chat.request_group_join($1,$2,NULL) AS outcome', [publicId, token])
+      await db.query('RESET ROLE')
+      return result.rows[0]
+    }
+    expect(await denied(join)).toContain('Group member limit reached')
+    await archive()
+    const result = await join()
+    if (entry === 'join_public_group') expect(result).toMatchObject({ is_member: true, member_count: 5 })
+    else expect(result.outcome).toBe('joined')
+    expect((await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1 AND user_id=ANY($2)', [group, [agent, joining]])).rows)
+      .toHaveLength(2)
+    await db.query('SET CONSTRAINTS ALL IMMEDIATE')
+  })
+
   it.each([
     { mode: 'passive', route: 'mention', admitted: true },
     { mode: 'active', route: 'mention', admitted: true },

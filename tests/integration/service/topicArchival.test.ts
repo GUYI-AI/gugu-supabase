@@ -61,20 +61,21 @@ afterEach(async () => {
 })
 
 describe('human topic archival within the source conversation', () => {
-  it.each(['creator', 'owner', 'admin'])('allows the human %s and confirms idempotent archival', async (role) => {
-    const account = role === 'creator' ? creator : role === 'owner' ? owner : manager
+  it.each(['owner', 'admin'])('allows the source-group human %s and confirms idempotent archival', async (role) => {
+    const account = role === 'owner' ? owner : manager
     expect(await archive(account)).toEqual({ chat_id: topic, status: 'archived' })
     expect(await archive(account)).toEqual({ chat_id: topic, status: 'archived' })
     expect(await topicState()).toBe('archived')
     expect((await db.query('SELECT status FROM chat.chats WHERE id=$1', [source])).rows[0].status).toBe('active')
   })
   it('denies ordinary source members even with a topic admin role', async () => {
-    expect(await denied(() => archive(reader))).toContain('Only the topic creator')
+    expect(await denied(() => archive(reader))).toContain('Source conversation management required')
     expect(await topicState()).toBe('active')
   })
-  it('does not require the human creator to remain a topic participant', async () => {
+  it('does not give a group-topic creator management through participation or authorship', async () => {
+    expect(await denied(() => archive(creator))).toContain('Source conversation management required')
     await db.query('DELETE FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [topic, creator])
-    expect(await archive(creator)).toEqual({ chat_id: topic, status: 'archived' })
+    expect(await denied(() => archive(creator))).toContain('Source conversation management required')
   })
   it('allows only the creator in a source DM, without treating a peer as a group manager', async () => {
     const dm = randomUUID(), anchor = randomUUID()
@@ -82,20 +83,20 @@ describe('human topic archival within the source conversation', () => {
     await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES ($1,$2,'owner'),($1,$3,'member')`, [dm, reader, creator])
     await db.query(`INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES ($1,$2,$3,'DM source')`, [anchor, dm, creator])
     await db.query('UPDATE chat.chats SET source_chat_id=$1, source_message_id=$2 WHERE id=$3', [dm, anchor, topic])
-    expect(await denied(() => archive(reader))).toContain('Only the topic creator')
+    expect(await denied(() => archive(reader))).toContain('Source conversation management required')
     expect(await archive(creator)).toEqual({ chat_id: topic, status: 'archived' })
   })
   it('requires current source membership for creators and rejects outsiders or spoofed actors', async () => {
     await db.query('DELETE FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [source, creator])
-    expect(await denied(() => archive(creator))).toContain('Only the topic creator')
-    expect(await denied(() => archive(outsider))).toContain('Only the topic creator')
+    expect(await denied(() => archive(creator))).toContain('Source conversation management required')
+    expect(await denied(() => archive(outsider))).toContain('Source conversation management required')
     expect(await denied(() => archive(reader, owner))).toContain('group_actor_not_authorized')
     expect(await topicState()).toBe('active')
   })
-  it('denies an Agent creator but permits its human owner', async () => {
+  it('does not give an Agent creator or its human owner group management', async () => {
     await db.query('UPDATE chat.chats SET creator_user_id=$1 WHERE id=$2', [agent, topic])
-    expect(await denied(() => archive(creator, agent, topic, 'Topic'))).toContain('owner/admin of the source group')
-    expect(await archive(creator)).toEqual({ chat_id: topic, status: 'archived' })
+    expect(await denied(() => archive(creator, agent, topic, 'Topic'))).toContain('Source conversation management required')
+    expect(await denied(() => archive(creator))).toContain('Source conversation management required')
   })
   it('does not accept a group or widen the group-only archival RPC', async () => {
     expect(await denied(() => archive(owner, owner, source))).toContain('Topic not found')
@@ -107,7 +108,7 @@ describe('human topic archival within the source conversation', () => {
   it('removes archived topics from all listings and notifies nonparticipant source members', async () => {
     await db.query('DELETE FROM chat.account_revisions WHERE user_id=ANY($1::text[])', [[owner, creator, manager, reader]])
     await db.query('DELETE FROM realtime.messages WHERE topic=ANY($1::text[])', [[owner, creator, manager, reader].map((id) => `gugu:user:${id}:events`)])
-    await archive(creator)
+    await archive(manager)
     for (const account of [creator, owner, manager, reader]) {
       await asUser(account)
       expect((await db.query('SELECT * FROM chat.list_topics_of_chat($1)', [source])).rows).toEqual([])
@@ -141,7 +142,7 @@ describe('human topic archival within the source conversation', () => {
   })
   it('denies a non-manager Agent even with the exact name and a human source-owner token', async () => {
     await db.query('UPDATE identity.users SET owner_user_id=$1 WHERE id=$2', [owner, agent])
-    expect(await denied(() => archive(owner, agent, topic, 'Topic'))).toContain('owner/admin of the source group')
+    expect(await denied(() => archive(owner, agent, topic, 'Topic'))).toContain('Source conversation management required')
     expect(await topicState()).toBe('active')
   })
 })

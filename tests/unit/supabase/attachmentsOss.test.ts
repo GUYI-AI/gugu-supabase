@@ -23,6 +23,7 @@ import {
   handleSessionUrls,
   handleForward,
   handlePlace,
+  handleShare,
   handleGc,
   handleUpload,
   handleUrls,
@@ -146,6 +147,8 @@ function fakes(opts: {
   afterRegister?: (bucket: Bucket) => void
   /** 转发的原消息是老式附件:库说的那一行,和 chat-media 里那个对象的字节(null = 对象没了)。 */
   legacy?: { row: { object_name: string; file_name: string; content_type: string | null }; bytes: Uint8Array | null }
+  /** 按引用发的是文本文件:它此刻的正文,和库里最新一版已经带着字节的正文(null = 没有带字节的一版)。 */
+  document?: { text: string; snapshotted: string | null }
 } = {}) {
   const bucket: Bucket = { staging: opts.object ? { bytes: opts.object, etag: '"E1"' } : null, finals: new Map() }
   const keyOf = (url: string) => new URL(url).pathname.slice(1)
@@ -202,7 +205,9 @@ function fakes(opts: {
     },
     userRpc: async (fn, args) => {
       order.push('user:' + fn)
-      if (fn === 'workspace_get_as') return { data: [{ kind: 'file' }], error: null }
+      if (fn === 'workspace_get_as') return { data: [opts.document
+        ? { id: args.p_item_id, chat_id: 'c1', kind: 'document', filename: '周报', content_type: 'text/markdown' }
+        : { id: args.p_item_id, chat_id: 'c1', kind: 'file', filename: 'a.png', content_type: 'image/png' }], error: null }
       if (fn==='file_managed_upload_prepare') { controls.push({as:'user',fn,args});return {data:{max_bytes:MAX_ATTACHMENT_BYTES,permit_seconds:900},error:null} }
       if (fn==='file_managed_upload_scope') { controls.push({as:'user',fn,args});return {data:null,error:null} }
       if (fn==='file_managed_upload_as') {
@@ -235,6 +240,18 @@ function fakes(opts: {
         if (opts.legacy && !args.p_staging_key) return { data: null, error: { message: 'message old-1 is an old attachment: forward it through attachments/forward', hint: 'attachment_forward_needs_bytes', code: 'P0001' } }
         return { data: [{ id: args.p_message_id, forwarded_from_message_id: args.p_source_message_id }], error: null }
       }
+      if (fn === 'attachment_document_snapshot') {
+        // 库那一半(20261030120000):最新一版已经是这段正文、带着字节 ⇒ 那一版;没有字节又没带上传 ⇒ 要字节。
+        if (opts.document!.snapshotted === args.p_text) return { data: 7, error: null }
+        if (!args.p_staging_key) return { data: null, error: { message: '周报 is a text document: its text is sent as bytes through attachments/share', hint: 'attachment_forward_needs_bytes', code: 'P0001' } }
+        opts.document!.snapshotted = args.p_text as string
+        return { data: 8, error: null }
+      }
+      if (fn === 'attachment_share') {
+        // A document's version without bytes (20261030120000): the share refuses it, as the database does.
+        if (opts.document && args.p_version !== 7 && args.p_version !== 8) return { data: null, error: { message: '周报 is a text document: send it through attachments/share', hint: 'attachment_forward_needs_bytes', code: 'P0001' } }
+        return { data: [{ id: args.p_message_id, file_item_id: args.p_item_id, file_version: args.p_version }], error: null }
+      }
       if (fn === 'file_storage_mark_as') return { data: 1, error: null }
       if (fn === 'file_place_as') return { data: [{ id: 'i9', version: 1, path: args.p_file_name }], error: null }
       if (fn === 'file_replace_as') return { data: [{ id: args.p_item_id, version: 4 }], error: null }
@@ -250,7 +267,7 @@ function fakes(opts: {
     serviceRpc: async (fn, args) => {
       order.push('service:' + fn)
       if (fn==='file_managed_upload_for') {controls.push({as:'service',fn,args});return {data:{max_bytes:MAX_ATTACHMENT_BYTES},error:null}}
-      if (fn==='file_managed_upload_registered'||fn==='file_transfer_expire'||fn==='file_temporary_expire'||fn==='file_version_handoff_expire') {controls.push({as:'service',fn,args});return {data:null,error:null}}
+      if (fn==='file_managed_upload_registered'||fn==='file_transfer_expire'||fn==='file_temporary_expire') {controls.push({as:'service',fn,args});return {data:null,error:null}}
       if (fn==='file_transfer_settings') {controls.push({as:'service',fn,args});return {data:{},error:null}}
       rpcs.push({ as: 'service', fn, args })
       if (fn === 'file_blob_register') {
@@ -269,6 +286,7 @@ function fakes(opts: {
     uuid: () => '22222222-2222-4222-8222-222222222222',
     log: (stage) => void logs.push(stage),
     retryDelayMs: 0,
+    documentText: async () => opts.document!.text,
   }
   return { deps, calls, rpcs, controls, logs, removed, bucket, order }
 }
@@ -603,9 +621,6 @@ describe('直传表单、签名链接、回收', () => {
     expect(await handleGc(deps)).toEqual({ claimed: 2, deleted: 2, failed: 0 })
     expect(controls.filter(r => r.fn === 'file_temporary_expire')).toEqual([{as:'service',fn:'file_temporary_expire',args:{p_limit:500}}])
     expect(order.indexOf('service:file_temporary_expire')).toBeLessThan(order.indexOf('service:file_transfer_expire'))
-    // Handed-off next version copies past their window are retired before the claim, so their bytes go in this pass.
-    expect(controls.filter(r => r.fn === 'file_version_handoff_expire')).toEqual([{as:'service',fn:'file_version_handoff_expire',args:{p_limit:500}}])
-    expect(order.indexOf('service:file_version_handoff_expire')).toBeLessThan(order.indexOf('service:file_blob_gc_claim'))
     expect(controls.filter(r => r.fn === 'file_transfer_expire')).toEqual([{as:'service',fn:'file_transfer_expire',args:{p_limit:500}}])
     expect(order.indexOf('service:file_transfer_expire')).toBeLessThan(order.indexOf('service:file_blob_gc_claim'))
     expect(order).not.toContain('service:file_transfer_object_gone')
@@ -629,6 +644,51 @@ describe('直传表单、签名链接、回收', () => {
     expect(calls.map(c=>`${c.method} ${c.url.replace(/\?.*$/,'')}`)).toEqual(['DELETE https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/temporary/group/file/generation'])
     expect(removed).toEqual([])
     expect(rpcs.filter(r=>r.fn==='file_blob_gc_finish').map(r=>r.args)).toEqual([{p_blob_id:'temporary',p_claim_token:'token'}])
+  })
+})
+
+describe('按引用发(share)', () => {
+  const SHARE = '44444444-4444-4444-8444-444444444444'
+  const shareBody = { item_id: 'item-1', message_id: SHARE, chat_id: 'c2', sender_user_id: USER }
+  it('存的文件:一次 attachment_share,钉住给的那一版;不读正文、不放暂存', async () => {
+    const { deps, calls, rpcs } = fakes()
+    await expect(handleShare(deps, USER, { ...shareBody, version: 3 })).resolves.toMatchObject({ id: SHARE, file_version: 3 })
+    expect(calls).toEqual([])
+    expect(rpcs.map((r) => `${r.as} ${r.fn}`)).toEqual(['user attachment_share'])
+    expect(rpcs[0]!.args).toMatchObject({ p_item_id: 'item-1', p_version: 3, p_message_id: SHARE, p_chat_id: 'c2', p_sender_user_id: USER })
+  })
+
+  it('编辑器里改过的文本文件(没有带字节的一版):正文放进暂存(按这条新消息起名)→ 和提交同一步登记 → 定成一版 → 钉住那一版', async () => {
+    const text = '# 周报\n\n第二版'
+    const { deps, calls, rpcs, controls } = fakes({ document: { text, snapshotted: null } })
+    await expect(handleShare(deps, USER, shareBody)).resolves.toMatchObject({ id: SHARE, file_version: 8 })
+    const key = `staging/${USER}/${SHARE}`
+    expect(calls.filter((c) => c.method === 'PUT').map((c) => c.url)).toContainEqual(`https://gugu-files-test.oss-cn-wulanchabu-internal.aliyuncs.com/${key}`)
+    expect(rpcs.map((r) => `${r.as} ${r.fn}`)).toEqual([
+      'user attachment_document_snapshot', 'service file_blob_register', 'user attachment_document_snapshot', 'user attachment_share'])
+    expect(rpcs[0]!.args).toEqual({ p_item_id: 'item-1', p_as_user_id: USER, p_text: text, p_staging_key: null })
+    expect(rpcs[1]!.args).toMatchObject({ p_staging_key: key, p_size_bytes: new TextEncoder().encode(text).length, p_sha256: createHash('sha256').update(text).digest('hex') })
+    expect(rpcs[2]!.args).toMatchObject({ p_text: text, p_staging_key: key })
+    // No version asked: the text as it is now, the snapshot's version is pinned.
+    expect(rpcs[3]!.args).toMatchObject({ p_item_id: 'item-1', p_version: 8 })
+    expect(controls.find((c) => c.fn === 'file_managed_upload_as')!.args).toMatchObject({ p_id: SHARE, p_chat: 'c1', p_as: USER })
+  })
+
+  it('文本文件给了版本:钉住那一版(发过、带字节的),不读正文、不定新版;没有字节的那一版说清楚,从不换成现在的正文', async () => {
+    const { deps, calls, rpcs } = fakes({ document: { text: '# 周报 现在', snapshotted: null } })
+    await expect(handleShare(deps, USER, { ...shareBody, version: 7 })).resolves.toMatchObject({ file_version: 7 })
+    expect(rpcs.map((r) => `${r.as} ${r.fn}`)).toEqual(['user attachment_share'])
+    await expect(handleShare(deps, USER, { ...shareBody, version: 2 })).rejects.toMatchObject({ status: 409, code: 'version_unavailable' })
+    expect(rpcs.map((r) => r.fn)).not.toContain('attachment_document_snapshot')
+    expect(calls).toEqual([])
+  })
+
+  it('同一段正文再发一次:就是上次那一版,不再上传、不再登记', async () => {
+    const text = '# 周报'
+    const { deps, calls, rpcs } = fakes({ document: { text, snapshotted: text } })
+    await expect(handleShare(deps, USER, shareBody)).resolves.toMatchObject({ file_version: 7 })
+    expect(calls).toEqual([])
+    expect(rpcs.map((r) => `${r.as} ${r.fn}`)).toEqual(['user attachment_document_snapshot', 'user attachment_share'])
   })
 })
 

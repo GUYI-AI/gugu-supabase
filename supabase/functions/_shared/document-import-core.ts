@@ -1,16 +1,12 @@
 import { type AttachmentsDeps, call, objectStorage, Refusal } from './attachments-core.ts'
 import { inspectFileStream } from './file-inspection.ts'
-// Byte-identical copies of OpenDCAI/gugu@fa542adee2b4 packages/core/src/shared/{workspaceUpload,imageMime}.mjs (same sha256 the
-// lock recorded for the remote URL). Vendored because the edge runtime fetched them from raw.githubusercontent.com at boot,
-// which is unreliable from mainland hosts; refresh both files together when the client's classifier changes.
-import { WORKSPACE_TEXT_MAX_BYTES, workspaceUploadKind as classifyWorkspaceUpload } from './client-shared/workspaceUpload.mjs'
+import { ObjectStorageError } from './object-storage.ts'
+// Byte-identical copies of the client's packages/core/src/shared/{workspaceUpload,imageMime}.mjs at the commit pinned in
+// client-shared/source.json (tests/unit/client-shared checks the bytes). Vendored for Edge runtime reliability.
+import { WORKSPACE_TEXT_MAX_BYTES, workspaceUploadKind } from './client-shared/workspaceUpload.mjs'
 
 export { WORKSPACE_TEXT_MAX_BYTES }
-export function workspaceUploadKind(...args: Parameters<typeof classifyWorkspaceUpload>) {
-  const kind = classifyWorkspaceUpload(...args)
-  return kind.kind === 'document' && !['text/markdown', 'text/plain'].includes(kind.contentType)
-    ? { kind: 'file' as const, why: 'Only Markdown and plain text attachments are documents' } : kind
-}
+export { workspaceUploadKind }
 
 /** Unreadable source bytes: the row is recorded and passed over, the rest of the batch goes on. */
 const SKIPPED_READS = new Set(['source_unavailable', 'source_changed'])
@@ -56,6 +52,10 @@ export async function handleDocumentImport(deps: AttachmentsDeps, body: Record<s
         throw new Refusal(409, 'source_changed', 'Stored bytes do not match the version being imported')
       }
     } catch (error) {
+      if (error instanceof ObjectStorageError && error.status === 413 && error.code === 'too_large') {
+        decided('keep_file', `over the ${deps.textFiles.maxBytes / 1024 / 1024} MiB of a live text file`)
+        continue
+      }
       // Signing an object that is gone, or the network failing on its bytes, is a read failure too; a configuration
       // refusal is not, and stops the batch.
       const refusal = error instanceof Refusal ? error

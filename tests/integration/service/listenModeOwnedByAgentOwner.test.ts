@@ -3,8 +3,8 @@ import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 /**
- * agent 在群里主动还是被动归它的主人管(owner 10-17):主人改得动,群主 / 管理员改不动;
- * 主人能让自己的 agent 退群。群主照旧能改别人 agent 的角色、能把它移出群(现状不动)。
+ * Agent owners retain their settings; current source-group managers may also change listen mode.
+ * Role/removal protections are independent of this setting permission.
  *
  * 场景:群主 G 建的群里,普通成员 M 带着自己的 agent;G 也带一个 agent(阳控:G 改自己的照样改得动)。
  * 以 authenticated 身份 + 真 JWT claims 跑 RLS 与守卫;每条用例 BEGIN…ROLLBACK。
@@ -22,6 +22,8 @@ const { Client } = createRequire(import.meta.url)('pg') as {
 let database: DatabaseClient
 let groupOwner: string
 let member: string
+let admin: string
+let outsider: string
 let memberAgent: string
 let ownerAgent: string
 let group: string
@@ -66,14 +68,15 @@ beforeAll(async () => {
 afterAll(async () => { await database?.end() })
 beforeEach(async () => {
   await database.query('BEGIN')
-  groupOwner = randomUUID(); member = randomUUID(); memberAgent = randomUUID(); ownerAgent = randomUUID(); group = randomUUID(); topic = randomUUID()
-  for (const id of [groupOwner, member]) {
+  groupOwner = randomUUID(); member = randomUUID(); admin = randomUUID(); outsider = randomUUID(); memberAgent = randomUUID(); ownerAgent = randomUUID(); group = randomUUID(); topic = randomUUID()
+  for (const id of [groupOwner, member, admin, outsider]) {
     await database.query(`INSERT INTO auth.users (id,aud,role,email,raw_app_meta_data,raw_user_meta_data,created_at,updated_at)
       VALUES ($1,'authenticated','authenticated',$2,'{"provider":"email","providers":["email"]}','{}',now(),now())`,
     [id, `${id}@listen-mode-fixture.invalid`])
   }
   await database.query(`INSERT INTO identity.users (id, type, display_name) VALUES ($1,'human','Group Owner'),($2,'human','Member')
     ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name`, [groupOwner, member])
+  await database.query("INSERT INTO identity.users (id,type,display_name) VALUES ($1,'human','Admin'),($2,'human','Outsider') ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name", [admin, outsider])
   const ownerDevice = `listen-${groupOwner}`
   const memberDevice = `listen-${member}`
   await database.query(`INSERT INTO identity.gugu_devices (device_id,user_id,label,hostname,platform)
@@ -86,6 +89,7 @@ beforeEach(async () => {
   await database.query(`INSERT INTO chat.chat_members (chat_id, user_id, role, listen_mode) VALUES
     ($1,$2,'owner','passive'),($1,$3,'member','passive'),($1,$4,'member','passive'),($1,$5,'member','passive')`,
   [group, groupOwner, member, ownerAgent, memberAgent])
+  await database.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'admin')", [group, admin])
   // 话题:群主开的,群主和成员 M 是参与者;两个 agent 都还没进来(话题「能拉不能加」,插入不核 agent 归属)。
   const sourceMessage = randomUUID()
   await database.query(`INSERT INTO chat.messages (id, chat_id, sender_user_id, seq, content, content_type) VALUES ($1,$2,$3,1,'源消息','text')`,
@@ -103,18 +107,66 @@ afterEach(async () => {
   }
 })
 
-describe('listen_mode belongs to the agent owner', () => {
+describe('listen_mode is controlled by agent owners and current source-group managers', () => {
   it('lets an ordinary member switch their own agent', async () => {
     expect(await setListenMode(member, memberAgent, 'active')).toBe(1)
     expect(await listenMode(memberAgent)).toBe('active')
   })
 
-  it('refuses the group owner on someone else\'s agent, but not on their own', async () => {
-    expect(await rejected(() => setListenMode(groupOwner, memberAgent, 'active'))).toMatch(/agent_owner_required/)
-    expect(await listenMode(memberAgent)).toBe('passive')
-    // 阳控:同一个人、同一条路径,改自己的 agent 照样改得动 —— 拦下的是「别人的」,不是这条 UPDATE。
+  it('allows the group owner on another member’s agent and their own', async () => {
+    expect(await setListenMode(groupOwner, memberAgent, 'active')).toBe(1)
+    expect(await listenMode(memberAgent)).toBe('active')
+    // The same RPC retains the human owner’s existing permission.
     expect(await setListenMode(groupOwner, ownerAgent, 'active')).toBe(1)
     expect(await listenMode(ownerAgent)).toBe('active')
+  })
+
+
+  it('allows an administrator to change the group owner’s agent and observes revocation', async () => {
+    expect(await setListenMode(admin, ownerAgent, 'active')).toBe(1)
+    expect(await listenMode(ownerAgent)).toBe('active')
+    await database.query("UPDATE chat.chat_members SET role='member' WHERE chat_id=$1 AND user_id=$2", [group, admin])
+    expect(await rejected(() => setListenMode(admin, ownerAgent, 'passive'))).toMatch(/agent_owner_or_group_manager_required/)
+    expect(await listenMode(ownerAgent)).toBe('active')
+  })
+
+  it('does not give ordinary members or outsiders authority over another agent', async () => {
+    for (const actor of [member, outsider]) {
+      expect(await rejected(() => setListenMode(actor, ownerAgent, 'active'))).toMatch(/agent_owner_or_group_manager_required/)
+      expect(await listenMode(ownerAgent)).toBe('passive')
+    }
+  })
+
+  it('retains the human group owner role and removal protection while allowing their agent setting', async () => {
+    expect(await setListenMode(admin, ownerAgent, 'active')).toBe(1)
+    await asUser(admin)
+    expect(await rejected(() => database.query("SELECT chat.set_group_member_role_as($1,$2,'member',auth.uid()::text)", [group, groupOwner]))).toMatch(/group_owner_role_protected/)
+    expect(await rejected(() => database.query('SELECT chat.remove_group_member_as($1,$2,auth.uid()::text)', [group, groupOwner]))).toMatch(/group_owner_cannot_leave/)
+    expect(await listenMode(ownerAgent)).toBe('active')
+  })
+
+  it('inherits source-group management for topic listen mode without changing the source', async () => {
+    await database.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [topic, ownerAgent])
+    await asUser(admin)
+    await database.query("SELECT chat.set_agent_listen_mode_as($1,$2,'active',auth.uid()::text)", [topic, ownerAgent])
+    expect(await listenMode(ownerAgent)).toBe('passive')
+    const { rows } = await database.query<{ listen_mode: string }>('SELECT listen_mode FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [topic, ownerAgent])
+    expect(rows).toEqual([{ listen_mode: 'active' }])
+    await database.query("UPDATE chat.chat_members SET role='member' WHERE chat_id=$1 AND user_id=$2", [group, admin])
+    await database.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner')", [topic, admin])
+    await asUser(admin)
+    expect(await rejected(() => database.query("SELECT chat.set_agent_listen_mode_as($1,$2,'passive',auth.uid()::text)", [topic, ownerAgent]))).toMatch(/agent_owner_or_group_manager_required/)
+  })
+
+  it('rejects human targets, invalid modes, absent members and archived manager scope', async () => {
+    expect(await rejected(() => setListenMode(admin, groupOwner, 'active'))).toMatch(/agent_owner_or_group_manager_required/)
+    expect(await rejected(() => setListenMode(admin, ownerAgent, 'invalid'))).toMatch(/invalid_listen_mode/)
+    await asService()
+    await database.query('DELETE FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, ownerAgent])
+    expect(await rejected(() => setListenMode(admin, ownerAgent, 'active'))).toMatch(/group_member_not_found/)
+    await asService()
+    await database.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [group])
+    expect(await rejected(() => setListenMode(admin, memberAgent, 'active'))).toMatch(/agent_owner_or_group_manager_required/)
   })
 
   it('keeps the group owner\'s other powers over that agent: role and removal', async () => {

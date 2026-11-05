@@ -189,6 +189,7 @@ describe('explicit App data', () => {
 
   it('does not let a nonmember or an impersonated actor mark or create data', async () => {
     const outsider = randomUUID()
+    await database.query('INSERT INTO auth.users(id,created_at) VALUES($1,now())', [outsider])
     await asUser(outsider)
     expect(await failure('SELECT chat.workspace_mark_app_data_as($1,$2,$3::jsonb)', [item, outsider, JSON.stringify(app)])).toMatch(/not found/)
     expect(await failure('SELECT chat.workspace_mark_app_data_as($1,$2,$3::jsonb)', [item, owner, JSON.stringify(app)])).toMatch(/not owned|not allowed|not yours|cannot|actor/i)

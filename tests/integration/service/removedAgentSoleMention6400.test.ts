@@ -127,7 +127,7 @@ async function actAsOwner(): Promise<void> {
 }
 
 describe('#6400 a message that named only a removed agent stays directed', () => {
-  it('keeps the removed agent as the sole recipient and still scrubs it where others remain', async () => {
+  it('keeps all original recipients, including the removed identity', async () => {
     await inRollback(async () => {
       await seed()
       await actAsOwner()
@@ -136,13 +136,13 @@ describe('#6400 a message that named only a removed agent stays directed', () =>
 
       const identity = await database.query<{ n: string }>(
         'SELECT count(*)::text AS n FROM identity.users WHERE id = $1', [REMOVED])
-      expect(identity.rows[0].n).toBe('0')
+      expect(identity.rows[0].n).toBe('1')
 
       const rows = await database.query<{ id: string; to_user_ids: string[] | null; is_whisper: boolean }>(
         `SELECT id, to_user_ids, is_whisper FROM chat.messages WHERE chat_id = $1 ORDER BY id`, [GROUP])
       expect(rows.rows).toEqual([
         { id: 'open-it-6400', to_user_ids: null, is_whisper: false },
-        { id: 'shared-it-6400', to_user_ids: [BYSTANDER], is_whisper: false },
+        { id: 'shared-it-6400', to_user_ids: [REMOVED, BYSTANDER], is_whisper: false },
         { id: 'sole-it-6400', to_user_ids: [REMOVED], is_whisper: false },
       ])
     })
@@ -160,7 +160,7 @@ describe('#6400 a message that named only a removed agent stays directed', () =>
         `SELECT m.to_user_ids, m.is_whisper,
                 (SELECT count(*)::text FROM identity.users WHERE id = $2) AS identities
          FROM chat.messages m WHERE m.id = 'whisper-it-6400' AND m.chat_id = $1`, [GROUP, REMOVED])
-      expect(rows.rows).toEqual([{ to_user_ids: [REMOVED], is_whisper: true, identities: '0' }])
+      expect(rows.rows).toEqual([{ to_user_ids: [REMOVED], is_whisper: true, identities: '1' }])
     })
   })
 

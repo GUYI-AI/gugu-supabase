@@ -79,18 +79,17 @@ beforeEach(async()=>{
 afterEach(async()=>{await db.query('ROLLBACK')})
 
 describe('temporary and kept copies on the reference ledger',()=>{
-  it('keeps images and temporary files on separate retention keys: the host\'s in a project chat, the uploader\'s elsewhere',async()=>{
-    await storage({image_retention:'1d',temporary_retention:'30d'})
-    await storage({temporary_retention:'1d',image_retention:'30d'},member)
+  it('keeps images and temporary files on separate retention keys, always the uploader\'s own',async()=>{
+    // The project owner's setting does not apply to what a member uploads.
+    await storage({image_retention:'30d',temporary_retention:'30d'})
+    await storage({image_retention:'1d',temporary_retention:'1d'},member)
     const image=await send(project,'image/png')
     expect((await seconds(image.stored,project)).s).toBeLessThanOrEqual(DAY)
-    // A project chat that uploads everything: files reach the cloud, and one marked temporary follows the host's key.
-    await storage({proactive_upload:true})
     const doc=await send(project)
     expect((await seconds(doc.stored,project)).expires_at).toBeNull()
     expect(await mark([{message_id:doc.message}],'temporary')).toBe(1)
-    expect((await seconds(doc.stored,project)).s).toBeGreaterThan(30*DAY-60)
-    // An ordinary chat has no host: the uploader's own key.
+    expect((await seconds(doc.stored,project)).s).toBeLessThanOrEqual(DAY)
+    // An ordinary chat: the same key.
     const note=await send(plain)
     expect(await mark([{item_id:note.item}],'temporary')).toBe(1)
     expect((await seconds(note.stored,plain)).s).toBeLessThanOrEqual(DAY)
@@ -141,7 +140,8 @@ describe('temporary and kept copies on the reference ledger',()=>{
     expect((await seconds(theirs.stored,plain)).expired_at).toBeNull()
   })
   it('summarizes only the caller\'s own copies: classes, groups, what expires soonest, and the machines\' project files',async()=>{
-    await storage({image_retention:'1d'})
+    // Retention belongs to the uploader; otherwise both copies expire in 7d and their tie order is undefined.
+    await storage({image_retention:'1d'},member)
     const image=await send(project,'image/png'),kept=await send(plain),temp=await send(plain)
     await mark([{message_id:temp.message}],'temporary')
     await send(plain,'application/pdf',undefined,host)
@@ -153,10 +153,13 @@ describe('temporary and kept copies on the reference ledger',()=>{
     expect(r.expiring.map((e:{class:string})=>e.class)).toEqual(['image','temporary'])
     expect(r.expiring[0]).toMatchObject({chat_id:project,item_id:expect.any(String),file_name:expect.any(String)})
     expect(r.machines).toEqual([])
+    // The idle-expiry policy the panel states: none set → null; set → exactly what chat.file_transfer_expire reads.
+    expect(r.expiry).toBeNull()
+    await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"large_file_bytes\":1048576,\"large_file_idle_seconds\":2592000}' WHERE scope='global' AND scope_id='*'")
+    expect((await overview()).expiry).toEqual({large_file_bytes:1048576,idle_seconds:2592000})
     void image;void kept
-    // The host's machine keeps the project's local files: counted, not in the cloud.
+    // The owner's machine keeps the local files it sent: counted, not in the cloud.
     await user(host)
-    await db.query("SELECT chat.file_project_policy_as($1,$2,'root',false,true,'7d')",[project,device])
     await db.query("SELECT chat.file_device_publish($1,$2,$3,'a.bin',$4,123,'a.bin','application/octet-stream',NULL,NULL)",[randomUUID(),project,device,'ab'.repeat(32)])
     await service()
     expect((await overview(host)).machines).toEqual([{device_id:device,label:'Studio Mac',files:1,bytes:123,temporary_copy_bytes:0}])
@@ -173,7 +176,6 @@ describe('temporary and kept copies on the reference ledger',()=>{
     expect(theirs.expires_at).toEqual(mine.expires_at)
     // A file with no cloud copy has neither.
     await user(host)
-    await db.query("SELECT chat.file_project_policy_as($1,$2,'root',false,true,'7d')",[project,device])
     const local=(await db.query("SELECT chat.file_device_publish($1,$2,$3,'a.bin',$4,9,'a.bin','application/octet-stream',NULL,NULL) AS r",[randomUUID(),project,device,'ab'.repeat(32)])).rows[0].r
     const row=(await db.query('SELECT expires_at,is_mine FROM chat.workspace_list_as($1,$2) WHERE id=$3',[project,host,local.item_id])).rows[0]
     await service()
@@ -197,7 +199,6 @@ describe('temporary and kept copies on the reference ledger',()=>{
     expect(of(gone.item).copy_expired_at).not.toBeNull()
     // A project file kept on its machine: no cloud copy, only the machine.
     await user(host)
-    await db.query("SELECT chat.file_project_policy_as($1,$2,'root',false,true,'7d')",[project,device])
     const local=(await db.query("SELECT chat.file_device_publish($1,$2,$3,'b.bin',$4,9,'b.bin','application/octet-stream',NULL,NULL) AS r",[randomUUID(),project,device,'cd'.repeat(32)])).rows[0].r
     const row=(await db.query(`SELECT ${columns} FROM chat.workspace_list_as($1,$2) WHERE id=$3`,[project,host,local.item_id])).rows[0]
     await service()
@@ -209,6 +210,6 @@ describe('temporary and kept copies on the reference ledger',()=>{
       expect((await reject(`INSERT INTO identity.user_settings(user_id,scope,config) VALUES($1,'user',jsonb_build_object('file_storage',$2::jsonb))`,[host,value])).code).toBe('23514')
     }
     await service()
-    expect((await db.query('SELECT chat.file_storage_policy($1) AS p',[project])).rows[0].p).toMatchObject({image_retention:'7d',temporary_retention:'7d'})
+    expect((await db.query('SELECT chat.file_storage_of($1) AS p',[host])).rows[0].p).toMatchObject({image_retention:'7d',temporary_retention:'7d'})
   })
 })

@@ -7,6 +7,7 @@
 //                   → 登记(service_role)→ 删暂存 → 以调用者的身份 attachment_commit(放进「附件」、发消息,一个事务;
 //                   带 item_id + expected_version 就是那个文件的下一版)。
 //   POST forward  → 以调用者的身份 attachment_forward。
+//   POST share    → 群文件夹里的文件按引用发:文本文件先定成带字节的一版(attachment_document_snapshot),再 attachment_share。
 //   POST urls     → 以调用者的身份 file_urls_as(条目的某一版,或悄悄话附件那条消息),再签:OSS 的走 CDN 鉴权 A(图片另给缩略图链接),老对象走存储的签名链接。
 //   POST gc       → 只认 service_role(pg_cron + pg_net 每 10 分钟叫一次):领一批该回收的,删对象、清 CDN、报完成 / 失败。
 
@@ -55,6 +56,8 @@ export interface AttachmentsDeps {
   retryDelayMs?: number
   /** Drain/finish an inspected incoming replacement, using the original caller's authorization. */
   documentReplacement?(item: string, actor: string, body: { key: string; expected: number; finish: boolean }): Promise<void>
+  /** A text document's text as it is now, from the file service with the caller's authorization (`asAgent`: as their agent). */
+  documentText?(item: string, asAgent: string | null): Promise<string>
 }
 
 export function objectStorage(deps: AttachmentsDeps): AttachmentObjectStorage {
@@ -416,6 +419,64 @@ export async function handleForward(deps: AttachmentsDeps, userId: string, body:
   return rows[0] ?? null
 }
 
+// ── share ────────────────────────────────────────────────────────────────────────
+// 群文件夹里的一个文件按引用发出去(以调用者的身份 attachment_share):不传字节,消息钉住那个文件的一版。存的文件钉住
+// 给的那一版(不给 = 现在的)。文本文件(document)不给版本:先把它此刻的正文定成带字节的一版
+// (attachment_document_snapshot;正文没变就是上次那一版,字节按 sha256 存、不另存一份),再钉住那一版;给了版本:
+// 钉住那一版,只有发过、带着字节的那几版钉得住 —— 其余的说清楚,从不悄悄换成现在的正文。
+export async function handleShare(deps: AttachmentsDeps, userId: string, body: Record<string, unknown>) {
+  const itemId = str(body, 'item_id')!
+  const sender = str(body, 'sender_user_id')!
+  const messageId = str(body, 'message_id')!
+  const caption = str(body, 'caption', false)
+  const entry = ((await call(deps.userRpc, 'workspace_get_as', { p_item_id: itemId, p_as_user_id: sender })) as SharedEntry[])[0]
+  const asked = int(body, 'version')
+  const version = entry?.kind === 'document' && asked === null ? await documentSnapshot(deps, userId, sender, messageId, entry) : asked
+  const rows = (await call(deps.userRpc, 'attachment_share', {
+    p_item_id: itemId,
+    p_version: version,
+    p_message_id: messageId,
+    p_chat_id: str(body, 'chat_id'),
+    p_sender_user_id: sender,
+    p_to_user_ids: strings(body, 'to_user_ids'),
+    p_reply_to_message_id: str(body, 'reply_to_message_id', false),
+    p_thread_root_id: str(body, 'thread_root_id', false),
+    p_is_thread_root: bool(body, 'is_thread_root'),
+    p_via_app: str(body, 'via_app', false),
+    ...(caption != null ? { p_caption: caption } : {}),
+  }).catch((error) => {
+    // A document's version as text only (never sent, so never given bytes): what was asked for cannot be pinned.
+    if (!(entry?.kind === 'document' && error instanceof Refusal && error.code === 'needs_bytes')) throw error
+    throw new Refusal(409, 'version_unavailable',
+      `${entry.filename} is a text document: version ${version} has no saved copy to send. Leave out the version to send its text as it is now.`)
+  })) as unknown[]
+  return rows[0] ?? null
+}
+
+interface SharedEntry { id: string; chat_id: string; kind: string; filename: string; content_type: string }
+
+/** The version of a text document that says its text as it is now, with bytes: asked once, then once more with the text staged. */
+async function documentSnapshot(deps: AttachmentsDeps, userId: string, sender: string, messageId: string, entry: SharedEntry) {
+  if (!deps.documentText) throw new Refusal(503, 'not_configured', 'Sharing a text document requires the file service')
+  const text = await deps.documentText(entry.id, sender === userId ? null : sender)
+  const snapshot = async (stagingKey: string | null) => (await call(deps.userRpc, 'attachment_document_snapshot', {
+    p_item_id: entry.id, p_as_user_id: sender, p_text: text, p_staging_key: stagingKey,
+  })) as number
+  try {
+    return await snapshot(null)
+  } catch (error) {
+    if (!(error instanceof Refusal && error.code === 'needs_bytes')) throw error
+  }
+  // As a legacy attachment's forward does: the bytes go into staging named by the new message, registered as any upload.
+  const stagingKey = `staging/${userId}/${messageId}`
+  if (!STAGING.test(stagingKey)) throw new Refusal(400, 'invalid', 'message_id is a uuid')
+  const bytes = new TextEncoder().encode(text)
+  await call(deps.userRpc, 'file_managed_upload_as', { p_id: messageId, p_chat: entry.chat_id, p_as: sender, p_bytes: bytes.length })
+  await objectStorage(deps).put(stagingKey, bytes)
+  await registerStaged(deps, userId, stagingKey, entry.content_type, entry.filename)
+  return await snapshot(stagingKey)
+}
+
 // ── urls ─────────────────────────────────────────────────────────────────────────
 export async function handleUrls(deps: AttachmentsDeps, userId: string, body: Record<string, unknown>) {
   if (!Array.isArray(body.refs)||!body.refs.length||body.refs.length>200) throw new Refusal(400,'invalid','refs is a list of 1 to 200 file references')
@@ -435,7 +496,6 @@ interface Claimed {
 
 export async function handleGc(deps: AttachmentsDeps) {
   await call(deps.serviceRpc, 'file_temporary_expire', { p_limit: 500 })
-  await call(deps.serviceRpc, 'file_version_handoff_expire', { p_limit: 500 })
   await call(deps.serviceRpc, 'file_transfer_expire', { p_limit: 500 })
   const claimed = ((await call(deps.serviceRpc, 'file_blob_gc_claim', { p_limit: 50, p_stale_seconds: 600 })) ?? []) as Claimed[]
   let deleted = 0

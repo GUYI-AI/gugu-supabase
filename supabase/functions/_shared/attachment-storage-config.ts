@@ -18,6 +18,8 @@ export const OSS_ENV = [
   'OSS_ACCESS_KEY_SECRET',
   'CDN_DOMAIN',
   'CDN_AUTH_KEY_PRIMARY',
+  // The edge's Type A authentication lifetime: links are signed so they expire 60 s after issue, which needs this value.
+  'CDN_AUTH_TTL_SECONDS',
 ] as const
 
 export type AttachmentStorageConfig =
@@ -39,12 +41,8 @@ export function attachmentStorageConfig(env: (key: string) => string | undefined
   if (missing.length) throw new StorageConfigError([...missing])
   // Optional physical prefix that keeps environments sharing one bucket apart; logical keys in the database never change.
   const objectPrefix = get('ATTACHMENTS_OBJECT_PREFIX')
-  const cdnSettings: Partial<CdnConfig>={}
-  if (get('CDN_AUTH_TTL_SECONDS')) {
-    const value=Number(get('CDN_AUTH_TTL_SECONDS'))
-    if (!Number.isSafeInteger(value)||value<1) throw new StorageConfigError(['CDN_AUTH_TTL_SECONDS'])
-    cdnSettings.authTtlSeconds=value
-  }
+  const authTtlSeconds=Number(get('CDN_AUTH_TTL_SECONDS'))
+  if (!Number.isSafeInteger(authTtlSeconds)||authTtlSeconds<1) throw new StorageConfigError(['CDN_AUTH_TTL_SECONDS'])
   return {
     kind: 'oss',
     oss: {
@@ -56,6 +54,6 @@ export function attachmentStorageConfig(env: (key: string) => string | undefined
       accessKeyId: get('OSS_ACCESS_KEY_ID'),
       accessKeySecret: get('OSS_ACCESS_KEY_SECRET'),
     },
-    cdn: { domain: get('CDN_DOMAIN'), authKey: get('CDN_AUTH_KEY_PRIMARY'), objectPrefix,...cdnSettings },
+    cdn: { domain: get('CDN_DOMAIN'), authKey: get('CDN_AUTH_KEY_PRIMARY'), objectPrefix, authTtlSeconds },
   }
 }

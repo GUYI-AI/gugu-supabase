@@ -77,6 +77,26 @@ async function addOwnAgent(): Promise<string> {
   return status
 }
 
+async function groupInfo(chat = group, account = owner, actor = account): Promise<Record<string, unknown>> {
+  await database.query('SET LOCAL role TO authenticated')
+  await database.query("SELECT set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: account, role: 'authenticated' })])
+  const { rows } = await database.query<{ info: Record<string, unknown> }>(
+    'SELECT chat.group_info_as($1,$2) AS info', [chat, actor])
+  await database.query('RESET role')
+  return rows[0]!.info
+}
+
+async function rejectedInfo(chat: string, account: string, actor = account): Promise<string> {
+  await database.query('SAVEPOINT denied_info')
+  try {
+    await groupInfo(chat, account, actor)
+  } catch (error) {
+    await database.query('ROLLBACK TO SAVEPOINT denied_info')
+    return String((error as Error).message)
+  }
+  throw new Error('Expected group-info authorization rejection')
+}
+
 beforeAll(async () => {
   const url = new URL(process.env.GUGU_INTEGRATION_DATABASE_URL ?? process.env.GUGU_DATABASE_URL ?? '')
   if (!['postgres:', 'postgresql:'].includes(url.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
@@ -104,6 +124,65 @@ describe('项目群里只有主人和主人的 agent', () => {
 
   it('已经在项目群里的别人不动', () => inRollback(true, async () => {
     await database.query(`INSERT INTO chat.chat_members (chat_id, user_id, role) VALUES ($1,$2,'member')`, [group, colleague])
+    expect(await denial(colleague)).toBeNull()
+  }))
+})
+
+describe('member-visible project classification uses the existing group-info door', () => {
+  it('returns false for an ordinary group and preserves existing settings and authority', () => inRollback(false, async () => {
+    const info = await groupInfo()
+    expect(info).toMatchObject({ id: group, is_project_group: false, my_role: 'owner', can_manage: true, can_dissolve: true, can_archive_topic: false })
+    expect(info.name).toBe('proj')
+  }))
+
+  it('returns true to a member who cannot read the project owner’s device records', () => inRollback(true, async () => {
+    await database.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [group, colleague])
+    const info = await groupInfo(group, colleague)
+    expect(info).toMatchObject({ id: group, is_project_group: true, my_role: 'member', can_manage: false })
+    expect(info).not.toHaveProperty('device_id')
+    expect(info).not.toHaveProperty('root_path')
+    await database.query('SET LOCAL role TO authenticated')
+    expect((await database.query('SELECT 1 FROM identity.device_projects WHERE chat_id=$1', [group])).rows).toHaveLength(0)
+  }))
+
+  it('classifies the actual group rather than inheriting project status into its topic', () => inRollback(true, async () => {
+    await database.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [group, colleague])
+    await addOwnAgent()
+    const anchor = randomUUID()
+    await database.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'Project topic')", [anchor, group, owner])
+    await groupInfo()
+    await database.query('SET LOCAL role TO authenticated')
+    const topic = (await database.query<{ chat_id: string }>('SELECT * FROM chat.create_topic($1,$2,$3,$4)', [group, anchor, 'Topic', [ownAgent]])).rows[0]!.chat_id
+    await database.query('RESET role')
+    expect((await database.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [topic, colleague])).rows).toHaveLength(0)
+    expect(await groupInfo(topic, colleague)).toMatchObject({ id: topic, is_project_group: false, my_role: 'member', can_manage: false })
+    expect(await groupInfo(topic)).toMatchObject({ is_project_group: false, my_role: 'owner', can_manage: true, can_archive_topic: true, can_dissolve: false })
+  }))
+
+  it('keeps the authenticated caller visibility when acting as an owned Agent without a seat', () => inRollback(true, async () => {
+    expect(await groupInfo(group, owner, ownAgent)).toMatchObject({ id: group, is_project_group: true, my_role: null, can_manage: false })
+  }))
+
+  it('returns the same project metadata after an authorized settings update', () => inRollback(true, async () => {
+    const before = await groupInfo()
+    await database.query('SET LOCAL role TO authenticated')
+    const updated = (await database.query<{ info: Record<string, unknown> }>(
+      'SELECT chat.update_group_as($1,$2::jsonb,$3) AS info', [group, JSON.stringify({ name: 'Renamed' }), owner])).rows[0]!.info
+    expect(updated).toEqual({ ...before, name: 'Renamed' })
+  }))
+
+  it('does not expose group existence or classification to an unrelated caller', () => inRollback(true, async () => {
+    expect(await rejectedInfo(group, colleague)).toContain('group_not_visible')
+    expect(await rejectedInfo(randomUUID(), colleague)).toContain('group_not_visible')
+    expect(await rejectedInfo(group, colleague, ownAgent)).toContain('group_actor_not_authorized')
+    expect((await database.query<{ allowed: boolean }>("SELECT has_function_privilege('anon','chat.group_info_as(text,text)','EXECUTE') AS allowed")).rows[0]!.allowed).toBe(false)
+  }))
+
+  it('observes binding removal without changing the existing admission decision', () => inRollback(true, async () => {
+    expect((await groupInfo()).is_project_group).toBe(true)
+    expect(await denial(colleague)).toBe('project_group_owner_only')
+    await database.query('DELETE FROM identity.device_projects WHERE chat_id=$1', [group])
+    expect((await groupInfo()).is_project_group).toBe(false)
     expect(await denial(colleague)).toBeNull()
   }))
 })

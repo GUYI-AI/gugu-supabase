@@ -27,7 +27,7 @@ SELECT-only with RLS; internal helpers and direct writes are closed to clients.
 | `assistant_panel_admit` | `p_assistant`, `p_runtime_instance_id`, `p_expected_revision` | `{admitted:true, revision}` only when the head still matches and all preceding panel changes have been applied; otherwise identifies the pending item or raises a version conflict |
 
 Revisions in JSON results are decimal strings. An absent resource has expected
-revision `0`. A stale expected revision returns SQLSTATE `40001`; retain the draft
+revision `0`. A stale expected revision returns SQLSTATE `PT409` (HTTP 409); retain the draft
 and re-read before editing. An operation ID retry with the identical request
 returns its existing receipt. Reusing the ID for different input is rejected.
 Receipts are retained for 30 days after application or supersession; automatic

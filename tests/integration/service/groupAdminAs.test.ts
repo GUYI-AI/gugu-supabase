@@ -144,12 +144,57 @@ describe('one actor authority for people and Agents', () => {
     expect(await rejected(() => rpc('set_group_member_role_as', { p_chat_id: room, p_member_user_id: owner, p_role: 'member' }, owner)))
       .toContain('group_owner_role_protected')
   })
-  it('only the actual human owner may choose an Agent listen mode', async () => {
+  it('allows the human owner and actual group manager to choose an Agent listen mode', async () => {
     expect((await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'passive' }, owner)).listen_mode).toBe('passive')
-    expect(await rejected(() => rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'active' }, agentOwner, adminAgent)))
-      .toContain('agent_owner_required')
+    expect((await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'active' }, agentOwner, adminAgent)).listen_mode).toBe('active')
+    expect((await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'active' }, owner, memberAgent)).listen_mode).toBe('active')
+  })
+  it('an ordinary live Agent changes its own group listen mode without changing its read cursor', async () => {
+    const before = (await db.query('SELECT last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows[0]
+    for (const mode of ['passive', 'active']) {
+      expect(await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: mode }, owner, memberAgent))
+        .toMatchObject({ chat_id: room, user_id: memberAgent, listen_mode: mode })
+      await service()
+      expect((await db.query('SELECT listen_mode,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows)
+        .toEqual([{ ...before, listen_mode: mode }])
+    }
+  })
+  it('self listen mode does not bypass authenticated actor, actual membership or archived scope', async () => {
+    const setSelf = (account: string, actor: string) => rpc('set_agent_listen_mode_as', {
+      p_chat_id: room, p_agent_user_id: actor, p_mode: 'passive',
+    }, account, actor)
+    expect(await rejected(() => setSelf(owner, adminAgent))).toContain('group_actor_not_authorized')
+    expect(await rejected(() => setSelf(owner, freshAgent))).toContain('agent_owner_or_group_manager_required')
+    await service()
+    expect((await db.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, freshAgent])).rows).toHaveLength(0)
+    await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [room])
+    expect(await rejected(() => setSelf(owner, memberAgent))).toContain('agent_owner_or_group_manager_required')
+  })
+  it('a paused Agent keeps its effective seat and may change its own listen preference', async () => {
+    const before = (await db.query('SELECT role,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows[0]
+    await asUser(owner)
+    expect((await db.query("SELECT desired_status,removed_at FROM identity.set_agent_desired_status($1,'offline')", [memberAgent])).rows)
+      .toEqual([{ desired_status: 'offline', removed_at: null }])
+    await service()
+    expect((await db.query('SELECT 1 FROM chat.active_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows).toHaveLength(1)
+    expect(await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'passive' }, owner, memberAgent))
+      .toMatchObject({ chat_id: room, user_id: memberAgent, listen_mode: 'passive' })
+    await service()
+    expect((await db.query('SELECT role,listen_mode,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows)
+      .toEqual([{ ...before, listen_mode: 'passive' }])
+    expect((await db.query('SELECT desired_status,removed_at FROM identity.users WHERE id=$1', [memberAgent])).rows)
+      .toEqual([{ desired_status: 'offline', removed_at: null }])
+  })
+  it('a removed Agent cannot use its retained physical seat to keep changing itself', async () => {
+    await rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'passive' }, owner, memberAgent)
+    await service()
+    const before = (await db.query('SELECT role,listen_mode,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows
+    await db.query('UPDATE identity.users SET removed_at=now() WHERE id=$1', [memberAgent])
+    expect((await db.query('SELECT 1 FROM chat.active_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows).toHaveLength(0)
     expect(await rejected(() => rpc('set_agent_listen_mode_as', { p_chat_id: room, p_agent_user_id: memberAgent, p_mode: 'active' }, owner, memberAgent)))
-      .toContain('agent_owner_required')
+      .toContain('group_actor_not_authorized')
+    await service()
+    expect((await db.query('SELECT role,listen_mode,last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, memberAgent])).rows).toEqual(before)
   })
   it('revokes the old table mutations even for a group owner, but keeps personal preferences', async () => {
     await asUser(owner)
@@ -174,6 +219,94 @@ describe('one actor authority for people and Agents', () => {
   it('only the actual human group owner can dissolve the group', async () => {
     expect(await rejected(() => rpc('archive_group_as', { p_chat_id: room }, agentOwner, adminAgent))).toContain('human_group_owner_required')
     expect((await rpc('archive_group_as', { p_chat_id: room }, owner)).status).toBe('archived')
+  })
+})
+
+describe('topic authority comes from the source, while settings belong to the participant', () => {
+  let topic: string
+  beforeEach(async () => {
+    const anchor = randomUUID()
+    await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'Topic authority')", [anchor, room, agentOwner])
+    await asUser(agentOwner)
+    const { rows } = await db.query<{ chat_id: string }>('SELECT * FROM chat.create_topic($1,$2,$3,$4)', [room, anchor, 'Permissions topic', [adminAgent, human]])
+    topic = rows[0]!.chat_id
+    await service()
+  })
+  it('creates only member seats and projects source roles without promoting the creator', async () => {
+    expect((await db.query<{ role: string }>('SELECT role FROM chat.chat_members WHERE chat_id=$1', [topic])).rows.every((row) => row.role === 'member')).toBe(true)
+    expect(await rpc('group_info_as', { p_chat_id: topic }, agentOwner)).toMatchObject({ my_role: 'member', can_manage: false, can_archive_topic: false })
+    await asUser(agentOwner)
+    const { rows } = await db.query<{ user_id: string; role: string }>('SELECT * FROM chat.list_member_ids($1)', [topic])
+    expect(rows.find((row) => row.user_id === adminAgent)?.role).toBe('admin')
+    expect(rows.find((row) => row.user_id === agentOwner)?.role).toBe('member')
+  })
+  it('lets a non-admin human owner change their own topic listen mode without changing the source', async () => {
+    expect((await rpc('set_agent_listen_mode_as', { p_chat_id: topic, p_agent_user_id: adminAgent, p_mode: 'passive' }, agentOwner)).listen_mode).toBe('passive')
+    await service()
+    expect((await db.query<{ chat_id: string; listen_mode: string }>('SELECT chat_id,listen_mode FROM chat.chat_members WHERE user_id=$1 AND chat_id=ANY($2::text[])', [adminAgent, [room, topic]])).rows)
+      .toEqual(expect.arrayContaining([{ chat_id: topic, listen_mode: 'passive' }, { chat_id: room, listen_mode: 'active' }]))
+    expect(await rejected(() => rpc('set_agent_listen_mode_as', { p_chat_id: topic, p_agent_user_id: adminAgent, p_mode: 'active' }, human)))
+      .toContain('agent_owner_or_group_manager_required')
+    for (const [account, actor] of [[owner, owner], [agentOwner, adminAgent]]) {
+      expect((await rpc('set_agent_listen_mode_as', { p_chat_id: topic, p_agent_user_id: adminAgent, p_mode: 'active' }, account, actor)).listen_mode).toBe('active')
+    }
+  })
+  it('lets source managers administer a topic without participation, then observes source revocation', async () => {
+    expect(await present(owner, topic)).toBe(false)
+    expect(await rpc('group_info_as', { p_chat_id: topic }, owner)).toMatchObject({ my_role: 'owner', can_manage: true, can_archive_topic: true, can_dissolve: false })
+    expect((await rpc('update_group_as', { p_chat_id: topic, p_changes: { name: 'Source manager edited', agent_flood_threshold: 7 } }, agentOwner, adminAgent)).name).toBe('Source manager edited')
+    await rpc('set_group_member_role_as', { p_chat_id: room, p_member_user_id: adminAgent, p_role: 'member' }, owner)
+    expect(await rejected(() => rpc('update_group_as', { p_chat_id: topic, p_changes: { name: 'Denied' } }, agentOwner, adminAgent))).toContain('group_manager_required')
+  })
+  it('ignores stale topic owner/admin roles and refuses independent topic role changes', async () => {
+    await db.query("UPDATE chat.chat_members SET role='owner' WHERE chat_id=$1 AND user_id=$2", [topic, agentOwner])
+    expect(await rejected(() => rpc('update_group_as', { p_chat_id: topic, p_changes: { name: 'Denied' } }, agentOwner))).toContain('group_manager_required')
+    expect(await rejected(() => rpc('remove_group_member_as', { p_chat_id: topic, p_member_user_id: human }, agentOwner))).toContain('group_manager_required')
+    expect(await rejected(() => rpc('set_group_member_role_as', { p_chat_id: topic, p_member_user_id: human, p_role: 'admin' }, owner))).toContain('group_roles_require_source_group')
+  })
+  it('lets the human owner remove their own Agent and lets a source manager remove other participants', async () => {
+    expect((await rpc('remove_group_member_as', { p_chat_id: topic, p_member_user_id: adminAgent }, agentOwner)).status).toBe('removed')
+    expect(await present(adminAgent, topic)).toBe(false)
+    expect(await present(adminAgent, room)).toBe(true)
+    expect((await rpc('remove_group_member_as', { p_chat_id: topic, p_member_user_id: human }, owner)).status).toBe('removed')
+    expect(await present(human, room)).toBe(true)
+    await service()
+    await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [topic, owner])
+    await rpc('remove_group_member_as', { p_chat_id: topic, p_member_user_id: owner }, agentOwner, adminAgent)
+    expect(await present(owner, topic)).toBe(false)
+    expect(await present(owner, room)).toBe(true)
+    expect((await rpc('remove_group_member_as', { p_chat_id: topic, p_member_user_id: agentOwner }, agentOwner)).status).toBe('removed')
+  })
+  it('keeps pin/mute personal and does not reopen direct role or listen-mode writes', async () => {
+    await asUser(human)
+    await db.query("UPDATE chat.chat_members SET is_pinned=true,notification_level='none' WHERE chat_id=$1 AND user_id=$2", [topic, human])
+    expect((await db.query('UPDATE chat.chat_members SET is_pinned=true WHERE chat_id=$1 AND user_id=$2 RETURNING user_id', [topic, agentOwner])).rows).toEqual([])
+    expect(await rejected(() => db.query("UPDATE chat.chat_members SET listen_mode='passive' WHERE chat_id=$1", [topic]))).toContain('permission denied')
+    expect(await rejected(() => db.query("UPDATE chat.chat_members SET role='admin' WHERE chat_id=$1", [topic]))).toContain('permission denied')
+    await service()
+    expect((await db.query('SELECT is_pinned,notification_level FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [topic, human])).rows[0])
+      .toEqual({ is_pinned: true, notification_level: 'none' })
+  })
+  it('authorizes topic decisions from source management, not topic seat roles', async () => {
+    await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [topic, owner])
+    const write = (account: string) => async () => {
+      await asUser(account)
+      await db.query("INSERT INTO chat.gugu_decision_events(chat_id,event_type,created_by_user_id) VALUES($1,'group_stop',$2)", [topic, account])
+    }
+    await write(owner)()
+    expect(await rejected(write(human))).toContain('row-level security')
+    await service()
+  })
+  it.each(['dm', 'ai'])('retains human creator management inside a %s source without a topic owner role', async (kind) => {
+    const source = randomUUID(), anchor = randomUUID()
+    await db.query('INSERT INTO chat.chats(id,kind,creator_user_id) VALUES($1,$2,$3)', [source, kind, agentOwner])
+    await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member'),($1,$3,'member')", [source, agentOwner, human])
+    await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'Private source')", [anchor, source, agentOwner])
+    // A topic Agent must belong to the source; this private source seats only the two humans.
+    await db.query('DELETE FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [topic, adminAgent])
+    await db.query('UPDATE chat.chats SET source_chat_id=$1,source_message_id=$2 WHERE id=$3', [source, anchor, topic])
+    expect((await rpc('update_group_as', { p_chat_id: topic, p_changes: { name: 'Creator edited' } }, agentOwner)).can_manage).toBe(true)
+    expect(await rejected(() => rpc('update_group_as', { p_chat_id: topic, p_changes: { name: 'Peer denied' } }, human))).toContain('group_manager_required')
   })
 })
 

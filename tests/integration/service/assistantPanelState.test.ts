@@ -681,7 +681,7 @@ describe('durable assistant panel contract', () => {
         return row.blocked ? true : undefined
       })
       await first.query('COMMIT')
-      expect(await result).toEqual({ code: '40001' })
+      expect(await result).toEqual({ code: 'PT409' })
       await second.query('ROLLBACK')
       await db.query('BEGIN')
       const after = await snapshot()
@@ -728,6 +728,17 @@ describe('durable assistant panel contract', () => {
       expect(removed.error).toBeNull()
       expect((await client.rpc('assistant_panel_snapshot',{ p_assistant: agent })).data.items).toEqual([])
       expect((await client.rpc('assistant_panel_resource',lookup)).data.item).toMatchObject({ revision: removed.data.revision,deleted_at: expect.any(String) })
+      // A stale revision is a business conflict: PostgREST answers 409 PT409 once. Under 40001 it retried the
+      // request server-side forever, because a stale revision never resolves by retrying.
+      for (const [name,args] of [
+        ['assistant_panel_commit',{ ...input,p_operation_id: randomUUID(),p_expected_revision: '0' }],
+        ['assistant_panel_admit',{ p_assistant: agent,p_runtime_instance_id: instance,p_expected_revision: '0' }],
+      ] as const) {
+        const started = performance.now()
+        const stale = await client.rpc(name,args)
+        expect({ name,status: stale.status,code: stale.error?.code }).toEqual({ name,status: 409,code: 'PT409' })
+        expect(performance.now() - started).toBeLessThan(1000)
+      }
       expect((await client.from('assistant_panel_items').update({ data: {} }).eq('assistant_user_id',agent)).error?.code).toBe('42501')
       const anonymous = createClient(endpoint,process.env.VITE_SUPABASE_ANON_KEY!,options)
       expect((await anonymous.rpc('assistant_panel_snapshot',{ p_assistant: agent })).error?.code).toBe('42501')

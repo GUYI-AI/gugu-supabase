@@ -137,6 +137,76 @@ describe('任务 agent 进群', () => {
     expect(await joinNotices(group)).toEqual([])
   })
 
+  it('rolls back a newly created group after a seat insert error, keeping the identity usable', async () => {
+    const group = randomUUID()
+    const agentId = randomUUID()
+    await asService()
+    await database.query(`CREATE FUNCTION pg_temp.reject_task_seat() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'task seat fixture failure'; END $$;
+      CREATE TRIGGER reject_task_seat BEFORE INSERT ON chat.chat_members FOR EACH ROW
+      WHEN (NEW.user_id = '${agentId}') EXECUTE FUNCTION pg_temp.reject_task_seat()`)
+    const { row } = await provision(group, agentId)
+    expect(row).toMatchObject({ group_chat_id: '', group_created: false, prior_group_state: 'join_failed:P0001' })
+    expect(await seat(group, agentId)).toBeUndefined()
+    expect((await database.query('SELECT id FROM chat.chats WHERE id=$1', [group])).rows).toEqual([])
+    await asUser(owner)
+    expect((await database.query<{ id: string }>(
+      'SELECT id FROM identity.users WHERE id=$1 AND owner_user_id=auth.uid()::text', [agentId],
+    )).rows).toEqual([{ id: agentId }])
+    // Retry the same identity after the group failure clears; the public address is unchanged.
+    await asService()
+    await database.query('DROP TRIGGER reject_task_seat ON chat.chat_members')
+    const retry = await provision(group, agentId)
+    expect(retry.row).toMatchObject({ group_chat_id: group, group_created: true, prior_group_state: 'missing' })
+    expect(await seat(group, agentId)).toEqual({ listen_mode: 'active' })
+  })
+
+  it('checks deferred membership invariants before leaving enrollment, retaining the identity on failure', async () => {
+    const group = await ownerOnlyGroup()
+    const agentId = randomUUID()
+    await asService()
+    await database.query(`CREATE FUNCTION pg_temp.invalidate_task_owner() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN UPDATE chat.chat_members SET role='member' WHERE chat_id=NEW.chat_id AND role='owner'; RETURN NEW; END $$;
+      CREATE TRIGGER invalidate_task_owner AFTER INSERT ON chat.chat_members FOR EACH ROW
+      WHEN (NEW.user_id = '${agentId}') EXECUTE FUNCTION pg_temp.invalidate_task_owner()`)
+    const { row } = await provision(group, agentId)
+    expect(row).toMatchObject({ group_chat_id: '', group_created: false, prior_group_state: 'join_failed:P0001' })
+    expect(await seat(group, agentId)).toBeUndefined()
+    expect((await database.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1 AND role=\'owner\'', [group])).rows)
+      .toEqual([{ user_id: owner }])
+    await asUser(owner)
+    expect((await database.query('SELECT * FROM chat.list_my_chats_as($1)', [agentId])).rows).toEqual([])
+    await asService()
+    await database.query('SET CONSTRAINTS ALL IMMEDIATE')
+  })
+
+  it('leaves successful RPC transactions checked immediately; failed enrollment restores the caller mode', async () => {
+    await asService()
+    await database.query(`CREATE TEMP TABLE mode_parent(id integer PRIMARY KEY);
+      CREATE TEMP TABLE mode_child(id integer REFERENCES mode_parent(id) DEFERRABLE INITIALLY DEFERRED);
+      GRANT ALL ON mode_parent, mode_child TO authenticated`)
+    const group = await ownerOnlyGroup()
+    // A normal PostgREST call ends its transaction after this RPC. A direct SQL
+    // caller continuing the same transaction explicitly opts back into deferral.
+    await provision(group)
+    await database.query('SAVEPOINT immediate_mode')
+    await expect(database.query('INSERT INTO mode_child VALUES (1)')).rejects.toMatchObject({ code: '23503' })
+    await database.query('ROLLBACK TO SAVEPOINT immediate_mode')
+    await database.query('SET CONSTRAINTS ALL DEFERRED')
+    await asService()
+    await database.query(`CREATE FUNCTION pg_temp.reject_mode_seat() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'mode fixture failure'; END $$;
+      CREATE TRIGGER reject_mode_seat BEFORE INSERT ON chat.chat_members FOR EACH ROW
+      EXECUTE FUNCTION pg_temp.reject_mode_seat()`)
+    const { row } = await provision(group)
+    expect(row.prior_group_state).toBe('join_failed:P0001')
+    // The failed enrollment subtransaction rolls its constraint-mode changes
+    // back too, so an outer transaction which was deferred stays deferred.
+    await database.query('INSERT INTO mode_child VALUES (1)')
+    await database.query('INSERT INTO mode_parent VALUES (1)')
+    await database.query('SET CONSTRAINTS ALL IMMEDIATE')
+  })
+
   it('已经在群里的座位不动:主人改成被动之后再 provision 一次,仍是被动', async () => {
     const group = await ownerOnlyGroup()
     const { agentId } = await provision(group)
@@ -151,6 +221,11 @@ describe('任务 agent 进群', () => {
     const group = await approvalGroupWith(member)
     const { agentId, row } = await provision(group, randomUUID(), member)
     expect(row).toMatchObject({ group_chat_id: '', prior_group_state: 'pending_approval' })
+    expect((await database.query('SELECT status FROM chat.group_join_requests WHERE chat_id=$1 AND requester_user_id=$2', [group, agentId])).rows)
+      .toEqual([{ status: 'pending' }])
+    await asUser(owner)
+    expect((await database.query('SELECT status FROM chat.group_join_requests WHERE chat_id=$1 AND requester_user_id=$2', [group, agentId])).rows)
+      .toEqual([])
     expect(await seat(group, agentId)).toBeUndefined()
     await approve(group, agentId)
     expect(await seat(group, agentId)).toEqual({ listen_mode: 'active' })

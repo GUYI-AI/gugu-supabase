@@ -248,9 +248,93 @@ describe('按引用发(chat.attachment_share)', () => {
     const { rows: [text] } = await database.query<{ id: string }>(
       `INSERT INTO chat.workspace_items (chat_id, kind, filename, content_type, inline_text, created_by) VALUES ($1,'document','notes.md','text/markdown','hi',$2) RETURNING id`, [source, owner])
     await asUser(owner)
-    // This document has no immutable byte version to share; document kind alone is no longer a refusal.
-    expect(await fails(SHARE, [text!.id, null, randomUUID(), source, owner, []])).toMatch(/hint: attachment_source_gone/)
+    // A text document's version is text: it is sent through attachments/share (a snapshot with bytes), never "gone".
+    expect(await fails(SHARE, [text!.id, null, randomUUID(), source, owner, []])).toMatch(/hint: attachment_forward_needs_bytes/)
     await asOwner()
+  })
+})
+
+describe('文本文件按引用发(chat.attachment_document_snapshot,迁移 20261030120000)', () => {
+  const SNAPSHOT = 'SELECT chat.attachment_document_snapshot($1,$2,$3,$4) AS n'
+  /** A document edited in the editor: its versions are text only, recorded as the file service records rounds. */
+  async function editedDocument(chatId: string, texts: string[]): Promise<string> {
+    await asOwner()
+    const { rows: [doc] } = await database.query<{ id: string }>(
+      `INSERT INTO chat.workspace_items (chat_id, kind, filename, content_type, inline_text, created_by, version) VALUES ($1,'document','周报','text/markdown',$2,$3,2) RETURNING id`,
+      [chatId, texts.at(-1), owner])
+    for (const [i, text] of texts.entries()) {
+      await database.query(`INSERT INTO chat.workspace_item_versions (item_id, n, inline_text, content_type, size_bytes) VALUES ($1,$2,$3,'text/markdown',octet_length($3))`, [doc!.id, i + 1, text])
+    }
+    return doc!.id
+  }
+  async function snapshot(caller: string, itemId: string, text: string, key: string | null): Promise<number> {
+    await asUser(caller)
+    const { rows } = await database.query<{ n: number }>(SNAPSHOT, [itemId, caller, text, key])
+    await asOwner()
+    return rows[0]!.n
+  }
+  async function versions(itemId: string) {
+    await asOwner()
+    return (await database.query<{ n: number; blob_id: string | null; inline_text: string }>(
+      'SELECT n, blob_id, inline_text FROM chat.workspace_item_versions WHERE item_id = $1 ORDER BY n', [itemId])).rows
+  }
+
+  it('编辑过的文本文件:没有字节先要字节;带上这段正文的上传 ⇒ 带字节的下一版(一版的字节不改)、钉住它;另一个群收到的是这段正文', async () => {
+    const source = await newGroup(owner, [member])
+    const target = await newGroup(member, [owner])
+    const text = `# 周报 ${randomUUID()}`
+    const doc = await editedDocument(source, ['# 周报 草稿', text])
+    await asUser(owner)
+    expect(await fails(SNAPSHOT, [doc, owner, text, null])).toMatch(/hint: attachment_forward_needs_bytes/)
+    await asOwner()
+    const up = await upload(owner, text, 'text/markdown', Buffer.byteLength(text))
+    // A version's bytes never change: the text becomes the next version, with bytes (the list's version 2 is not it).
+    expect(await snapshot(owner, doc, text, up.key)).toBe(3)
+    expect(await versions(doc)).toMatchObject([{ n: 1, blob_id: null }, { n: 2, blob_id: null }, { n: 3, blob_id: up.blob, inline_text: text }])
+
+    const own = await share(owner, doc, 3, randomUUID(), source, owner)
+    expect(own).toMatchObject({ file_item_id: doc, file_version: 3 })
+    const sent = await share(owner, doc, 3, randomUUID(), target, owner)
+    expect(sent.chat_id).toBe(target)
+    await asOwner()
+    const { rows: [placed] } = await database.query<{ kind: string; inline_text: string }>('SELECT kind, inline_text FROM chat.workspace_items WHERE id = $1', [sent.file_item_id])
+    expect(placed).toEqual({ kind: 'document', inline_text: text })
+  })
+
+  it('正文没变再发:就是上次那一版,不要字节、不加版本;正文变了 ⇒ 下一版(编号接着最大的)', async () => {
+    const group = await newGroup(owner, [member])
+    const text = `# 周报 ${randomUUID()}`
+    const doc = await editedDocument(group, [text])
+    const first = await upload(owner, text, 'text/markdown', Buffer.byteLength(text))
+    expect(await snapshot(owner, doc, text, first.key)).toBe(2)
+    expect(await snapshot(member, doc, text, null)).toBe(2)
+    expect(await versions(doc)).toHaveLength(2)
+
+    const newer = `${text}\n\n还没存成一轮的改动`
+    const second = await upload(member, newer, 'text/markdown', Buffer.byteLength(newer))
+    expect(await snapshot(member, doc, newer, second.key)).toBe(3)
+    expect(await versions(doc)).toMatchObject([{ n: 1, blob_id: null }, { n: 2, blob_id: first.blob }, { n: 3, blob_id: second.blob, inline_text: newer }])
+  })
+
+  it('字节不是这段正文、别人的上传、存的文件:都拒,什么都不改', async () => {
+    const group = await newGroup(owner, [member])
+    const text = `# 周报 ${randomUUID()}`
+    const doc = await editedDocument(group, [text])
+    const other = await upload(owner, 'something else', 'text/markdown', 14)
+    await asUser(owner)
+    expect(await fails(SNAPSHOT, [doc, owner, text, other.key])).toMatch(/hint: file_place_invalid/)
+    await asOwner()
+    const mine = await upload(owner, text, 'text/markdown', Buffer.byteLength(text))
+    await asUser(member)
+    expect(await fails(SNAPSHOT, [doc, member, text, mine.key])).toMatch(/hint: attachment_upload_not_found/)
+    await asUser(outsider)
+    expect(await fails(SNAPSHOT, [doc, outsider, text, null])).toMatch(/hint: workspace_item_not_found/)
+    await asOwner()
+    const stored = await binary(group, owner)
+    await asUser(owner)
+    expect(await fails(SNAPSHOT, [stored, owner, text, null])).toMatch(/hint: file_place_invalid/)
+    await asOwner()
+    expect(await versions(doc)).toMatchObject([{ n: 1, blob_id: null }])
   })
 })
 
@@ -341,14 +425,14 @@ describe('历史与搜索带上条目', () => {
 })
 
 describe('执行权', () => {
-  it('attachment_share 和两个放条目的 definer 给 authenticated、不给 anon;重建的 attachment_commit / attachment_place_forward 照旧给 authenticated', async () => {
+  it('attachment_share、attachment_document_snapshot 和两个放条目的 definer 给 authenticated、不给 anon;重建的 attachment_commit / attachment_place_forward 照旧给 authenticated', async () => {
     await asOwner()
     const { rows } = await database.query<{ fn: string; anon: boolean; auth: boolean }>(`
       SELECT p.proname AS fn, has_function_privilege('anon', p.oid, 'EXECUTE') AS anon, has_function_privilege('authenticated', p.oid, 'EXECUTE') AS auth
         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE n.nspname = 'chat' AND p.proname IN ('attachment_share','attachment_place_share','attachment_place_version','attachment_commit','attachment_place_forward','message_history_as','message_search_as')
+       WHERE n.nspname = 'chat' AND p.proname IN ('attachment_document_snapshot','attachment_share','attachment_place_share','attachment_place_version','attachment_commit','attachment_place_forward','message_history_as','message_search_as')
        ORDER BY 1`)
-    expect(rows.map((row) => row.fn)).toEqual(['attachment_commit', 'attachment_place_forward', 'attachment_place_share', 'attachment_place_version', 'attachment_share', 'message_history_as', 'message_search_as'])
+    expect(rows.map((row) => row.fn)).toEqual(['attachment_commit', 'attachment_document_snapshot', 'attachment_place_forward', 'attachment_place_share', 'attachment_place_version', 'attachment_share', 'message_history_as', 'message_search_as'])
     for (const row of rows) expect(row, row.fn).toMatchObject({ anon: false, auth: true })
   })
 })
