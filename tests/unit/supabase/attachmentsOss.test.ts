@@ -50,6 +50,15 @@ describe('签名', () => {
     expect(md5Hex(bytes)).toBe(createHash('md5').update(bytes).digest('hex'))
   })
 
+  it('the thumbnail fits a box OSS can encode, so long screenshots and narrow strips are bounded on both sides', () => {
+    // OSS: resize output side ≥ 16384 → ZoomSizeInvalid; webp side ≥ 16383 → WebpExceedRange (both 400 on devdb).
+    const box = Object.fromEntries(THUMB_PROCESS.split('/')[1]!.split(',').slice(1).map(part => part.split('_') as [string, string]))
+    expect(box.m).toBe('lfit')
+    expect(Number(box.w)).toBe(560)
+    expect(Number(box.h)).toBeLessThan(16383)
+    expect(THUMB_PROCESS.endsWith('/format,webp')).toBe(true)
+  })
+
   it('CDN 鉴权 A 对阿里云文档的样例;签名链接只签路径,缩略图在同一个签名后面加 x-oss-process,有效期 1800 s', () => {
     expect(cdnAuthKey('/video/standard/test.mp4', 'aliyuncdnexp1234', { ts: 1444435200, rand: '0', uid: '0' }))
       .toBe('1444435200-0-0-23bf85053008f5c0e791667a313e28ce')
