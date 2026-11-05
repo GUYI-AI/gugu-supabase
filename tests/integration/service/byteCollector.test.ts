@@ -112,7 +112,9 @@ describe('every lost holder reaches the one collector, once', () => {
     await db.query("INSERT INTO storage.objects(bucket_id,name,owner_id,metadata) VALUES('workspace',$1,$2,'{\"size\":5,\"mimetype\":\"application/zip\"}'),('chat-media',$3,$2,NULL)", [stray, member, avatar])
     await db.query("UPDATE chat.chats SET avatar_url=$1,avatar_storage_bucket_id='chat-media',avatar_storage_object_name=$2 WHERE id=$3",
       [`http://127.0.0.1:54321/storage/v1/object/public/chat-media/${avatar}`, avatar, group])
-    expect((await db.query("SELECT to_regclass('identity.storage_object_deletion_outbox') AS t")).rows[0].t).toBeNull()
+    // No second queue: neither erasure outbox exists.
+    expect((await db.query(`SELECT to_regclass('identity.storage_object_deletion_outbox') AS a,
+      to_regclass('identity.storage_multipart_abort_outbox') AS b`)).rows[0]).toEqual({ a: null, b: null })
 
     await db.query('DELETE FROM auth.users WHERE id=$1::uuid', [member])
     const queued = (await db.query(`SELECT b.bucket_id,b.object_name,b.size_bytes,b.content_type,g.status FROM chat.file_blob_gc g
