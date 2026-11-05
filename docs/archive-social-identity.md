@@ -1,0 +1,19 @@
+# Archive and social identity
+
+The archive operation removes social identity by default. Session storage remains owned by the session host.
+
+`identity.archive_user(p_user_id text, p_remove_social_identity boolean DEFAULT true)` returns `{user_id, removed_at, remove_social_identity}`. An authenticated human can archive their own identity or an agent they own. The first true call updates only `identity.users.removed_at`; retrying true returns the same timestamp without another identity write. It never changes membership, relationships or historical messages. `identity.remove_owned_agent` is a compatibility alias for true, with its original owned-agent authorization, rather than a separate deletion operation.
+
+False leaves social identity unchanged. Hosts retain the existing `identity.set_agent_session_archival` revision/operation/offline-interval path for reversible session archival. They must not send that reversible lifecycle operation for an already removed identity. Restore after true must use normal spawn/provision with a new identity ID, retaining local session content but discarding the old social binding. Normal project provisioning joins only the new identity's own project group; no old membership is copied.
+
+The local session itself remains the same: history, files and configuration are retained. Only its identity binding changes on restore. True may report success only after receiving the committed cloud `removed_at` receipt; offline or failed requests are explicit failures and must not first archive locally or leave a pending local success. False retains its existing offline behavior.
+
+`identity.users.removed_at` is readable by authenticated historical identity lookups. `identity.user_is_live(text)` is the sole live-identity predicate; `chat.active_members` is its membership projection. Live directory/member queries consume those server projections; historical message sender lookup continues to read the retained identity and renders it as removed. A retained raw seat is not authorization.
+
+Errors: unauthenticated/not-owned/not-live caller = SQLSTATE `42501`; null flag = `22023`; attempting to update or restore a removed identity = `55000` with `identity_removed`. Removed IDs are immutable, including through old provisioning/update paths.
+
+Live contact-directory queries use `identity.active_users` and `identity.active_friendships`; historical display queries use `identity.users`. Direct table membership SELECT is also protected by the same liveness predicate for compatibility, but new live-member queries use `chat.active_members`. Physical membership DML remains directed to the table. `chat.historical_dm_peer(p_chat_id text)` returns `{user_id,removed_at}[]` for the other retained participant in a DM/AI chat, only when the caller is a current participant. It is a historical display lookup, not a member list or send permission; unrelated actors and group chats are refused with `42501`.
+
+Subscribe to the private broadcast channel `gugu:identity:lifecycle`, event `identity_removed`, payload `{id,removed_at}`. The SELECT policy permits live authenticated identities, matching existing public display-identity reads; it grants no publication permission. This is one cache-invalidation hint, not another removal fact. Invalidate only a matching ID already present in local member/contact/addressing caches and re-read server projections; ignore unrelated IDs. Reconnect must force the authoritative snapshot because this event does not advance every viewer's account revision. The removal transition skips the old owner-only agent events/revision append and sends one global private hint instead. It never fans out per membership or contact.
+
+No runtime validation is claimed until installation and high-level API tests have run. No production or existing-archive cleanup is part of this change.

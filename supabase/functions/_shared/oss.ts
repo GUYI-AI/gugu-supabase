@@ -32,7 +32,7 @@ export interface CdnConfig {
   domain: string
   authKey: string
   /** Must equal the validity period configured at the CDN edge. */
-  authTtlSeconds?: number
+  authTtlSeconds: number
 }
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -264,7 +264,7 @@ export interface CdnUrl {
 /** 一个对象的 CDN 签名链接;签发时间用服务器时钟(CDN 也认将来的时间戳,所以这里的钟要准 —— 依赖 NTP)。 */
 export function cdnSignedUrl(cdn: CdnConfig, objectName: string, opts: { image: boolean; now?: Date; rand?: string; expiresSeconds?: number }): CdnUrl {
   const now = opts.now ?? new Date()
-  const edgeTtl=cdn.authTtlSeconds??CDN_SIGN_TTL_SECONDS
+  const edgeTtl=cdn.authTtlSeconds
   const lifetime=opts.expiresSeconds??edgeTtl
   if (!Number.isSafeInteger(edgeTtl)||!Number.isSafeInteger(lifetime)||lifetime<1||lifetime>edgeTtl) throw new Error('Invalid CDN signature lifetime')
   // Type A expires at timestamp + the edge-configured TTL, not at a JSON expires_at field.

@@ -224,13 +224,12 @@ describe('② join_public_group 尊重入群方式', () => {
 })
 
 describe('③ provision_taskpage_agent 只往调用者自己所在的群里加', () => {
-  async function provision(caller: string, groupChatId: string) {
+  async function provision(caller: string, groupChatId: string, withSerial = false, agentId = randomUUID()) {
     await asUser(caller)
-    const agentId = randomUUID()
     const newGroupId = randomUUID()
     const row = (await database.query<{ group_chat_id: string; prior_group_state: string; group_created: boolean }>(
-      'SELECT * FROM identity.provision_taskpage_agent($1,$2,$3,$4,$5,NULL,$6,$7,$8)',
-      [agentId, 'Claude', 'serial', 'claude-code', `dev-${caller}`, groupChatId, newGroupId, 'Project'],
+      `SELECT * FROM identity.provision_taskpage_agent($1,$2,$3,$4,$5,NULL,$6,$7,$8${withSerial ? ',$9' : ''})`,
+      [agentId, 'Claude', 'serial', 'claude-code', `dev-${caller}`, groupChatId, newGroupId, 'Project', ...(withSerial ? ['Claude'] : [])],
     )).rows[0]!
     return { agentId, newGroupId, row }
   }
@@ -241,18 +240,28 @@ describe('③ provision_taskpage_agent 只往调用者自己所在的群里加',
     expect(row).toMatchObject({ group_chat_id: newGroupId, prior_group_state: 'foreign', group_created: true })
     expect(await isMember(newGroupId, agentId)).toBe(true)
   })
-  it('正对照:自己的项目群 ⇒ 直接加座位;群满 ⇒ 响亮失败', async () => {
+  it.each([false, true])('自己的项目群直接加座位;群满保留身份,不入群 (serial API: %s)', async (withSerial) => {
     const group = await newGroup()
     const { agentId, row } = await provision(owner, group)
     expect(row).toMatchObject({ group_chat_id: group, prior_group_state: 'active', group_created: false })
     expect(await isMember(group, agentId)).toBe(true)
     await asService()
     await database.query('UPDATE chat.chats SET max_members = 5 WHERE id = $1', [group])
+    const full = await provision(owner, group, withSerial)
+    expect(full.row).toMatchObject({ group_chat_id: '', prior_group_state: 'join_failed:member_limit_reached', group_created: false })
+    expect(await isMember(group, full.agentId)).toBe(false)
+    expect((await database.query<{ owner_user_id: string }>(
+      'SELECT owner_user_id FROM identity.users WHERE id=$1', [full.agentId],
+    )).rows).toEqual([{ owner_user_id: owner }])
+    const retry = await provision(owner, group, withSerial, full.agentId)
+    expect(retry.row).toEqual(full.row)
+    expect(await isMember(group, full.agentId)).toBe(false)
     await asUser(owner)
-    expect(await fails(
-      'SELECT * FROM identity.provision_taskpage_agent($1,$2,$3,$4,$5,NULL,$6,$7,$8)',
-      [randomUUID(), 'Claude', 'serial', 'claude-code', `dev-${owner}`, group, randomUUID(), 'Project'],
-    )).toMatch(/member_limit_reached/)
+    // profile_whoami and message_conversations use this actor-scoped RPC.
+    expect((await database.query('SELECT * FROM chat.list_my_chats_as($1)', [full.agentId])).rows).toEqual([])
+    expect((await database.query('SELECT allowed FROM (SELECT chat.can_act_as($1,$2) AS allowed) AS admission', [full.agentId, group])).rows)
+      .toEqual([{ allowed: false }])
+    expect((await database.query('SELECT * FROM chat.message_history_as($1,$2)', [group, full.agentId])).rows).toEqual([])
   })
   it('普通成员在「agent 加入需审批」的群里起会话 ⇒ 不绕过审批:进审批队列,这次不入群(20260924074100)', async () => {
     const group = await newGroup({ agent_join_approval: true })

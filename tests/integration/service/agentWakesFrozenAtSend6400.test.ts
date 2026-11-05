@@ -178,10 +178,10 @@ describe('#6400 who a message wakes is decided when it is written', () => {
       await database.query('SELECT identity.remove_owned_agent($1)', [SPEAKER])
       await database.query('RESET role')
 
-      // 回复的路由目标确实没了:这就是旧规则会把它当「没点名」的输入。
+      // The old sender is retained; removal must not reroute its replies.
       const target = await database.query<{ target: string | null }>(
         "SELECT chat.message_reply_routing_target('speaker-says-it-6401') AS target")
-      expect(target.rows[0].target).toBeNull()
+      expect(target.rows[0].target).toBe(SPEAKER)
 
       expect(await pullWatcher()).toEqual(['open'])
     })

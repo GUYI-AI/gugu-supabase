@@ -1,14 +1,16 @@
 // Read cost of the agent inbox pull, messages_view and the messages row policy — against a real database,
 // with structural assertions (function call counts in this transaction, grants, definitions), never wall-clock.
 //
-//   · The new definitions return exactly what the previous ones returned. The previous definitions are read
-//     from their release files and evaluated side by side, row for row, for every viewer.
+//   · Existing columns return exactly what the previous definitions returned. The attachment metadata release
+//     appends file_metadata; the text/system fixtures here must have NULL in that display-only column.
+//     Previous definitions are read from their releases and compared row for row, for every viewer.
 //   · pull_agent_inbox_v2 checks the reply preview only for the rows it returns, however long the backlog.
 //   · messages_view evaluates the reply preview only for returned rows whose reply columns are read; a query
 //     that does not read them never calls it, even when it sorts the whole chat.
 //   · The row policy no longer runs chat.is_member once per message for a member without a history floor.
 //
-// Loopback PostgreSQL via GUGU_INTEGRATION_DATABASE_URL; every case runs in BEGIN … ROLLBACK and installs no DDL.
+// Loopback PostgreSQL via GUGU_INTEGRATION_DATABASE_URL; every case runs in BEGIN … ROLLBACK.
+// The distinct-target regression temporarily restores the budget view as a negative control in this disposable DB only.
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -187,36 +189,78 @@ describe('inbox pull, messages_view and message row policy: same results, cost b
     expect(alice).not.toContain(DELETED)
   }))
 
-  it('messages_view returns the same rows and columns as the previous view, for every viewer', async () => rollback(async () => {
+  it('messages_view preserves every previous column and appends only display metadata, for every viewer', async () => rollback(async () => {
     const { topic } = await seed()
     for (const viewer of VIEWERS) {
       const now = await as<{ row: unknown }>(viewer,
         'SELECT to_jsonb(v) AS row FROM chat.messages_view v WHERE v.chat_id = ANY($1) ORDER BY v.chat_id, v.seq', [[GROUP, topic]])
-      const before = await as<{ row: unknown }>(viewer,
+      const before = await as<{ row: Record<string, unknown> }>(viewer,
         `WITH v AS (${OLD_VIEW}) SELECT to_jsonb(v) AS row FROM v WHERE v.chat_id = ANY($1) ORDER BY v.chat_id, v.seq`, [[GROUP, topic]])
-      expect(now, `messages_view for ${viewer}`).toEqual(before)
+      // These fixtures are text/system rows. Keep all prior keys and values (including reply previews)
+      // exact; accepting an arbitrary subset would hide a breaking change to an old client's select.
+      expect(now, `messages_view for ${viewer}`).toEqual(before.map(({ row }) => ({ row: { ...row, file_metadata: null } })))
     }
     const replies = await as<{ reply_to_content: string | null }>(ALICE,
       'SELECT reply_to_content FROM chat.messages_view WHERE chat_id = $1 AND reply_to_message_id IS NOT NULL', [GROUP])
     expect(replies.filter((r) => r.reply_to_content !== null).length).toBeGreaterThan(BACKLOG / 2) // previews are really there
   }))
 
-  it('the chat-list preview calls the reply preview only for returned rows; unread columns never call it', async () => rollback(async () => {
+  it('chat-list preview work is bounded by returned rows and the optional preview RPC avoids replies', async () => rollback(async () => {
     await seed()
     const preview = `SELECT v.id, v.reply_to_message_id, chat.preview(v) AS preview FROM chat.messages_view v
                       WHERE v.chat_id = ANY($1) AND v.is_whisper = false ORDER BY v.seq DESC LIMIT 4`
-    const [rows, cost] = await delta(() => as<{ reply_to_message_id: string | null }>(ALICE, preview, [[GROUP]]))
+    const [rows, cost] = await delta(() => as<{ id: string; reply_to_message_id: string | null }>(ALICE, preview, [[GROUP]]))
     expect(rows).toHaveLength(4)
     const replyRows = rows.filter((r) => r.reply_to_message_id).length
     expect(replyRows).toBeGreaterThan(0) // the counter is live: returned reply rows do pay
-    // preview(v) takes the whole row: each returned reply row reads its three reply columns; the other
-    // BACKLOG reply rows of the chat are read and sorted, but never call the preview.
+    // The restored target-list form reads three reply columns only for returned reply rows.
     expect(cost.previewFor).toBe(3 * replyRows)
+
+    const [latest, listCost] = await delta(() => as<{ id: string }>(ALICE,
+      'SELECT * FROM chat.list_chat_previews($1)', [[GROUP]]))
+    expect(latest.map(row => row.id)).toEqual([rows[0]!.id])
+    expect(listCost.previewFor).toBe(0)
 
     const [, unread] = await delta(() => as(ALICE,
       'SELECT v.id, v.seq FROM chat.messages_view v WHERE v.chat_id = ANY($1) ORDER BY v.seq DESC LIMIT 4', [[GROUP]]))
     expect(unread.previewFor).toBe(0)
 
+  }))
+
+  it('a computed preview page does not evaluate distinct reply targets across the whole sorted history', async () => rollback(async () => {
+    await seed()
+    // Distinct targets defeat the LATERAL plan's Memoize cache; a backlog that repeats one target
+    // can accidentally look bounded even when the reply join runs before sorting and LIMIT.
+    const targets = Array.from({ length: BACKLOG }, (_, i) => id(1000 + i))
+    for (const target of targets) {
+      await db.query(`INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type)
+                      VALUES($1,$2,$3,'older target','text')`, [target, GROUP, ALICE])
+    }
+    for (let i = 0; i < targets.length; i++) {
+      await db.query(`INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type,reply_to_message_id)
+                      VALUES($1,$2,$3,'reply page','text',$4)`, [id(2000 + i), GROUP, PEER, targets[i]])
+    }
+    const query = `SELECT v.id,v.reply_to_message_id,chat.preview(v) AS preview FROM chat.messages_view v
+                   WHERE v.chat_id=ANY($1) AND v.is_whisper=false ORDER BY v.seq DESC LIMIT 4`
+    const [rows, cost] = await delta(() => as<{ id: string; reply_to_message_id: string; preview: string }>(ALICE, query, [[GROUP]]))
+    expect(rows.map(row => row.id)).toEqual([id(2039), id(2038), id(2037), id(2036)])
+    expect(rows.every(row => row.preview === 'reply page')).toBe(true)
+    expect(cost.previewFor).toBe(3 * rows.length)
+    expect(await as(OUTSIDER, query, [[GROUP]])).toEqual([])
+
+    // Negative control is the original released view, not a synthetic delay. Same rows/claims/page;
+    // only its pre-LIMIT LATERAL placement differs. The fixture must expose that real extra work.
+    await db.query('SAVEPOINT old_budget_view')
+    try {
+      const released = migration('20261103231500_chat_projection_budget.sql')
+      const view = released.slice(released.indexOf('CREATE OR REPLACE VIEW'), released.indexOf('CREATE FUNCTION chat.list_chat_previews'))
+      await db.query(view)
+      const [before, unbounded] = await delta(() => as(ALICE, query, [[GROUP]]))
+      expect(before).toEqual(rows)
+      expect(unbounded.previewFor).toBeGreaterThan(3 * rows.length)
+    } finally {
+      await db.query('ROLLBACK TO SAVEPOINT old_budget_view')
+    }
   }))
 
   it('a member without a history floor is checked against one set per query, not chat.is_member per row', async () => rollback(async () => {
@@ -243,7 +287,9 @@ describe('inbox pull, messages_view and message row policy: same results, cost b
     ]
     for (const args of cases) {
       // Positional comparison: the previous query's columns are unnamed duplicates (rm.sender_user_id, rm.content).
-      const now = await as<{ row: string }>(OWNER, 'SELECT p::text AS row FROM identity.pull_agent_inbox_v2($1,$2,$3,$4,$5,$6) p', args)
+      // Only the columns the previous query had: group_rules and named_identities were appended later
+      // (inboxPullDeliveryContext.test.ts covers them).
+      const now = await as<{ row: string }>(OWNER, 'SELECT ROW(p.chat_id, p.chat_kind, p.chat_public_id, p.chat_name, p.chat_creator_user_id, p.listen_mode, p.notification_level, p.last_read_seq, p.id, p.seq, p.sender_user_id, p.sender_type, p.sender_display_name, p.sender_gugu_number, p.content, p.content_type, p.to_user_ids, p.is_whisper, p.reply_to_message_id, p.reply_to_sender_user_id, p.reply_to_content, p.thread_root_id, p.is_thread_root, p.created_at, p.scan_max_ingest_seq, p.via_app, p.file_item_id, p.file_version, p.file_blob_id)::text AS row FROM identity.pull_agent_inbox_v2($1,$2,$3,$4,$5,$6) p', args)
       const before = await as<{ row: string }>(OWNER, `SELECT p::text AS row FROM (${OLD_PULL}) p`, args, 'postgres')
       expect(now, `pull ${JSON.stringify(args.slice(1, 5))}`).toEqual(before)
     }
@@ -294,7 +340,8 @@ describe('inbox pull, messages_view and message row policy: same results, cost b
       columns: ['id', 'chat_id', 'sender_user_id', 'to_user_ids', 'sender_name', 'sender_avatar', 'seq', 'content', 'content_type',
         'reply_to_message_id', 'reply_to_sender_user_id', 'reply_to_sender_name', 'reply_to_content', 'deleted_at', 'deleted_for_user_ids',
         'retracted_at', 'created_at', 'forwarded_from_message_id', 'thread_root_id', 'edited_at', 'is_whisper', 'is_thread_root',
-        'client_message_id', 'is_imported_history_root', 'via_app', 'file_item_id', 'file_version', 'sent_by_agent', 'agent_sender', 'file_blob_id'],
+        'client_message_id', 'is_imported_history_root', 'via_app', 'file_item_id', 'file_version', 'sent_by_agent', 'agent_sender', 'file_blob_id',
+        'file_metadata'],
     })
   }))
 })

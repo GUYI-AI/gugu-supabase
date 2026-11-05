@@ -9,6 +9,7 @@ import {
   handleSessionRevoke,
   handlePlace,
   handleForward,
+  handleShare,
   handleGc,
   handleUpload,
   handleUrls,
@@ -74,14 +75,21 @@ function depsFor(authorization: string, storage: AttachmentStorageConfig): Attac
     if(error||!data?.signedUrl) throw new Error('Could not sign a managed Storage download')
     return publicStorageUrl(data.signedUrl,url)
   }
+  const files = (env('GUGU_FILES_URL') || `${env('GUGU_PUBLIC_SUPABASE_URL') || url}/files`).replace(/\/$/, '')
   return {
     documentReplacement: async (item, actor, body) => {
-      const base = (env('GUGU_FILES_URL') || `${env('GUGU_PUBLIC_SUPABASE_URL') || url}/files`).replace(/\/$/, '')
-      const response = await fetch(`${base}/${item}/replace`, { method: 'POST',
+      const response = await fetch(`${files}/${item}/replace`, { method: 'POST',
         headers: { Authorization: authorization, 'X-Gugu-As-Agent': actor, 'content-type': 'application/json' },
         body: JSON.stringify(body), signal: AbortSignal.timeout(35_000) })
       const answer = await response.json()
       if (!response.ok) throw new Refusal(response.status, answer.error ?? 'replacement_failed', 'The document changed or could not be replaced')
+    },
+    documentText: async (item, asAgent) => {
+      const response = await fetch(`${files}/${item}`, { headers: { Authorization: authorization, ...(asAgent ? { 'X-Gugu-As-Agent': asAgent } : {}) },
+        signal: AbortSignal.timeout(35_000) })
+      const answer = await response.json()
+      if (!response.ok || typeof answer.text !== 'string') throw new Refusal(response.status === 404 ? 404 : 502, answer.error ?? 'document_unreadable', 'The text document could not be read')
+      return answer.text
     },
     textFiles: { maxBytes: WORKSPACE_TEXT_MAX_BYTES, classify: workspaceUploadKind },
     objects: storage.kind === 'oss'
@@ -187,6 +195,8 @@ Deno.serve(async (request) => {
         return json({ item: await handlePlace(deps, who.user.id, body) })
       case 'forward':
         return json({ message: await handleForward(deps, who.user.id, body) })
+      case 'share':
+        return json({ message: await handleShare(deps, who.user.id, body) })
       case 'urls':
         return json(await handleUrls(deps, who.user.id, body))
       default:

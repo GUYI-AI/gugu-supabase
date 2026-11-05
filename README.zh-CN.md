@@ -25,7 +25,7 @@ pnpm run setup --client-dir /path/to/gugu
 ## 基线、增量与权限
 
 - `supabase/migrations/20261021000000_foundation.sql` 是基线：包含 RLS、Auth 触发器、Realtime 授权、Storage 策略和三项维护任务，只用于新项目。
-- 之后的每个 `supabase/migrations/<版本>_<名字>.sql` 是一个 release，按顺序安装并记入 `gugu_install.releases`。已发布的文件不再修改，改动一律发新文件。
+- 之后的每个 `supabase/migrations/<版本>_<名字>.sql` 是一个 release，按顺序安装并记入 `gugu_install.releases`。除显式校验摘要的[工作区索引拆分](docs/concurrent-index-releases.md)外，已发布的文件不再修改，改动一律发新文件。
 - 新建的 API 函数默认禁止客户端执行，由 release 显式授权。
 - `identity.machine_limits_for(uuid)` 是安装策略接口，社区版使用安装级配置。设备所有权、群成员、消息与文件权限都由数据库判定。
 

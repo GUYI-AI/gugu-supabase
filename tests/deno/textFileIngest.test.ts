@@ -61,18 +61,30 @@ Deno.test('binary, malformed UTF-8/JSON and over-limit text keep the original bi
   }
 })
 
-Deno.test('a formatted JSON attachment stays a file for human, agent and folder uploads', async () => {
+Deno.test('a formatted JSON object attachment becomes a shared document for human, agent and folder uploads', async () => {
   for (const entry of ['human', 'agent', 'folder']) {
     const f = fixture(encode('{\n  "text": "keep these exact bytes"\n}\n'))
     const body = { staging_key: key, file_name: 'formatted.json', content_type: 'application/json', chat_id: 'group', sender_user_id: entry === 'agent' ? 'agent' : user }
     if (entry === 'folder') await handlePlace(f.deps, user, body)
     else await handleCommit(f.deps, user, { ...body, message_id: 'message' })
-    assert(f.calls.find(c => c.fn === 'file_managed_upload_registered')!.args.p_document === null, `${entry} retains the JSON blob instead of creating a document`)
+    const document = f.calls.find(c => c.fn === 'file_managed_upload_registered')!.args.p_document as { text: string; content_type: string }
+    assert(document.text === '{\n  "text": "keep these exact bytes"\n}\n' && document.content_type === 'application/json', `${entry} uses the shared JSON document classification`)
     assert(f.calls.filter(c => c.fn === 'file_blob_register').length === 1, 'the original inspected blob is still registered')
   }
 })
 
-Deno.test('a mixed import honors content_types without converting JSON or stalling its cursor', async () => {
+Deno.test('CSV and source-code suffixes use the same text-document classifier', () => {
+  for (const [filename, contentType, source] of [
+    ['report.csv', 'text/csv', 'name,count\nAda,1\n'],
+    ['script.py', 'text/x-python', 'print("hello")\n'],
+  ]) {
+    const classified = workspaceUploadKind(filename, 'application/octet-stream', encode(source))
+    assert(classified.kind === 'document' && classified.contentType === contentType && classified.text === source,
+      `${filename} follows its suffix in the shared classifier`)
+  }
+})
+
+Deno.test('a mixed import honors content_types for JSON documents without stalling its cursor', async () => {
   for (const types of [['text/markdown', 'text/plain'], ['text/plain'], ['application/json']]) {
     const f = fixture(encode(text)), imported: string[] = []
     const rows = ['md', 'txt', 'json'].map((suffix, n) => ({ id: `00000000-0000-4000-8000-${String(n + 1).padStart(12, '0')}`,
@@ -88,8 +100,10 @@ Deno.test('a mixed import honors content_types without converting JSON or stalli
       imported.push(String(args.p_item)); return { data: true, error: null }
     }
     const result = await handleDocumentImport(f.deps, { content_types: types })
-    const expected = types.includes('text/markdown') ? [rows[0].id, rows[1].id] : types.includes('text/plain') ? [rows[1].id] : []
-    assert(JSON.stringify(imported) === JSON.stringify(expected), 'only allowed Markdown/plain-text items reach the existing import RPC')
+    const expected = types.includes('text/markdown') ? [rows[0].id, rows[1].id]
+      : types.includes('text/plain') ? [rows[1].id]
+      : types.includes('application/json') ? [rows[2].id] : []
+    assert(JSON.stringify(imported) === JSON.stringify(expected), 'only requested document MIME types reach the existing import RPC')
     assert(result.scanned === 3 && result.imported === expected.length && result.after === rows[2].id && result.done, 'the cursor advances past excluded JSON')
     const next = await handleDocumentImport(f.deps, { after: result.after, content_types: types })
     assert(next.scanned === 0 && next.imported === 0 && next.done, 'resumption does not get stuck on an excluded type')
@@ -139,6 +153,20 @@ Deno.test('old-data conversion skips mismatched stored bytes without changing th
   const result = await handleDocumentImport(f.deps, {})
   assert(result.skipped.length === 1 && result.skipped[0].code === 'source_changed' && result.skipped[0].id === user, 'the mismatch is recorded')
   assert(!f.calls.some(c => c.fn === 'workspace_import_document'), 'immutable source is checked before conversion')
+})
+
+Deno.test('a stored object over the live-document limit stays a file without stopping the dry run', async () => {
+  const large = new Uint8Array(WORKSPACE_TEXT_MAX_BYTES + 1).fill(65)
+  const f = fixture(large), id = '00000000-0000-4000-8000-000000000001'
+  f.deps.serviceRpc = async (fn, args) => {
+    f.calls.push({ fn, args })
+    return { data: fn === 'workspace_document_import_candidates' ? [{ id, version: 1, blob_id: 'blob', filename: 'large.md',
+      content_type: 'text/markdown', bucket_id: 'oss', object_name: 'large', size_bytes: large.length, sha256: null }] : true, error: null }
+  }
+  const result = await handleDocumentImport(f.deps, { dry_run: true })
+  assert(result.items.length === 1 && result.items[0].decision === 'keep_file', 'over-limit bytes are not eligible for document conversion')
+  assert(result.skipped.length === 0 && result.done, 'a known oversized object is a keep-file decision, not an unreadable source')
+  assert(!f.calls.some(c => c.fn === 'workspace_import_document'), 'dry-run never writes')
 })
 
 Deno.test('old-data conversion resumes from its last completed cursor and repeated conversion is harmless', async () => {
@@ -226,7 +254,7 @@ Deno.test('a dry run reads and classifies every row like a run, lists each decis
   const result = await handleDocumentImport(f.deps, { dry_run: true })
   assert(result.dry_run && result.imported === 0 && !f.calls.some(c => c.fn === 'workspace_import_document'), 'nothing written')
   const decisions = Object.fromEntries(result.items.map(item => [item.filename, item.decision]))
-  assert(JSON.stringify(decisions) === JSON.stringify({ '笔记.md': 'import', 'data.json': 'keep_file', 'gone.txt': 'skip', 'bin.dat': 'keep_file' }),
+  assert(JSON.stringify(decisions) === JSON.stringify({ '笔记.md': 'import', 'data.json': 'import', 'gone.txt': 'skip', 'bin.dat': 'keep_file' }),
     `each row's decision: ${JSON.stringify(decisions)}`)
   assert(result.skipped.length === 1 && result.skipped[0].code === 'source_unavailable', 'the unreadable row is the skipped one')
 })

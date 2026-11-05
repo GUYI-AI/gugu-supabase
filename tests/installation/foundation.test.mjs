@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import pg from 'pg'
 import { foundationDigest, installFoundation, installReleases, releases } from '../../scripts/foundation.mjs'
 import { topicResourcesFixture } from './topic-resources-fixture.mjs'
 import { installTopicResourcesConcurrently } from './topic-resource-concurrency.mjs'
-import { assertAllocatedProjectPublisher } from './project-publisher-contract.mjs'
+import { assertAllocatedProjectPublisher, assertNoChatFileHost } from './project-publisher-contract.mjs'
 
 // Deliberately requires an empty, disposable Supabase PostgreSQL 17 instance.
 // Never resets schemas, migration history, or user data to make a test pass.
@@ -33,7 +34,140 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     assert.ok(downloadLockRelease)
     const firstFileRelease = releases.find((release) => release.version === '20261029114000_project_first_file_policy')
     assert.ok(firstFileRelease)
+    const deviceCheckRelease = releases.find((release) => release.version.endsWith('_remove_archived_device_agents'))
+    const validationRelease = releases.find((release) => release.constraintValidation)
+    assert.ok(deviceCheckRelease && validationRelease)
     const releaseQuery = async (sql) => {
+      const projectMetadataRelease = releases.find((release) => release.version.endsWith('_group_project_metadata'))
+      if (projectMetadataRelease && sql.includes(projectMetadataRelease.sql)) {
+        const snapshot = () => query(`SELECT oid,proargtypes::text,prorettype::regtype::text,provolatile,prosecdef,
+          proconfig,proowner,proacl::text,prosrc FROM pg_proc WHERE oid='chat.group_info_as(text,text)'::regprocedure`)
+        const ledger = () => query('SELECT version,digest,installed_at FROM gugu_install.releases ORDER BY version')
+        const before = await snapshot(), beforeLedger = await ledger()
+        await t.test('project metadata failure rolls back its function and release ledger together', async () => {
+          await assert.rejects(query(sql.replace(projectMetadataRelease.sql, () => projectMetadataRelease.sql + '\nSELECT 1/0;')), { code: '22012' })
+          await query('ROLLBACK')
+          assert.deepEqual(await snapshot(), before)
+          assert.deepEqual(await ledger(), beforeLedger)
+        })
+        const result = await query(sql)
+        const after = await snapshot(), installedLedger = await ledger()
+        await t.test('project metadata preserves the existing signature, authority and original projection', async () => {
+          assert.deepEqual({ ...after[0], prosrc: before[0].prosrc }, before[0])
+          const field = "        'is_project_group', v_group.kind = 'group' AND EXISTS (\n            SELECT 1 FROM identity.device_projects dp WHERE dp.chat_id = p_chat_id),\n"
+          assert.equal(after[0].prosrc.split(field).length, 2)
+          assert.equal(after[0].prosrc.replace(field, ''), before[0].prosrc)
+        })
+        await t.test('project metadata rollback restores the exact prior function without rewriting the ledger', async () => {
+          await query(readFileSync(new URL('../../ops/rollback-group-project-metadata.sql', import.meta.url), 'utf8'))
+          assert.deepEqual(await snapshot(), before)
+          assert.deepEqual(await ledger(), installedLedger)
+          await query('BEGIN;\n' + projectMetadataRelease.sql + '\nCOMMIT;')
+          assert.deepEqual(await snapshot(), after)
+          assert.deepEqual(await ledger(), installedLedger)
+        })
+        return result
+      }
+      if (sql.includes(deviceCheckRelease.sql)) {
+        const beforeTimeout = await query('SHOW lock_timeout')
+        await t.test('device CHECK replacement times out behind a reader and preserves its predecessor', async () => {
+          const blocker = new pg.Client({ connectionString: url.href })
+          await blocker.connect()
+          const before = await query("SELECT convalidated,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid='identity.users'::regclass AND conname='users_agent_device_required'")
+          try {
+            await blocker.query('BEGIN; SELECT id FROM identity.users LIMIT 1')
+            await assert.rejects(query(sql), { code: '55P03' })
+            await query('ROLLBACK')
+            assert.deepEqual(await query("SELECT convalidated,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid='identity.users'::regclass AND conname='users_agent_device_required'"), before)
+            assert.equal((await db.query('SELECT count(*)::int AS n FROM gugu_install.releases WHERE version=$1', [deviceCheckRelease.version])).rows[0].n, 0)
+          } finally {
+            await query('ROLLBACK')
+            await blocker.query('ROLLBACK')
+            await blocker.end()
+          }
+        })
+        await t.test('device CHECK replacement restores the outer transaction lock timeout', async () => {
+          await query('BEGIN')
+          try {
+            await query("SET LOCAL lock_timeout='7s'")
+            await query(deviceCheckRelease.sql)
+            assert.equal((await query('SHOW lock_timeout'))[0].lock_timeout, '7s')
+          } finally { await query('ROLLBACK') }
+        })
+        const result = await query(sql)
+        await t.test('device CHECK replacement skips validation and restores the previous lock timeout', async () => {
+          assert.equal((await query("SELECT convalidated FROM pg_constraint WHERE conrelid='identity.users'::regclass AND conname='users_agent_device_required'"))[0].convalidated, false)
+          assert.deepEqual(await query('SHOW lock_timeout'), beforeTimeout)
+        })
+        return result
+      }
+      if (sql === validationRelease.sql) {
+        const transaction = (await query('SELECT txid_current() AS id'))[0].id
+        const result = await query(sql)
+        await t.test('device CHECK validates in a later transaction with no retained ACCESS EXCLUSIVE lock', async () => {
+          assert.equal((await query("SELECT convalidated FROM pg_constraint WHERE conrelid='identity.users'::regclass AND conname='users_agent_device_required'"))[0].convalidated, true)
+          assert.notEqual((await query('SELECT txid_current() AS id'))[0].id, transaction)
+          assert.equal((await query("SELECT count(*)::int AS n FROM pg_locks WHERE pid=pg_backend_pid() AND relation='identity.users'::regclass AND mode='AccessExclusiveLock'"))[0].n, 0)
+        })
+        return result
+      }
+      if (sql.includes(releases.find(release => release.version.endsWith('_widget_message_shape'))?.sql)) {
+        const owner = randomUUID(), group = randomUUID(), legacy = randomUUID(), deep = randomUUID(), deepGroup = randomUUID()
+        await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Widget upgrade fixture')", [owner])
+        await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'group','Widget upgrade',$2)", [group, owner])
+        await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner')", [group, owner])
+        const legacyContent = JSON.stringify({ id: 'legacy', title: 'Legacy widget', html: '<p>Old widget</p>' })
+        await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type) VALUES($1,$2,$3,$4,'widget')", [legacy, group, owner, legacyContent])
+        const deepContent = '['.repeat(16384) + '0' + ']'.repeat(16384)
+        await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'group','Deep widget upgrade',$2)", [deepGroup, owner])
+        await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner')", [deepGroup, owner])
+        await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type) VALUES($1,$2,$3,$4,'widget')", [deep, deepGroup, owner, deepContent])
+        const preview = () => query("SELECT oid,(SELECT array_agg(acl::text ORDER BY acl::text) FROM unnest(proacl) AS acl) AS proacl,provolatile,prosecdef,proconfig,prosrc FROM pg_proc WHERE oid='chat.message_preview(text,text)'::regprocedure")
+        const before = await preview()
+        const widget = JSON.stringify({ v: 2, text: 'Build status', app: 'build-board', view: 'board' })
+        assert.equal((await db.query("SELECT chat.message_preview($1,'widget') AS preview", [widget])).rows[0].preview, widget.slice(0, 100))
+        await t.test('widget migration rolls back its function and constraint together', async () => {
+          await query(sql.replace(/COMMIT;\s*$/, 'ROLLBACK;'))
+          assert.deepEqual(await preview(), before)
+          assert.equal((await query("SELECT count(*)::int AS n FROM pg_constraint WHERE conrelid='chat.messages'::regclass AND conname='messages_widget_shape'"))[0].n, 0)
+        })
+        const result = await query(sql)
+        await t.test('widget migration preserves legacy rows and preview ACL without validating old content', async () => {
+          const after = await preview()
+          assert.deepEqual({ ...after[0], prosrc: before[0].prosrc }, before[0])
+          assert.equal((await query("SELECT convalidated FROM pg_constraint WHERE conrelid='chat.messages'::regclass AND conname='messages_widget_shape'"))[0].convalidated, false)
+          assert.equal((await db.query("SELECT chat.message_preview($1,'widget') AS preview", [widget])).rows[0].preview, 'Build status')
+          assert.equal((await db.query('SELECT content FROM chat.messages WHERE id=$1', [legacy])).rows[0].content, legacyContent)
+          assert.equal((await db.query('SELECT chat.message_preview(content,content_type) AS preview FROM chat.messages WHERE id=$1', [legacy])).rows[0].preview, '[Widget]')
+          assert.equal((await query("SELECT has_function_privilege('anon','chat.message_preview(text,text)','EXECUTE') AS allowed"))[0].allowed, false)
+          for (const role of ['authenticated', 'service_role']) {
+            assert.equal((await db.query("SELECT has_function_privilege($1,'chat.message_preview(text,text)','EXECUTE') AS allowed", [role])).rows[0].allowed, true)
+          }
+          await query('BEGIN')
+          try {
+            await query('SET LOCAL ROLE authenticated')
+            await db.query("SELECT set_config('request.jwt.claim.sub',$1,true)", [owner])
+            await db.query('UPDATE chat.messages SET edited_at=now(),retracted_at=now() WHERE id=$1', [legacy])
+            assert.equal((await db.query('SELECT * FROM chat.delete_message($1)', [legacy])).rows[0].globally_deleted, true)
+          } finally { await query('ROLLBACK') }
+        })
+        await t.test('pre-existing deeply nested widget updates retain the PostgreSQL parser-limit rejection', async () => {
+          for (const statement of ['UPDATE chat.messages SET retracted_at=now() WHERE id=$1', 'SELECT * FROM chat.delete_message($1)']) {
+            await query('BEGIN')
+            try {
+              await query('SET LOCAL ROLE authenticated')
+              await db.query("SELECT set_config('request.jwt.claim.sub',$1,true)", [owner])
+              await assert.rejects(db.query(statement, [deep]), { code: '54001' })
+            } finally { await query('ROLLBACK') }
+          }
+          assert.equal((await db.query('SELECT content FROM chat.messages WHERE id=$1', [deep])).rows[0].content, deepContent)
+        })
+        await db.query('DELETE FROM chat.messages WHERE id=$1', [deep])
+        await db.query('DELETE FROM chat.chats WHERE id=$1', [deepGroup])
+        await db.query('DELETE FROM chat.chats WHERE id=$1', [group])
+        await db.query('DELETE FROM identity.users WHERE id=$1', [owner])
+        return result
+      }
       if (sql.includes(firstFileRelease.sql)) {
         await t.test('an already recorded later actor release refuses the older first-file release without changes', async () => {
           const snapshot = async () => ({
@@ -202,13 +336,16 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     await t.test('installed publishers retain directory-allocated names and private grants', async () => {
       await assertAllocatedProjectPublisher(query)
     })
+    await t.test('no installed function knows a chat file host', async () => {
+      await assertNoChatFileHost(query)
+    })
     assert.equal((await query('SHOW row_security'))[0].row_security, 'on', 'dump settings stay local to the installation transaction')
     const before = await query('SELECT version,digest,installed_at FROM gugu_install.releases')
     assert.deepEqual(await installFoundation(query), { installed: false, digest: foundationDigest })
     assert.deepEqual(await installReleases(query), { applied: [], versions })
     await assertAllocatedProjectPublisher(query)
     assert.deepEqual(await query('SELECT version,digest,installed_at FROM gugu_install.releases'), before)
-    assert.equal((await query("SELECT count(*)::integer AS n FROM pg_policies WHERE schemaname='realtime' AND policyname LIKE 'gugu_%'"))[0].n, 8, 'foundation 7 + forum events')
+    assert.equal((await query("SELECT count(*)::integer AS n FROM pg_policies WHERE schemaname='realtime' AND policyname LIKE 'gugu_%'"))[0].n, 9, 'foundation 7 + forum events + owned agents')
     assert.equal((await query("SELECT count(*)::integer AS n FROM cron.job WHERE active AND jobname IN ('device-lease-sweep','file-blob-upload-sweep','file-blob-gc-kick')"))[0].n, 3)
     assert.equal((await query("SELECT to_regnamespace('billing') AS billing"))[0].billing, null)
     assert.equal((await query("SELECT count(*)::integer AS n FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('model_access_reserve','cloud_computer_charge','gateway_pool_claim')"))[0].n, 0)
@@ -259,7 +396,7 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
       await db.query('ROLLBACK')
     }
     await t.test('project metadata tables are closed and only intended read/publish APIs are granted', async () => {
-      for (const table of ['file_project_policies','file_device_revisions']) {
+      for (const table of ['file_device_revisions','file_temporary_transfers']) {
         assert.equal((await query(`SELECT relrowsecurity AS enabled FROM pg_class WHERE oid='chat.${table}'::regclass`))[0].enabled, true)
         for (const role of ['anon','authenticated']) {
           for (const privilege of ['SELECT','INSERT','UPDATE','DELETE']) {
@@ -268,10 +405,12 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
         }
       }
       for (const signature of ['file_project_policy_as(text,text,text,boolean,boolean,text)','file_project_policy_for(text,text)',
-        'file_device_publish(uuid,text,text,text,text,bigint,text,text,integer,uuid,jsonb)','file_resolve_as(jsonb,text)']) {
+        'file_device_publish(uuid,text,text,text,text,bigint,text,text,integer,uuid,jsonb,text)','file_resolve_as(jsonb,text)']) {
         assert.equal((await db.query("SELECT has_function_privilege('authenticated',$1,'EXECUTE') AS allowed", ['chat.'+signature])).rows[0].allowed, true)
         assert.equal((await db.query("SELECT has_function_privilege('anon',$1,'EXECUTE') AS allowed", ['chat.'+signature])).rows[0].allowed, false)
       }
+      // A later release that replaces file resolution must keep it read-only (STABLE), or the planner calls it per row.
+      assert.equal((await query("SELECT provolatile FROM pg_proc WHERE oid='chat.file_resolve_as(jsonb,text)'::regprocedure"))[0].provolatile, 's')
     })
     await t.test('workspace metadata is an object and its atomic helper has no API grants', async () => {
       const column = (await db.query("SELECT is_nullable,column_default,data_type FROM information_schema.columns WHERE table_schema='chat' AND table_name='workspace_items' AND column_name='metadata'")).rows[0]

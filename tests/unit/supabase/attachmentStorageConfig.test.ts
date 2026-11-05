@@ -14,6 +14,7 @@ const OSS: Record<string, string> = {
   OSS_ACCESS_KEY_SECRET: 'fixture-secret-never-in-output',
   CDN_DOMAIN: 'files.example.test',
   CDN_AUTH_KEY_PRIMARY: 'fixture-cdn-key-never-in-output',
+  CDN_AUTH_TTL_SECONDS: '1800',
 }
 const from = (vars: Record<string, string>) => (key: string) => vars[key]
 
@@ -32,7 +33,7 @@ describe('attachment storage configuration', () => {
         endpointInternal: 'oss-cn-wulanchabu-internal.aliyuncs.com', endpointPublic: 'oss-cn-wulanchabu.aliyuncs.com',
         accessKeyId: 'fixture-access-id', accessKeySecret: 'fixture-secret-never-in-output',
       },
-      cdn: { domain: 'files.example.test', authKey: 'fixture-cdn-key-never-in-output', objectPrefix: 'devdb' },
+      cdn: { domain: 'files.example.test', authKey: 'fixture-cdn-key-never-in-output', objectPrefix: 'devdb', authTtlSeconds: 1800 },
     })
   })
 
@@ -43,6 +44,11 @@ describe('attachment storage configuration', () => {
       try { attachmentStorageConfig(from(vars)) } catch (error) { expect((error as StorageConfigError).missing).toEqual([dropped]) }
     }
     expect(() => attachmentStorageConfig(from({ OSS_BUCKET: 'only-one' }))).toThrow(/missing OSS_REGION/)
+    // The edge TTL is required with the rest: signing reads without it would fail on every download instead.
+    for (const ttl of ['0', '-1', '1.5', 'soon']) {
+      try { attachmentStorageConfig(from({ ...OSS, CDN_AUTH_TTL_SECONDS: ttl })); throw new Error('accepted ' + ttl) }
+      catch (error) { expect((error as StorageConfigError).missing).toEqual(['CDN_AUTH_TTL_SECONDS']) }
+    }
   })
 
   it('hands OSS uploads out as a signed post form without any credential', async () => {
@@ -57,7 +63,7 @@ describe('attachment storage configuration', () => {
   })
 
   it('reads attachments already stored on OSS through CDN links', async () => {
-    const config = attachmentStorageConfig(from({...OSS,CDN_AUTH_TTL_SECONDS:'1800'}))
+    const config = attachmentStorageConfig(from(OSS))
     if (config.kind !== 'oss') throw new Error('expected OSS')
     const row = {
       item_id: null, version: null, message_id: 'm1', current_version: null, chat_id: 'c1', file_name: 'a.png',
@@ -86,7 +92,5 @@ describe('attachment storage configuration', () => {
     expect(urls[0]!.thumb_url).toContain('x-oss-process=')
     const timestamp=Number(new URL(urls[0]!.url).searchParams.get('auth_key')!.split('-')[0])
     expect(timestamp+1800).toBe(Date.parse('2026-10-21T00:01:00Z')/1000)
-    delete config.cdn.authTtlSeconds
-    await expect(handleUrls(deps,'u1',{refs:[{message_id:'m1'}]})).rejects.toMatchObject({status:503,code:'not_configured'})
   })
 })

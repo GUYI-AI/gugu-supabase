@@ -180,7 +180,7 @@ describe('#6561 agent ids never rewrite someone else\'s identity', () => {
     expect(policy.rows).toHaveLength(0)
   })
 
-  it('keeps every legitimate path: mint, same-id retry, rename, remove then re-create, same-owner resync', async () => {
+  it('keeps every legitimate path: mint, same-id retry, rename, new identity after removal, same-owner resync', async () => {
     await inRollback(async () => {
       await seedHuman(OTHER_OWNER, OTHER_DEVICE)
       const mine = randomUUID()
@@ -196,14 +196,16 @@ describe('#6561 agent ids never rewrite someone else\'s identity', () => {
       expect(await identity(mine)).toMatchObject({ type: 'agent', owner_user_id: OTHER_OWNER, display_name: 'Renamed' })
 
       await asUser(OTHER_OWNER, 'SELECT identity.remove_owned_agent($1)', [mine])
-      expect(await identity(mine)).toBeUndefined()
-      await asUser(OTHER_OWNER, CREATE, ['Again', OTHER_DEVICE, mine])
-      expect(await identity(mine)).toMatchObject({ type: 'agent', owner_user_id: OTHER_OWNER, display_name: 'Again' })
+      expect(await identity(mine)).toMatchObject({ type: 'agent', owner_user_id: OTHER_OWNER, display_name: 'Renamed' })
+      expect(await rejectedAs(OTHER_OWNER, CREATE, ['Again', OTHER_DEVICE, mine])).toContain('identity_removed')
+      const fresh = randomUUID()
+      await asUser(OTHER_OWNER, CREATE, ['Again', OTHER_DEVICE, fresh])
+      expect(await identity(fresh)).toMatchObject({ type: 'agent', owner_user_id: OTHER_OWNER, display_name: 'Again' })
 
       // 同主人的 users 行还在、profile 丢了:重新开户走冲突分支,必须放行(这是冲突分支唯一合法的用途)。
-      await database.query('DELETE FROM identity.agent_profiles WHERE id = $1::uuid', [mine])
-      await asUser(OTHER_OWNER, CREATE, ['Resynced', OTHER_DEVICE, mine])
-      expect(await identity(mine)).toMatchObject({ type: 'agent', owner_user_id: OTHER_OWNER, display_name: 'Resynced' })
+      await database.query('DELETE FROM identity.agent_profiles WHERE id = $1::uuid', [fresh])
+      await asUser(OTHER_OWNER, CREATE, ['Resynced', OTHER_DEVICE, fresh])
+      expect(await identity(fresh)).toMatchObject({ type: 'agent', owner_user_id: OTHER_OWNER, display_name: 'Resynced' })
     })
   })
 })
