@@ -182,7 +182,7 @@ describe('#6835 reply preview and visibility cost — structural, not wall-clock
     })
   })
 
-  it('a page of 30 rows without replies calls no preview; the next page evaluates reply columns only for returned reply rows', async () => {
+  it('a page of 30 rows without replies calls no preview; the next page calls it once per reply column read, per reply row', async () => {
     await inRollback(async () => {
       const w = await seedWorld('p1')
       for (const viewer of [w.owner, w.alice, w.peer, w.late]) {
@@ -194,8 +194,8 @@ describe('#6835 reply preview and visibility cost — structural, not wall-clock
         expect(first.previewRow).toBe(0)
         expect(first.visible).toBe(0)
 
-        // 正对照:下一页有回复 —— 计数器是活的,STRICT 不是把预览关掉了。
-        // 恢复 LIMIT 后的三列表达式:每条返回的回复读三列,不对整段历史提前计算。
+        // 正对照:下一页有回复 —— 计数器是活的,STRICT 不是把预览关掉了。回复列是标量子查询(只在被读、且只对返回的行求值),
+        // PAGE 读了三列,所以每条回复三次外壳、三次内核;没读回复列的查询一次也不调(见 inboxAndPreviewReadCost)。
         const oldestSeq = (await database.query<{ seq: string }>('SELECT seq::text FROM chat.messages WHERE id = $1', [newest.at(-1)!.id])).rows[0]!.seq
         let older: Array<{ reply_to_message_id: string | null }> = []
         const second = await delta(async () => { older = await as(viewer, PAGE, [w.group, oldestSeq]) })

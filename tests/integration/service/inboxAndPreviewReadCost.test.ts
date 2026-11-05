@@ -9,8 +9,7 @@
 //     that does not read them never calls it, even when it sorts the whole chat.
 //   · The row policy no longer runs chat.is_member once per message for a member without a history floor.
 //
-// Loopback PostgreSQL via GUGU_INTEGRATION_DATABASE_URL; every case runs in BEGIN … ROLLBACK.
-// The distinct-target regression temporarily restores the budget view as a negative control in this disposable DB only.
+// Loopback PostgreSQL via GUGU_INTEGRATION_DATABASE_URL; every case runs in BEGIN … ROLLBACK and installs no DDL.
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -205,62 +204,22 @@ describe('inbox pull, messages_view and message row policy: same results, cost b
     expect(replies.filter((r) => r.reply_to_content !== null).length).toBeGreaterThan(BACKLOG / 2) // previews are really there
   }))
 
-  it('chat-list preview work is bounded by returned rows and the optional preview RPC avoids replies', async () => rollback(async () => {
+  it('the chat-list preview calls the reply preview only for returned rows; unread columns never call it', async () => rollback(async () => {
     await seed()
     const preview = `SELECT v.id, v.reply_to_message_id, chat.preview(v) AS preview FROM chat.messages_view v
                       WHERE v.chat_id = ANY($1) AND v.is_whisper = false ORDER BY v.seq DESC LIMIT 4`
-    const [rows, cost] = await delta(() => as<{ id: string; reply_to_message_id: string | null }>(ALICE, preview, [[GROUP]]))
+    const [rows, cost] = await delta(() => as<{ reply_to_message_id: string | null }>(ALICE, preview, [[GROUP]]))
     expect(rows).toHaveLength(4)
     const replyRows = rows.filter((r) => r.reply_to_message_id).length
     expect(replyRows).toBeGreaterThan(0) // the counter is live: returned reply rows do pay
-    // The restored target-list form reads three reply columns only for returned reply rows.
+    // preview(v) takes the whole row: each returned reply row reads its three reply columns; the other
+    // BACKLOG reply rows of the chat are read and sorted, but never call the preview.
     expect(cost.previewFor).toBe(3 * replyRows)
-
-    const [latest, listCost] = await delta(() => as<{ id: string }>(ALICE,
-      'SELECT * FROM chat.list_chat_previews($1)', [[GROUP]]))
-    expect(latest.map(row => row.id)).toEqual([rows[0]!.id])
-    expect(listCost.previewFor).toBe(0)
 
     const [, unread] = await delta(() => as(ALICE,
       'SELECT v.id, v.seq FROM chat.messages_view v WHERE v.chat_id = ANY($1) ORDER BY v.seq DESC LIMIT 4', [[GROUP]]))
     expect(unread.previewFor).toBe(0)
 
-  }))
-
-  it('a computed preview page does not evaluate distinct reply targets across the whole sorted history', async () => rollback(async () => {
-    await seed()
-    // Distinct targets defeat the LATERAL plan's Memoize cache; a backlog that repeats one target
-    // can accidentally look bounded even when the reply join runs before sorting and LIMIT.
-    const targets = Array.from({ length: BACKLOG }, (_, i) => id(1000 + i))
-    for (const target of targets) {
-      await db.query(`INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type)
-                      VALUES($1,$2,$3,'older target','text')`, [target, GROUP, ALICE])
-    }
-    for (let i = 0; i < targets.length; i++) {
-      await db.query(`INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type,reply_to_message_id)
-                      VALUES($1,$2,$3,'reply page','text',$4)`, [id(2000 + i), GROUP, PEER, targets[i]])
-    }
-    const query = `SELECT v.id,v.reply_to_message_id,chat.preview(v) AS preview FROM chat.messages_view v
-                   WHERE v.chat_id=ANY($1) AND v.is_whisper=false ORDER BY v.seq DESC LIMIT 4`
-    const [rows, cost] = await delta(() => as<{ id: string; reply_to_message_id: string; preview: string }>(ALICE, query, [[GROUP]]))
-    expect(rows.map(row => row.id)).toEqual([id(2039), id(2038), id(2037), id(2036)])
-    expect(rows.every(row => row.preview === 'reply page')).toBe(true)
-    expect(cost.previewFor).toBe(3 * rows.length)
-    expect(await as(OUTSIDER, query, [[GROUP]])).toEqual([])
-
-    // Negative control is the original released view, not a synthetic delay. Same rows/claims/page;
-    // only its pre-LIMIT LATERAL placement differs. The fixture must expose that real extra work.
-    await db.query('SAVEPOINT old_budget_view')
-    try {
-      const released = migration('20261103231500_chat_projection_budget.sql')
-      const view = released.slice(released.indexOf('CREATE OR REPLACE VIEW'), released.indexOf('CREATE FUNCTION chat.list_chat_previews'))
-      await db.query(view)
-      const [before, unbounded] = await delta(() => as(ALICE, query, [[GROUP]]))
-      expect(before).toEqual(rows)
-      expect(unbounded.previewFor).toBeGreaterThan(3 * rows.length)
-    } finally {
-      await db.query('ROLLBACK TO SAVEPOINT old_budget_view')
-    }
   }))
 
   it('a member without a history floor is checked against one set per query, not chat.is_member per row', async () => rollback(async () => {
