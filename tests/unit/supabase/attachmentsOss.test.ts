@@ -2,7 +2,7 @@
 // 签名对官方文档的样例;其余是这份代码在 OSS / CDN 实测里跑通的那些(gugu-base evidence/2026-10-16-oss-cdn-probe/),
 // 用假的 OSS 与库判逻辑:先复制再登记、撞上正在回收重来、暂存没了交给库认登记、签名链接、回收。
 import { createHash } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { md5Hex } from '../../../supabase/functions/_shared/md5'
 import {
   cdnAuthKey,
@@ -676,6 +676,27 @@ describe('直传表单、签名链接、回收', () => {
     expect(f.removed).toEqual([])
     expect(f.events).toEqual([{ stage: 'gc_result', entry: 'kick', at: '2026-10-16T12:00:00.000Z', day: '2026-10-16',
       claimed: null, deleted: 0, finished: 0, failed: 0, outcome: 'error' }])
+  })
+  it.each([false, true])('gc preserves a successful result when summary logging throws (stderr unavailable: %s)', async stderrFails => {
+    const f = fakes({ claimed: [{ blob_id: 'b1', claim_token: 't1', bucket_id: 'workspace', object_name: 'c/u/old', content_type: 'application/pdf' }] }), loggingError = new Error('summary logger unavailable')
+    f.deps.log = () => { throw loggingError }
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => { if (stderrFails) throw new Error('stderr unavailable') })
+    try {
+      expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 1, deleted: 1, failed: 0 })
+      expect(f.removed).toEqual(['workspace/c/u/old'])
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error: String(loggingError) }))
+    } finally { stderr.mockRestore() }
+  })
+  it.each([false, true])('gc preserves the original exception when summary logging throws (stderr unavailable: %s)', async stderrFails => {
+    const f = fakes(), original = new Error('claim transport unavailable'), loggingError = new Error('summary logger unavailable')
+    const rpc = f.deps.serviceRpc
+    f.deps.serviceRpc = (fn, args) => fn === 'file_blob_gc_claim' ? Promise.reject(original) : rpc(fn, args)
+    f.deps.log = () => { throw loggingError }
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => { if (stderrFails) throw new Error('stderr unavailable') })
+    try {
+      await expect(handleGc(f.deps, 'kick')).rejects.toBe(original)
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error: String(loggingError) }))
+    } finally { stderr.mockRestore() }
   })
 })
 

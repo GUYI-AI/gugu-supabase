@@ -529,10 +529,16 @@ export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-acce
     completed = true
     return result
   } finally {
-    const at = deps.now().toISOString()
-    // Removal may succeed even when its database confirmation fails. Keep both counts without changing the API result.
-    deps.log('gc_result', { entry, at, day: at.slice(0, 10), claimed: claimedCount, deleted: removed,
-      finished: result.deleted, failed: result.failed, outcome: completed ? 'completed' : 'error' })
+    try {
+      const at = deps.now().toISOString()
+      // Removal may succeed even when its database confirmation fails. Keep both counts without changing the API result.
+      deps.log('gc_result', { entry, at, day: at.slice(0, 10), claimed: claimedCount, deleted: removed,
+        finished: result.deleted, failed: result.failed, outcome: completed ? 'completed' : 'error' })
+    } catch (error) {
+      try {
+        console.error(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry, error: String(error) }))
+      } catch { /* Even unavailable stderr must not replace the GC result or original exception. */ }
+    }
   }
 }
 
