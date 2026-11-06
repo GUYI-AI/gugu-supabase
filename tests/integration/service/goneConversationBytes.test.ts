@@ -19,7 +19,7 @@ async function user(id: string) {
 }
 async function service() { await db.query('RESET ROLE') }
 /** A member sends a file as a chat attachment through the ordinary managed upload path. */
-async function send(chat: string, as: string, sha = randomUUID().replaceAll('-', '').repeat(2)) {
+async function send(chat: string, as: string, sha = randomUUID().replaceAll('-', '').repeat(2), whisper = false) {
   await user(as)
   const permit = (await db.query('SELECT chat.file_managed_upload_as($1,$2,$3,60,$4) AS r', [randomUUID(), chat, as, 'application/pdf'])).rows[0].r
   await service()
@@ -27,7 +27,7 @@ async function send(chat: string, as: string, sha = randomUUID().replaceAll('-',
   await db.query('SELECT chat.file_managed_upload_registered($1,$2)', [permit.staging_key, as])
   await user(as)
   const message = randomUUID()
-  const sent = (await db.query('SELECT * FROM chat.attachment_commit($1,$2,$3,$4,$5)', [permit.staging_key, message, chat, as, 'report.pdf'])).rows[0]
+  const sent = (await db.query('SELECT * FROM chat.attachment_commit($1,$2,$3,$4,$5,$6,NULL,NULL,false,$7)', [permit.staging_key, message, chat, as, 'report.pdf', whisper ? [owner] : [], whisper])).rows[0]
   await service()
   // The upload registration lapses and is swept, as it is an hour later.
   await db.query("UPDATE chat.file_blob_uploads SET expires_at=now()-interval '1 second' WHERE blob_id=$1", [blob])
@@ -167,10 +167,8 @@ describe('all historical reference families retain the same collector protection
   })
 
   it('keeps a direct message blob with no workspace item', async () => {
-    const file = await send(group, member)
-    // A whispered attachment has only a message blob, and no folder entry.
-    await db.query('UPDATE chat.messages SET file_item_id=NULL,file_version=NULL,file_blob_id=$1,is_whisper=true,to_user_ids=ARRAY[$2]::text[] WHERE id=$3', [file.blob, owner, file.message])
-    await db.query('DELETE FROM chat.workspace_items WHERE id=$1', [file.item])
+    const file = await send(group, member, undefined, true)
+    expect(file.item).toBeNull() // A whispered attachment has only a message blob, and no folder entry.
     await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [group])
     expect(await collected(file.blob)).toEqual([])
     await readable({ message_id: file.message }, owner)
@@ -246,6 +244,8 @@ describe('a deleted DM keeps its bytes while the other side can still see it', (
     // Only irreversible identity removal ends the remaining read authorization.
     await db.query('UPDATE identity.users SET removed_at=now() WHERE id=$1', [owner])
     expect(await gone(dm)).toBe(true)
+    expect(await collected(blob)).toEqual([]) // The already issued download must outlive its capability.
+    await db.query("UPDATE chat.file_transfer_reservations SET expires_at=now()-interval '1 second' WHERE kind='download' AND chat_id=$1", [dm])
     expect(await collected(blob)).toMatchObject([{ blob_id: blob }])
   })
 
