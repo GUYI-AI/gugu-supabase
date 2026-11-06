@@ -43,14 +43,15 @@ beforeEach(async () => {
   await db.query('BEGIN')
   await db.query("UPDATE support_help.release_gate SET environment='test'")
   owner = randomUUID(); visitor = randomUUID(); group = randomUUID()
-  await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Test duty'),($2,'human','Test visitor')", [owner, visitor])
+  await db.query("INSERT INTO auth.users(id,aud,role,email,raw_app_meta_data,raw_user_meta_data,created_at,updated_at) SELECT id,'authenticated','authenticated',id::text||'@support-help.invalid','{}','{}',now(),now() FROM unnest(ARRAY[$1::uuid,$2::uuid]) id", [owner, visitor])
+  await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Test duty'),($2,'human','Test visitor') ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name", [owner, visitor])
   await actor(owner)
   await createFixtureGroup(db, [group, 'Test support', owner, '[]'])
   await db.query('RESET ROLE')
   await db.query("UPDATE chat.chats SET join_mode='open' WHERE id=$1", [group])
   await db.query('INSERT INTO support_help.configuration_admins(user_id,can_publish,can_release) VALUES($1,true,true)', [owner])
 })
-afterEach(async () => { if (db) { await db.query('RESET ROLE'); await db.query('ROLLBACK') } })
+afterEach(async () => { if (db) { await db.query('ROLLBACK'); await db.query('RESET ROLE') } })
 
 describe('support help configuration and data-plane boundary', () => {
   it('has an identical closed shape for anonymous and authenticated callers, irrespective of configured group', async () => {
@@ -117,8 +118,10 @@ describe('support help configuration and data-plane boundary', () => {
     await publish()
     await rejects("SELECT identity.set_support_help_release_gate($1,true,'fake','test','test')", [owner])
     const agent = randomUUID()
+    const device = `support-help-${agent}`
     await db.query('RESET ROLE')
-    await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Test agent',$2,'test-device')", [agent, owner])
+    await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Test device','isolated','linux')", [device, owner])
+    await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Test agent',$2,$3)", [agent, owner, device])
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [group, agent])
     await actor(owner)
     await rejects("SELECT identity.publish_support_help_configuration(1,$1,$2,ARRAY[$3],'test','unverified')", [group, owner, agent])
