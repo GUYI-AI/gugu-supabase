@@ -10,6 +10,7 @@ it('assigns the pending feedback releases distinct versions after their predeces
   }
   const feedback = files.filter(name => /_(private_feedback_screenshots|validate_feedback_screenshot_paths|validate_feedback_evidence_storage)\.sql$/.test(name)).sort()
   expect(feedback).toHaveLength(3)
-  expect(feedback[0].slice(0, 14) > '20261106110000').toBe(true)
+  const predecessor = files.filter(name => !feedback.includes(name)).map(name => name.slice(0, 14)).sort().at(-1)!
+  expect(feedback[0].slice(0, 14) > predecessor).toBe(true)
   for (const name of feedback) expect(versions.get(name.slice(0, 14))).toEqual([name])
 })

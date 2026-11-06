@@ -53,6 +53,8 @@ beforeAll(async () => {
   storage = createClient(api.href, process.env.GUGU_INTEGRATION_SERVICE_ROLE_KEY!, { auth: { persistSession: false, autoRefreshToken: false } })
   ;[db, collector, monitor] = Array.from({ length: 3 }, () => new pg.Client({ connectionString: url.href }))
   await Promise.all([db.connect(), collector.connect(), monitor.connect()])
+  expect(Number((await db.query('SHOW server_version_num')).rows[0].server_version_num)).toBeGreaterThanOrEqual(170000)
+  expect(Number((await db.query('SHOW server_version_num')).rows[0].server_version_num)).toBeLessThan(180000)
   for (const connection of [db, collector]) await connection.query("SET statement_timeout='15s'")
   writerPid = (await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
   otherPid = (await collector.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
@@ -161,6 +163,41 @@ describe('feedback submission shares the byte collector protocol', () => {
     expect(a.value!.rows[0].screenshot_paths).toEqual(paths)
     expect(b.value!.rows[0].screenshot_paths).toEqual([...paths].reverse())
     expect((await db.query('SELECT id FROM chat.file_blobs WHERE bucket_id=$1 AND object_name=ANY($2)', [bucket, paths])).rowCount).toBe(2)
+    for (const name of paths) await bytesStillMatch(name)
+  })
+
+  it.each(['DELETE', 'UPDATE'])('releases reversed references in a common queue-lock order on %s', async (operation) => {
+    const a = (await submit(paths)).rows[0].id; await db.query('COMMIT')
+    const b = (await submit([...paths].reverse(), collector)).rows[0].id; await collector.query('COMMIT')
+    for (const name of paths) await db.query('SELECT chat.file_blob_enqueue(chat.file_blob_for_object($1,$2))', [bucket, name])
+    await monitor.query('BEGIN')
+    await monitor.query(`SELECT g.blob_id FROM chat.file_blob_gc g JOIN chat.file_blobs b ON b.id=g.blob_id
+      WHERE b.bucket_id=$1 AND b.object_name=$2 FOR UPDATE OF g`, [bucket, paths[0]])
+    const release = async (connection: pg.Client, id: string) => {
+      await connection.query('BEGIN')
+      return connection.query(operation === 'DELETE' ? 'DELETE FROM identity.feedback WHERE id=$1'
+        : "UPDATE identity.feedback SET screenshot_paths='{}' WHERE id=$1", [id])
+    }
+    const forward = release(db, a), first = settled(forward)
+    let second: ReturnType<typeof settled> | undefined
+    try {
+      expect(await waitingOn(writerPid, forward)).toBe('locked')
+      const reverse = release(collector, b); second = settled(reverse)
+      expect(await waitingOn(otherPid, reverse)).toBe('locked')
+      // A reversed release must wait at the same first queue row, without holding B.
+      await monitor.query('SAVEPOINT probe')
+      expect((await monitor.query(`SELECT g.blob_id FROM chat.file_blob_gc g JOIN chat.file_blobs b ON b.id=g.blob_id
+        WHERE b.bucket_id=$1 AND b.object_name=$2 FOR UPDATE OF g NOWAIT`, [bucket, paths[1]])).rowCount).toBe(1)
+      await monitor.query('ROLLBACK TO SAVEPOINT probe')
+    } finally { await monitor.query('ROLLBACK') }
+    const winner = await Promise.race([first.then(result => ({ side: 'first', result })), second!.then(result => ({ side: 'second', result }))])
+    await (winner.side === 'first' ? db : collector).query(winner.result.error ? 'ROLLBACK' : 'COMMIT')
+    const remaining = await (winner.side === 'first' ? second! : first)
+    await (winner.side === 'first' ? collector : db).query(remaining.error ? 'ROLLBACK' : 'COMMIT')
+    expect((await first).error).toBeUndefined(); expect((await second!).error).toBeUndefined()
+    expect((await db.query('SELECT id FROM identity.feedback WHERE user_id=$1 AND cardinality(screenshot_paths)>0', [owner])).rowCount).toBe(0)
+    expect((await db.query(`SELECT g.blob_id FROM chat.file_blob_gc g JOIN chat.file_blobs b ON b.id=g.blob_id
+      WHERE b.bucket_id=$1 AND b.object_name=ANY($2)`, [bucket, paths])).rowCount).toBe(2)
     for (const name of paths) await bytesStillMatch(name)
   })
 })

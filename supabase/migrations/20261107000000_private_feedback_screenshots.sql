@@ -75,6 +75,25 @@ CREATE POLICY feedback_screenshot_delete ON storage.objects FOR DELETE TO authen
 USING (bucket_id = 'feedback-screenshots' AND (storage.foldername(name))[1] = (SELECT auth.uid())::text
     AND NOT EXISTS (SELECT 1 FROM identity.feedback f WHERE f.screenshot_paths @> ARRAY[objects.name]));
 
+-- RLS may have checked references before waiting for a submitting transaction.
+-- DELETE already holds the object lock; join the blob protocol, then use a fresh
+-- statement snapshot. Raise rather than skip, so Storage cannot remove the bytes.
+CREATE FUNCTION identity.guard_feedback_screenshot_delete() RETURNS trigger
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = '' AS $$
+BEGIN
+    PERFORM 1 FROM chat.file_blobs b
+     WHERE b.bucket_id = OLD.bucket_id AND b.object_name = OLD.name FOR UPDATE;
+    IF EXISTS (SELECT 1 FROM identity.feedback f WHERE f.screenshot_paths @> ARRAY[OLD.name]) THEN
+        RAISE EXCEPTION 'Feedback screenshot is still referenced' USING ERRCODE = '55000';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+REVOKE ALL ON FUNCTION identity.guard_feedback_screenshot_delete() FROM PUBLIC, anon, authenticated;
+CREATE TRIGGER guard_feedback_screenshot_delete BEFORE DELETE ON storage.objects
+FOR EACH ROW WHEN (OLD.bucket_id = 'feedback-screenshots')
+EXECUTE FUNCTION identity.guard_feedback_screenshot_delete();
+
 -- Older clients must fail explicitly before publishing more feedback evidence.
 CREATE POLICY feedback_legacy_upload_closed ON storage.objects AS RESTRICTIVE FOR INSERT TO authenticated
 WITH CHECK (bucket_id <> 'chat-media' OR (storage.foldername(name))[2] IS DISTINCT FROM 'feedback');
@@ -122,7 +141,7 @@ CREATE FUNCTION identity.feedback_screenshots_released() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE object_path text;
 BEGIN
-    FOREACH object_path IN ARRAY OLD.screenshot_paths LOOP
+    FOR object_path IN SELECT p FROM unnest(OLD.screenshot_paths) AS refs(p) ORDER BY p COLLATE "C" LOOP
         IF TG_OP = 'DELETE' OR NOT (NEW.screenshot_paths @> ARRAY[object_path]) THEN
             PERFORM chat.file_blob_enqueue(chat.file_blob_for_object('feedback-screenshots', object_path));
         END IF;
