@@ -25,7 +25,9 @@ beforeEach(async () => {
   await a.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Fixture','fixture','linux')", [device, owner])
   await a.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Fixture',$2,$3)", [agent, owner, device])
   await a.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'dm','Native race',$2)", [dm, owner])
-  await a.query("INSERT INTO chat.chat_members(chat_id,user_id,role,inbox_published_at) VALUES($1,$2,'member',clock_timestamp()),($1,$3,'member',clock_timestamp())", [dm, owner, agent])
+  await a.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member'),($1,$3,'member')", [dm, owner, agent])
+  // The real BEFORE INSERT trigger clears DM publication; publish the empty fixture explicitly.
+  expect((await a.query('UPDATE chat.chat_members SET inbox_published_at=clock_timestamp() WHERE chat_id=$1', [dm])).rowCount).toBe(2)
 })
 afterEach(async () => {
   await a.query('ROLLBACK'); await b.query('ROLLBACK')
