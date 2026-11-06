@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { connectionLegacyResponseFixture } from './platform-connection-legacy-fixture.mjs'
+import { assertConnectionDelegatedAclRestore } from './platform-connection-acl-fixture.mjs'
 
 const baseline = JSON.parse(await readFile(new URL('../../ops/platform-connections/legacy-functions.json', import.meta.url), 'utf8'))
 
@@ -102,6 +103,10 @@ export async function installConnectionStateWithEvidence({ db, query, sql, relea
     await db.query(`GRANT EXECUTE ON FUNCTION ${original.signature} TO service_role`)
     assert.notDeepEqual(await legacyState(db), before)
     await query(await readFile(new URL('../../ops/restore-platform-connection-functions.sql', import.meta.url), 'utf8'))
+    assert.deepEqual(await legacyState(db), before)
+  })
+  await test('connection rollback restores a different owner and delegated grantor under their original roles', async () => {
+    await assertConnectionDelegatedAclRestore(db, await readFile(new URL('../../ops/restore-platform-connection-functions.sql', import.meta.url), 'utf8'))
     assert.deepEqual(await legacyState(db), before)
   })
   return result

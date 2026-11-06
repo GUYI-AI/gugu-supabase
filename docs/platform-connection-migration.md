@@ -150,6 +150,15 @@ atomically if any value cannot be reproduced. It does not reconstruct an
 "equivalent" body, delete candidate data, revoke provider credentials, or rewrite
 the installation ledger. It is restricted to the approved maintenance workflow.
 
+Each grant is replayed with `SET LOCAL ROLE` to its captured grantor, then the
+original maintenance role is restored. PostgreSQL's object `GRANTED BY` clause
+cannot impersonate a different current role, even for a superuser. The authorized
+maintenance session therefore needs existing SET permission for the captured
+roles (or a superuser session); the restoration script never grants memberships.
+Missing permission fails the entire transaction. The isolated test includes a
+function owner different from maintenance and a delegated EXECUTE grantor, and
+checks that the original maintenance identity is restored as well as the ACL.
+
 This preparation release never changes the old RPCs, so restoring these backups
 leaves the live legacy path usable. Prepared owners remain on that path; new
 accounts are not fabricated in the old assistant model. If a future release

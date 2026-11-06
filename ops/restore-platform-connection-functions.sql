@@ -7,7 +7,8 @@ SET LOCAL lock_timeout = '250ms';
 SET LOCAL statement_timeout = '2s';
 SET LOCAL transaction_timeout = '2s';
 DO $restore$
-DECLARE saved record; actual record; grant_entry record; grantee text; owner_name text;
+DECLARE saved record; actual record; grant_entry record; grantee text; owner_name text; grantor_name text;
+    maintenance_role text := current_user;
 BEGIN
     IF (SELECT count(*) FROM identity.connection_legacy_functions) <> 7 THEN
         RAISE EXCEPTION 'Connection function backup set is incomplete';
@@ -34,9 +35,19 @@ BEGIN
             END IF;
             grantee := CASE WHEN grant_entry.grantee = 0 THEN 'PUBLIC'
                 ELSE quote_ident((SELECT rolname FROM pg_roles WHERE oid = grant_entry.grantee)) END;
-            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %s%s GRANTED BY %I', saved.signature, grantee,
-                CASE WHEN grant_entry.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END,
-                (SELECT rolname FROM pg_roles WHERE oid = grant_entry.grantor));
+            SELECT rolname INTO STRICT grantor_name FROM pg_roles WHERE oid = grant_entry.grantor;
+            -- Object GRANTED BY must name current_user, even for a superuser.
+            -- SET LOCAL ROLE changes only this transaction and is restored
+            -- before reading the next maintenance-only backup or procedure.
+            BEGIN
+                EXECUTE format('SET LOCAL ROLE %I', grantor_name);
+                EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %s%s GRANTED BY %I', saved.signature, grantee,
+                    CASE WHEN grant_entry.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END, grantor_name);
+            EXCEPTION WHEN OTHERS THEN
+                EXECUTE format('SET LOCAL ROLE %I', maintenance_role);
+                RAISE;
+            END;
+            EXECUTE format('SET LOCAL ROLE %I', maintenance_role);
         END LOOP;
         SELECT p.oid, pg_get_functiondef(p.oid) AS definition, p.proacl, p.proowner,
             jsonb_build_object('prosecdef', p.prosecdef, 'provolatile', p.provolatile, 'proisstrict', p.proisstrict,
