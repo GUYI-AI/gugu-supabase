@@ -101,6 +101,25 @@ async function moveHome() {
 }
 
 describe('durable assistant panel contract', () => {
+  it('names a removed assistant without weakening live body or owner authorization', async () => {
+    const body = await file()
+    const saved = await commit({ domain: 'memory',key: 'live',body: body.id,hash: body.hash,runtime: instance })
+    expect(saved.status).toBe('applied')
+    await failure(() => commit({ domain: 'memory',key: 'wrong-hash',body: body.id,hash: 'a'.repeat(64),runtime: instance }),/matching file hash/)
+    await as(owner,() => db.query('SELECT identity.remove_owned_agent($1)',[agent]))
+    await db.query('SAVEPOINT removed_commit')
+    try {
+      await expect(commit({ domain: 'memory',key: 'removed',body: body.id,hash: body.hash,runtime: instance }))
+        .rejects.toMatchObject({ code: '42501',message: 'Personal assistant has been removed' })
+    } finally { await db.query('ROLLBACK TO SAVEPOINT removed_commit') }
+    await failure(() => as(stranger,() => call('assistant_panel_commit',[agent,randomUUID(),'personality','hidden',0,'save','{}',null,null,null,null])),/not available/)
+    expect((await db.query('SELECT count(*)::int AS n FROM identity.assistant_panel_items WHERE assistant_user_id=$1 AND resource_key=$2',[agent,'removed'])).rows[0]!.n).toBe(0)
+    expect((await db.query('SELECT body_item_id FROM identity.assistant_panel_items WHERE assistant_user_id=$1 AND resource_key=$2',[agent,'live'])).rows[0]!.body_item_id).toBe(body.id)
+    const privileges = (await db.query(`SELECT has_function_privilege('authenticated','identity.assistant_panel_commit(text,uuid,text,text,bigint,text,jsonb,uuid,text,text,text)','EXECUTE') AS authenticated,
+      has_function_privilege('anon','identity.assistant_panel_commit(text,uuid,text,text,bigint,text,jsonb,uuid,text,text,text)','EXECUTE') AS anon`)).rows[0]
+    expect(privileges).toEqual({ authenticated: true,anon: false })
+  })
+
   it('settles an unapplicable change truthfully and releases later changes and turns', async () => {
     const broken = await commit()
     await ack(broken.operationId,'EACCES')
