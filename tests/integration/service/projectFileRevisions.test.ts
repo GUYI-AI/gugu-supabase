@@ -240,6 +240,27 @@ describe('project local metadata and exact references, kept by the device that s
     expect(await resolve()).toMatchObject({status:'ready',version:3,file_name:'renamed.bin',sha256:sha})
     expect(await revisions()).toEqual([1,2,3].map((version)=>({version,relative_path:'data/file.bin',sha256:sha,size_bytes:123,file_name:version===1?'file.bin':'renamed.bin'})))
   })
+  // The folder App sorts and groups by updated_at, the content's time: tidying files (rename, move) is not editing them.
+  // A case is one transaction, so now() is one instant: the content time is first set back to a known past moment.
+  it('keeps a local file\'s content time through a rename and a move; the next published bytes move it',async()=>{
+    await publish();await service()
+    const past='2020-01-01 00:00:00+00'
+    await db.query("SET LOCAL session_replication_role='replica'")
+    await db.query('UPDATE chat.workspace_items SET updated_at=$2 WHERE id=$1',[item,past])
+    await db.query("SET LOCAL session_replication_role='origin'")
+    const at=async()=>{await service();return (await db.query("SELECT to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI:SS')||'+00' AS at FROM chat.workspace_items WHERE id=$1",[item])).rows[0].at}
+    expect(await at()).toBe(past)
+    await user()
+    await db.query(MOVE,[item,owner,null,'renamed.bin',1])
+    await user()
+    await db.query(MOVE,[item,owner,'资料/2026',null,2])
+    expect(await at(),'a rename or a move counted as a content change').toBe(past)
+    // The same bytes published again are not a change either.
+    await user();await publish({6:'renamed.bin',8:3})
+    expect(await at()).toBe(past)
+    await user();await publish({3:'data/new.bin',4:'cd'.repeat(32),5:456,6:'renamed.bin',8:4})
+    expect(await at(),'new bytes did not move the content time').not.toBe(past)
+  })
   it('publishes the next version after a rename from the renamed version, and only from it',async()=>{
     await publish();await user()
     await db.query(MOVE,[item,owner,null,'renamed.bin',1])
