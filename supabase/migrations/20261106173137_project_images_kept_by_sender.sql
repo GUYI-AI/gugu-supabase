@@ -2,7 +2,7 @@
 -- revision of the same version. While the cloud copy lives it serves the file. Once it has expired the file is read from
 -- that machine, exactly like any other project file. The copy's references alone decide when its bytes are collected:
 -- a local revision adds none.
-CREATE INDEX file_device_revisions_host ON chat.file_device_revisions(host_device_id);
+CREATE INDEX IF NOT EXISTS file_device_revisions_host ON chat.file_device_revisions(host_device_id);
 
 CREATE FUNCTION file_private.cloud_copy_live(p_blob uuid,p_chat text) RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
