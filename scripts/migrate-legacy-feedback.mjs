@@ -14,6 +14,28 @@ const hex = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const integer = value => Number.isSafeInteger(value) && value >= 0
 const modes = ['dry-run', 'migrate', 'report', 'delete']
 
+export function databaseAddress(databaseUrl) {
+  const database = new URL(databaseUrl), parameters = [...database.searchParams]
+  check(['postgres:', 'postgresql:'].includes(database.protocol) && database.hostname && database.username
+    && database.pathname.length > 1 && !database.hash && parameters.length <= 1
+    && parameters.every(([key, value]) => key === 'sslmode' && ['disable', 'require', 'verify-ca', 'verify-full'].includes(value)))
+  // pg otherwise falls back to PGPORT when the URL omits a port.
+  database.port = database.port || '5432'
+  const port = Number(database.port)
+  check(Number.isInteger(port) && port >= 1 && port <= 65535)
+  return { connectionString: database.href, host: database.hostname.replace(/^\[|\]$/g, ''), port,
+    database: decodeURIComponent(database.pathname.slice(1)), user: decodeURIComponent(database.username), parameters }
+}
+
+export function createApprovedClient(Client, databaseUrl) {
+  const approved = databaseAddress(databaseUrl)
+  const client = new Client({ connectionString: approved.connectionString, application_name: 'legacy-evidence-migration',
+    connectionTimeoutMillis: 10000, query_timeout: 60000 })
+  const actual = client.connectionParameters
+  check(actual && ['host', 'port', 'database', 'user'].every(key => actual[key] === approved[key]))
+  return client
+}
+
 // This digest is compared with an independently provisioned authorization, not self-approved.
 export function environmentFingerprint(config, databaseUrl) {
   check(['local', 'staging', 'production'].includes(config.environment) && uuid(config.installationId))
@@ -26,13 +48,10 @@ export function environmentFingerprint(config, databaseUrl) {
       && (url.protocol === 'https:' || url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))
   }
   check(!config.storageRoot.endsWith('/') && config.publicRoot.endsWith('/'))
-  const database = new URL(databaseUrl), parameters = [...database.searchParams]
-  check(['postgres:', 'postgresql:'].includes(database.protocol) && database.hostname && database.username
-    && database.pathname.length > 1 && !database.hash && parameters.length <= 1
-    && parameters.every(([key, value]) => key === 'sslmode' && ['disable', 'require', 'verify-ca', 'verify-full'].includes(value)))
+  const database = databaseAddress(databaseUrl)
   // No query parameter may override host, port, database, user, or connection options.
-  return digest([1, config.environment, config.installationId, database.hostname, database.port || '5432',
-    decodeURIComponent(database.pathname.slice(1)), decodeURIComponent(database.username), parameters,
+  return digest([1, config.environment, config.installationId, database.host, String(database.port),
+    database.database, database.user, database.parameters,
     config.storageRoot, config.publicRoot, config.sourceBucket, config.targetBucket, config.maxBytes])
 }
 
@@ -321,8 +340,7 @@ export function parseArguments(args) {
 // Runtime settings are deliberately supplied by private files/environment only.
 async function connect(config, databaseUrl, token, mutating, authorization) {
   const { default: pg } = await import('pg')
-  const db = new pg.Client({ connectionString: databaseUrl, application_name: 'legacy-evidence-migration',
-    connectionTimeoutMillis: 10000, query_timeout: 60000 })
+  const db = createApprovedClient(pg.Client, databaseUrl)
   // The CLI emits a fixed failure receipt, never an asynchronous driver error object.
   db.on('error', () => {})
   await db.connect()

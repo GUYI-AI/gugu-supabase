@@ -2,9 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { inventory, migrate, readback, deleteCopies, validateApproval, parseArguments,
   sourceName, targetName, sha256, digest, missingResponse, bindInstalledTarget,
-  environmentFingerprint, validateEnvironment, authorizedConnection, validateDatabaseIdentity } from '../../scripts/migrate-legacy-feedback.mjs'
+  environmentFingerprint, validateEnvironment, authorizedConnection, validateDatabaseIdentity,
+  databaseAddress, createApprovedClient } from '../../scripts/migrate-legacy-feedback.mjs'
 
 const scriptSha = sha256('fixed fixture script')
 const copy = value => structuredClone(value)
@@ -116,6 +118,43 @@ function environmentFixture(environment = 'staging') {
     modes: ['dry-run', 'migrate', 'report', 'delete'] }
   return { config, databaseUrl, authorization }
 }
+
+test('pinned pg cannot redirect an approved omitted-port URL through PGPORT', () => {
+  const require = createRequire(import.meta.url), pg = require('pg')
+  assert.equal(require('pg/package.json').version, '8.16.3')
+  const f = environmentFixture(), address = new URL(f.databaseUrl); address.port = ''
+  const omitted = address.href, previousPort = process.env.PGPORT
+  try {
+    process.env.PGPORT = '6543'
+    // Reproduce the reviewer's old behavior without calling connect or resolving DNS.
+    const legacy = new pg.Client({ connectionString: omitted })
+    assert.equal(legacy.connectionParameters.port, 6543)
+    assert.equal(environmentFingerprint(f.config, omitted), f.authorization.fingerprint)
+    const fixed = createApprovedClient(pg.Client, omitted)
+    assert.equal(fixed.connectionParameters.port, 5432)
+    assert.equal(fixed.connectionParameters.host, address.hostname)
+    assert.equal(fixed._connecting, false); assert.equal(legacy._connecting, false)
+    class DriftedClient { constructor() { return legacy } }
+    assert.throws(() => createApprovedClient(DriftedClient, omitted))
+  } finally {
+    if (previousPort === undefined) delete process.env.PGPORT
+    else process.env.PGPORT = previousPort
+  }
+})
+
+test('the pinned driver resolves exactly the approved host, port, database and user before connect', () => {
+  const pg = createRequire(import.meta.url)('pg'), f = environmentFixture()
+  for (const host of [new URL(f.databaseUrl).hostname, '[::1]']) {
+    const url = new URL(f.databaseUrl); url.hostname = host; url.port = '5433'
+    const expected = databaseAddress(url.href), client = createApprovedClient(pg.Client, url.href)
+    for (const key of ['host', 'port', 'database', 'user']) {
+      assert.equal(client.connectionParameters[key], expected[key])
+      class DriftedClient { constructor() { return { connectionParameters: { ...expected, [key]: 'different' } } } }
+      assert.throws(() => createApprovedClient(DriftedClient, url.href))
+    }
+    assert.equal(client._connecting, false)
+  }
+})
 
 test('every mode denies missing or mismatched environment approval before opening any connection', async () => {
   const f = environmentFixture(), opens = [], opener = async () => { opens.push(true); return {} }

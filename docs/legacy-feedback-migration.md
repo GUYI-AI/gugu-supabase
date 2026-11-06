@@ -15,7 +15,8 @@ migration, storage metadata directly, collector state, or historical issues.
 ## Modes and privacy
 
 Run `scripts/migrate-legacy-feedback.mjs` with Node 24. It uses the repository's pinned `pg`
-dependency at runtime; offline tests use Node built-ins and do not load that dependency.
+dependency. Offline tests use Node's test runner and construct pinned driver clients in memory;
+they never call the driver's connection method.
 
 | Mode | Behavior | Output |
 | --- | --- | --- |
@@ -102,7 +103,11 @@ The mapping digest covers the environment classification, installation UUID, exp
 host/port/name/user, permitted TLS option, both API roots, both storage identifiers, and size
 limit. Database URL query parameters that could override host, port, user, database or options
 are rejected; only a single supported `sslmode` is accepted. Passwords are excluded from the
-digest. After the authorized connection, the first query compares the approved database identity
+digest. Fingerprinting and driver construction share the same explicit address parser: an
+omitted port becomes an explicit 5432 in the connection URL, so `PGPORT` cannot redirect the
+approved address. Before `connect`, the script compares the actual driver's resolved host,
+port, database and user with those approved values and refuses any difference. After the
+authorized connection, the first query compares the approved database identity
 with `pg_control_system()` and the current database name/OID, before any inventory or Storage
 operation. The administrative connection must have permission to read that identity; absence
 of that permission fails closed, with no weaker fallback.
@@ -263,7 +268,10 @@ only aggregate receipts in ordinary chat/issues.
 node --test tests/installation/legacy-feedback-migration.test.mjs
 ```
 
-The tests use synthetic bytes, generated identifiers and in-memory database/Storage doubles.
+The tests use synthetic bytes, generated identifiers and in-memory database/Storage doubles,
+plus real pinned `pg` 8.16.3 Client construction without connecting. The driver regression
+reproduces the old omitted-port URL plus `PGPORT=6543` redirection, then verifies the corrected
+client stays on the approved explicit 5432 and rejects resolved address drift.
 They exercise metadata-only inventory, parser gates, wrong approvals, conflicting targets,
 compare-and-swap failures, restart without repeated uploads, readback corruption, remaining
 references, a crash after remote deletion, the wrong-private-target/reader-corruption counterexample,
