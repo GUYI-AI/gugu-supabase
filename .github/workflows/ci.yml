@@ -7,10 +7,41 @@ on:
 permissions:
   contents: read
 jobs:
+  migration-versions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Test migration metadata checks
+        run: node --test tests/ci/migration-versions.test.mjs
+      - name: Check PR migration versions against branches and open PRs
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/ci/migration-versions.mjs --pull-request
+      - name: Check migration versions in the complete committed tree
+        if: github.event_name != 'pull_request'
+        env:
+          TREE_SHA: ${{ github.sha }}
+        run: node scripts/ci/migration-versions.mjs --tree "$TREE_SHA"
   unit:
+    needs: migration-versions
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
+      - name: Require the migration version check to pass
+        env:
+          MIGRATION_CHECK_RESULT: ${{ needs.migration-versions.result }}
+        run: test "$MIGRATION_CHECK_RESULT" = success
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
@@ -25,6 +56,7 @@ jobs:
       - run: pnpm check:functions
       - run: deno test --allow-env --allow-sys tests/deno/ossDirectUrl.test.ts tests/deno/textFileIngest.test.ts
   integration:
+    needs: migration-versions
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
