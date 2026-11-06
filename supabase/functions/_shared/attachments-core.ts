@@ -494,32 +494,53 @@ interface Claimed {
   content_type: string
 }
 
-export async function handleGc(deps: AttachmentsDeps) {
-  await call(deps.serviceRpc, 'file_temporary_expire', { p_limit: 500 })
-  await call(deps.serviceRpc, 'file_transfer_expire', { p_limit: 500 })
-  const claimed = ((await call(deps.serviceRpc, 'file_blob_gc_claim', { p_limit: 50, p_stale_seconds: 600 })) ?? []) as Claimed[]
-  let deleted = 0
-  let failed = 0
-  for (const job of claimed) {
-    try {
-      if (job.bucket_id === 'oss' || job.bucket_id === 'temporary') {
-        await objectStorage(deps).remove(job.object_name)
-        // 清边缘缓存只是清理(见 refreshCdn):失败了记一行,不挡回收。
-        if (job.bucket_id === 'oss') await objectStorage(deps).invalidate(job.object_name, hasThumbnail(job.content_type))
-          .catch((error) => deps.log('cdn_refresh_failed', { blob: job.blob_id, error: String(error) }))
-      } else {
-        await deps.storageRemove(job.bucket_id, job.object_name)
+export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-accept' = 'kick') {
+  const result = { claimed: 0, deleted: 0, failed: 0 }
+  let claimedCount: number | null = null
+  let removed = 0
+  let completed = false
+  try {
+    await call(deps.serviceRpc, 'file_temporary_expire', { p_limit: 500 })
+    await call(deps.serviceRpc, 'file_transfer_expire', { p_limit: 500 })
+    const claimed = ((await call(deps.serviceRpc, 'file_blob_gc_claim', { p_limit: 50, p_stale_seconds: 600 })) ?? []) as Claimed[]
+    result.claimed = claimed.length
+    claimedCount = claimed.length
+    for (const job of claimed) {
+      try {
+        if (job.bucket_id === 'oss' || job.bucket_id === 'temporary') {
+          await objectStorage(deps).remove(job.object_name)
+          removed++
+          // 清边缘缓存只是清理(见 refreshCdn):失败了记一行,不挡回收。
+          if (job.bucket_id === 'oss') await objectStorage(deps).invalidate(job.object_name, hasThumbnail(job.content_type))
+            .catch((error) => deps.log('cdn_refresh_failed', { blob: job.blob_id, error: String(error) }))
+        } else {
+          await deps.storageRemove(job.bucket_id, job.object_name)
+          removed++
+        }
+        await call(deps.serviceRpc, 'file_blob_gc_finish', { p_blob_id: job.blob_id, p_claim_token: job.claim_token })
+        result.deleted++
+      } catch (error) {
+        result.failed++
+        deps.log('gc_failed', { blob: job.blob_id, error: String(error) })
+        await call(deps.serviceRpc, 'file_blob_gc_fail', { p_blob_id: job.blob_id, p_claim_token: job.claim_token, p_error: String(error).slice(0, 500) })
+          .catch((e) => deps.log('gc_fail_report_failed', { blob: job.blob_id, error: String(e) }))
       }
-      await call(deps.serviceRpc, 'file_blob_gc_finish', { p_blob_id: job.blob_id, p_claim_token: job.claim_token })
-      deleted++
+    }
+    completed = true
+    return result
+  } finally {
+    try {
+      const at = deps.now().toISOString()
+      // Removal may succeed even when its database confirmation fails. Keep both counts without changing the API result.
+      deps.log('gc_result', { entry, at, day: at.slice(0, 10), claimed: claimedCount, deleted: removed,
+        finished: result.deleted, failed: result.failed, outcome: completed ? 'completed' : 'error' })
     } catch (error) {
-      failed++
-      deps.log('gc_failed', { blob: job.blob_id, error: String(error) })
-      await call(deps.serviceRpc, 'file_blob_gc_fail', { p_blob_id: job.blob_id, p_claim_token: job.claim_token, p_error: String(error).slice(0, 500) })
-        .catch((e) => deps.log('gc_fail_report_failed', { blob: job.blob_id, error: String(e) }))
+      try {
+        console.error(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry,
+          error_type: typeof error, message: 'GC summary logging failed' }))
+      } catch { /* Even unavailable stderr must not replace the GC result or original exception. */ }
     }
   }
-  return { claimed: claimed.length, deleted, failed }
 }
 
 
