@@ -63,7 +63,7 @@ BEGIN
 END $$;
 
 -- A sent image reaches the machines that keep it through the signal they already drain file work on: its sender's own
--- desktops, or the machine its agent runs on. A trigger, so nobody can call it to wake someone else's machine.
+-- desktops, or the machine its agent runs on. Only ever as this trigger: nobody may call it or attach it elsewhere, which would name another sender.
 CREATE FUNCTION file_private.ask_to_adopt() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 DECLARE device text;
@@ -129,7 +129,12 @@ BEGIN
     END LOOP;
 END $patch$;
 
--- The installation DDL guard closes created and replaced functions; open only what the API uses.
+-- Functions default to PUBLIC execute: state who may call each one. The internal ones run only from a SECURITY DEFINER
+-- function or as a trigger, and neither needs the caller to hold EXECUTE. Attaching one to a table of one's own does.
+REVOKE ALL ON FUNCTION file_private.cloud_copy_live(uuid,text),file_private.device_adoptable(text,uuid),file_private.ask_to_adopt(),
+    identity.gugu_devices_announce_holder() FROM PUBLIC,anon,authenticated;
+REVOKE ALL ON FUNCTION chat.file_device_adopt_pending(text,integer,uuid[]),chat.file_device_adopt(uuid,text,text,text,text,bigint),
+    chat.file_holder_visible(text) FROM PUBLIC,anon;
 GRANT EXECUTE ON FUNCTION chat.file_device_adopt_pending(text,integer,uuid[]),chat.file_device_adopt(uuid,text,text,text,text,bigint),
     chat.file_holder_visible(text),chat.file_resolve_as(jsonb,text),chat.workspace_list_as(text,text,integer,integer,text,text,text,boolean) TO authenticated;
 NOTIFY pgrst,'reload schema';

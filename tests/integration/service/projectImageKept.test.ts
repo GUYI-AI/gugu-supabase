@@ -148,13 +148,18 @@ describe('a project image also kept by the machine that sent it',()=>{
   })
   it('takes a path only under the kept images directory of its root',async()=>{
     const image=await send(),item=await itemOf(image.message)
-    await user()
-    for (const path of ['../shot.png','/etc/passwd','docs/shot.png','.gugu/attachments/../../shot.png','.gugu/attachments/x/../shot.png']) {
-      await db.query('SAVEPOINT p')
-      await expect(db.query("SELECT chat.file_device_adopt($1,$2,'device-store',$3,$4,60)",[item,memberDevice,path,image.sha]),path).rejects.toThrow()
-      await db.query('ROLLBACK TO SAVEPOINT p')
+    const refused=async(path:string)=>{
+      await user()
+      const error=await reject("SELECT chat.file_device_adopt($1,$2,'device-store',$3,$4,60)",[item,memberDevice,path,image.sha])
+      await service();return error
     }
-    await service()
+    // Outside the directory: the function's own refusal. Inside it but leaving it: the table's check on every revision.
+    for (const path of ['../shot.png','/etc/passwd','docs/shot.png']) expect((await refused(path)).hint,path).toBe('file_transfer_invalid')
+    for (const path of ['.gugu/attachments/../../shot.png','.gugu/attachments/x/../shot.png']) {
+      const error=await refused(path)
+      expect(error.code,path).toBe('23514')
+      expect(error.constraint,path).toBe('file_device_revisions_relative_path_check')
+    }
     expect((await db.query('SELECT 1 FROM chat.file_device_revisions WHERE item_id=$1',[item])).rows).toEqual([])
   })
   it('keeps nothing of a retracted image',async()=>{
@@ -163,13 +168,36 @@ describe('a project image also kept by the machine that sent it',()=>{
     expect(await pending(memberDevice)).toEqual([])
     expect(await adopt(item,memberDevice,image.sha)).toBe(false)
   })
-  it('does not let another account wake a machine',async()=>{
+  it('opens each new function only to who needs it',async()=>{
+    const can=async(role:string,fn:string)=>(await db.query('SELECT has_function_privilege($1,$2,$3) AS r',[role,fn,'execute'])).rows[0].r
+    for (const [fn,authenticated] of [
+      ['file_private.cloud_copy_live(uuid,text)',false],['file_private.device_adoptable(text,uuid)',false],
+      ['file_private.ask_to_adopt()',false],['identity.gugu_devices_announce_holder()',false],
+      ['chat.file_device_adopt_pending(text,integer,uuid[])',true],['chat.file_device_adopt(uuid,text,text,text,text,bigint)',true],
+      ['chat.file_holder_visible(text)',true],
+    ] as const) {
+      expect(await can('anon',fn),'anon '+fn).toBe(false)
+      expect(await can('authenticated',fn),'authenticated '+fn).toBe(authenticated)
+    }
+  })
+  it('does not let an account attach the wake to a table of its own and name another sender',async()=>{
     const image=await send(),item=await itemOf(image.message),topic=`gugu:${memberDevice}:rpc`
     const before=(await topics(topic)).length
     await user(host)
-    await reject('SELECT file_private.ask_to_adopt($1,$2)',[item,member])
+    await db.query('CREATE TEMP TABLE forged(file_item_id uuid,sender_user_id text)')
+    const denied=await reject('CREATE TRIGGER forged_wake AFTER INSERT ON forged FOR EACH ROW EXECUTE FUNCTION file_private.ask_to_adopt()')
+    expect(denied.code).toBe('42501')
     await service()
     expect((await topics(topic)).length).toBe(before)
+    expect((await db.query("SELECT 1 FROM pg_trigger WHERE tgname='forged_wake'")).rows).toEqual([])
+    expect(item).toBeTruthy()
+  })
+  it('does not let a stranger probe whether a cloud copy lives',async()=>{
+    const image=await send(),stranger=randomUUID()
+    await db.query("INSERT INTO auth.users(id,aud,role,email,raw_app_meta_data,raw_user_meta_data,created_at,updated_at) VALUES($1,'authenticated','authenticated',$2,'{\"provider\":\"email\"}','{}',now(),now())",[stranger,stranger+'@image-expiry.invalid'])
+    await user(stranger)
+    expect((await reject('SELECT file_private.cloud_copy_live($1,$2)',[image.blob,project])).code).toBe('42501')
+    await service()
   })
   it('gives an agent\'s image to the device that agent runs on, not to its owner\'s other machine',async()=>{
     const agent=randomUUID()
