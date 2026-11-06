@@ -60,7 +60,7 @@ describe('on-demand disk state and threshold revisions', () => {
     expect(await revisions(before)).toEqual([{ event: 'device_changed', resource_key: { device_id: device, kind: 'row' }, tombstone: false }])
   })
 
-  it.each([null, 'bad', [], { free_bytes: '1', total_bytes: 10 }, { free_bytes: -1, total_bytes: 10 }, { free_bytes: 20, total_bytes: 10 }])('does not treat malformed disk state as low: %j', async server_disk => {
+  it.each([null, 'bad', [], [{ free_bytes: 1, total_bytes: 10 }], { free_bytes: '1', total_bytes: 10 }, { free_bytes: -1, total_bytes: 10 }, { free_bytes: 20, total_bytes: 10 }])('does not treat malformed disk state as low: %j', async server_disk => {
     const before = await head()
     await db.query('UPDATE identity.gugu_devices SET capabilities=$2::jsonb WHERE device_id=$1', [device, JSON.stringify({ ...capabilities(2 * GiB), server_disk })])
     expect(await revisions(before)).toEqual([])

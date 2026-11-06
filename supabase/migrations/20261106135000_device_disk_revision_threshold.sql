@@ -17,6 +17,7 @@ FOR EACH ROW WHEN (
        (CASE WHEN jsonb_typeof(NEW.capabilities) = 'object' THEN NEW.capabilities - 'server_disk' ELSE NEW.capabilities END)
     OR (OLD.capabilities @? '$ ? (
           @.host_kind == "server"
+          && @.server_disk.type() == "object"
           && @.server_disk.free_bytes.type() == "number" && @.server_disk.total_bytes.type() == "number"
           && @.server_disk.free_bytes >= 0 && @.server_disk.total_bytes > 0
           && @.server_disk.free_bytes <= @.server_disk.total_bytes
@@ -24,6 +25,7 @@ FOR EACH ROW WHEN (
        IS DISTINCT FROM
        (NEW.capabilities @? '$ ? (
           @.host_kind == "server"
+          && @.server_disk.type() == "object"
           && @.server_disk.free_bytes.type() == "number" && @.server_disk.total_bytes.type() == "number"
           && @.server_disk.free_bytes >= 0 && @.server_disk.total_bytes > 0
           && @.server_disk.free_bytes <= @.server_disk.total_bytes
