@@ -194,15 +194,18 @@ describe('all historical reference families retain the same collector protection
   })
 
   it('the forward repair removes readable queued stock while preserving independent idle expiry and in-flight work', async () => {
-    const kept = await send(group, member), expired = await send(group, member), running = await send(group, member)
+    const kept = await send(group, member), expired = await send(group, member), running = await send(group, member), goneBytes = await send(group, member)
     await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [group])
-    for (const file of [kept, expired, running]) await queue(file.blob)
+    for (const file of [kept, expired, running, goneBytes]) await queue(file.blob)
     await db.query('UPDATE chat.file_transfer_storage_refs SET expired_at=now() WHERE storage_id IN (SELECT id FROM chat.file_transfer_storage WHERE blob_id=$1)', [expired.blob])
     await db.query("UPDATE chat.file_blob_gc SET status='running',claim_token=$2,claimed_at=now() WHERE blob_id=$1", [running.blob, randomUUID()])
+    await db.query("UPDATE chat.file_transfer_storage SET state='gone' WHERE blob_id=$1", [goneBytes.blob])
     const due = (await db.query('SELECT next_attempt_at FROM chat.file_blob_gc WHERE blob_id=$1', [expired.blob])).rows[0].next_attempt_at
     await db.query(readFileSync(new URL('../../../supabase/migrations/20261106143000_keep_readable_conversation_bytes.sql', import.meta.url), 'utf8'))
     expect(await jobs(kept.blob)).toEqual([])
     expect(await jobs(running.blob)).toEqual([{ status: 'running' }])
+    expect(await jobs(goneBytes.blob)).toEqual([{ status: 'pending' }])
+    expect((await db.query('SELECT state FROM chat.file_transfer_storage WHERE blob_id=$1', [goneBytes.blob])).rows).toEqual([{ state: 'gone' }])
     expect((await db.query('SELECT next_attempt_at FROM chat.file_blob_gc WHERE blob_id=$1', [expired.blob])).rows[0].next_attempt_at).toEqual(due)
     expect(await collected(expired.blob)).toMatchObject([{ blob_id: expired.blob }])
   })
