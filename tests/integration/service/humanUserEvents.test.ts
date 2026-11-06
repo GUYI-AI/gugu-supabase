@@ -124,10 +124,11 @@ describe('retained community user-event producers', () => {
   })
 
   it('keeps member and read facts in the journal without duplicate direct events', async () => {
+    const before = (await db.query<{ revision: string }>('SELECT revision::text FROM chat.account_revision_heads WHERE user_id=$1', [human])).rows[0]!.revision
     await db.query('UPDATE chat.chat_members SET is_pinned=true,last_read_seq=1,version=version+1 WHERE chat_id=$1 AND user_id=$2', [chat, human])
     expect(await events(human, 'chat_members_changed')).toEqual([])
     expect(await events(human, 'member_stream_read_changed')).toEqual([])
-    const { rows } = await db.query("SELECT event FROM chat.account_revisions WHERE user_id=$1 AND resource_key->>'chat_id'=$2 AND event=ANY($3::text[]) ORDER BY event", [human, chat, ['chat_members_changed','member_read_changed']])
+    const { rows } = await db.query("SELECT event FROM chat.account_revisions WHERE user_id=$1 AND resource_key->>'chat_id'=$2 AND event=ANY($3::text[]) AND revision>$4::bigint ORDER BY event", [human, chat, ['chat_members_changed','member_read_changed'], before])
     expect(rows.map(row => row.event)).toEqual(['chat_members_changed','member_read_changed'])
   })
 
