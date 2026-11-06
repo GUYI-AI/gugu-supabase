@@ -120,8 +120,9 @@ describe('historical readers keep bytes through archive and the one collector', 
   })
 
   it('an archived topic uses its readable source container', async () => {
-    const topic = randomUUID()
-    await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id,source_chat_id) VALUES($1,'topic','topic',$2,$3)", [topic, owner, group])
+    const topic = randomUUID(), anchor = randomUUID()
+    await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'source')", [anchor, group, owner])
+    await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id,source_chat_id,source_message_id) VALUES($1,'topic','topic',$2,$3,$4)", [topic, owner, group, anchor])
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [topic, owner, member])
     const file = await send(topic, member)
     await db.query("UPDATE chat.chats SET status='archived' WHERE id IN ($1,$2)", [topic, group])
