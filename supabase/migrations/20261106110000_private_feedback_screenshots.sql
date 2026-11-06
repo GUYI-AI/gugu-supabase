@@ -46,6 +46,8 @@ BEGIN
         IF NOT FOUND THEN
             RAISE EXCEPTION 'Feedback screenshot is unavailable' USING ERRCODE = '22023';
         END IF;
+        -- Share the collector's lock and reject objects whose byte deletion was claimed.
+        PERFORM chat.file_blob_take(chat.file_blob_for_object('feedback-screenshots', object_path));
     END LOOP;
     RETURN NEW;
 END;
@@ -59,7 +61,8 @@ CREATE POLICY feedback_screenshot_insert ON storage.objects FOR INSERT TO authen
 WITH CHECK (bucket_id = 'feedback-screenshots'
     AND name ~ ('^' || (SELECT auth.uid())::text || '/[A-Za-z0-9][A-Za-z0-9._-]*$'));
 CREATE POLICY feedback_screenshot_select ON storage.objects FOR SELECT TO authenticated
-USING (bucket_id = 'feedback-screenshots' AND (storage.foldername(name))[1] = (SELECT auth.uid())::text);
+USING (bucket_id = 'feedback-screenshots' AND (storage.foldername(name))[1] = (SELECT auth.uid())::text
+    AND identity.storage_actor_is_live());
 CREATE POLICY feedback_screenshot_delete ON storage.objects FOR DELETE TO authenticated
 USING (bucket_id = 'feedback-screenshots' AND (storage.foldername(name))[1] = (SELECT auth.uid())::text
     AND NOT EXISTS (SELECT 1 FROM identity.feedback f WHERE f.screenshot_paths @> ARRAY[objects.name]));

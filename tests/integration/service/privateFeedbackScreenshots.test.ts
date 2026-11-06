@@ -65,6 +65,17 @@ describe('private feedback evidence', () => {
     await rejected('INSERT INTO storage.objects(bucket_id,name) VALUES($1,$2)',['chat-media',`${alice}/feedback/a.png`],'42501')
     await db.query('INSERT INTO storage.objects(bucket_id,name) VALUES($1,$2)',['chat-media',`${alice}/moments/a.png`])
   })
+  it('denies listing and signing lookups with retained claims after account erasure, before bytes are collected', async () => {
+    const path=`${alice}/a.png`
+    await role(alice); await object(path)
+    expect((await db.query('SELECT name FROM storage.objects WHERE bucket_id=$1 AND name=$2',[bucket,path])).rowCount).toBe(1)
+    await admin(); await db.query('DELETE FROM auth.users WHERE id=$1',[alice])
+    expect((await db.query('SELECT name FROM storage.objects WHERE bucket_id=$1 AND name=$2',[bucket,path])).rowCount).toBe(1)
+    await role(alice)
+    expect((await db.query('SELECT auth.uid() AS id')).rows[0].id).toBe(alice)
+    expect((await db.query('SELECT name FROM storage.objects WHERE bucket_id=$1',[bucket])).rows).toEqual([])
+    expect((await db.query('SELECT name FROM storage.objects WHERE bucket_id=$1 AND name=$2',[bucket,path])).rows).toEqual([])
+  })
   it('stores private references and protects saved evidence from orphan cleanup', async () => {
     const path=`${alice}/a.png`, orphan=`${alice}/b.png`
     await role(alice); await object(path); await object(orphan); await feedback([path])
