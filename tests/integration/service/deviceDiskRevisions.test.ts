@@ -46,7 +46,7 @@ describe('on-demand disk state and threshold revisions', () => {
     const before = await head()
     await disk(GiB - 1)
     await disk(GiB)
-    expect(await revisions(before)).toEqual(Array.from({ length: 2 }, () => ({ event: 'device_changed', resource_key: { device_id: device }, tombstone: false })))
+    expect(await revisions(before)).toEqual(Array.from({ length: 2 }, () => ({ event: 'device_changed', resource_key: { device_id: device, kind: 'row' }, tombstone: false })))
   })
 
   it.each([
@@ -56,8 +56,8 @@ describe('on-demand disk state and threshold revisions', () => {
   ])('retains device revisions for visible %s changes', async (column, value) => {
     const before = await head()
     // Column names are the fixed fixture list above.
-    await db.query(`UPDATE identity.gugu_devices SET ${column}=$2 WHERE device_id=$1`, [device, value])
-    expect(await revisions(before)).toEqual([{ event: 'device_changed', resource_key: { device_id: device }, tombstone: false }])
+    await db.query(`UPDATE identity.gugu_devices SET ${column}=$2${column === 'label' ? ',label_customized_at=clock_timestamp()' : ''} WHERE device_id=$1`, [device, value])
+    expect(await revisions(before)).toEqual([{ event: 'device_changed', resource_key: { device_id: device, kind: 'row' }, tombstone: false }])
   })
 
   it.each([null, 'bad', [], { free_bytes: '1', total_bytes: 10 }, { free_bytes: -1, total_bytes: 10 }, { free_bytes: 20, total_bytes: 10 }])('does not treat malformed disk state as low: %j', async server_disk => {
@@ -69,7 +69,7 @@ describe('on-demand disk state and threshold revisions', () => {
   it('still publishes insertions and removals', async () => {
     const before = await head()
     await db.query('DELETE FROM identity.gugu_devices WHERE device_id=$1', [device])
-    expect(await revisions(before)).toEqual([{ event: 'device_changed', resource_key: { device_id: device }, tombstone: true }])
+    expect(await revisions(before)).toEqual([{ event: 'device_changed', resource_key: { device_id: device, kind: 'row' }, tombstone: true }])
     await db.query(`INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform)
       VALUES($1,$2,'Disk fixture','fixture','linux')`, [device, owner])
     expect((await revisions(before)).map(row => row.tombstone)).toEqual([true, false])

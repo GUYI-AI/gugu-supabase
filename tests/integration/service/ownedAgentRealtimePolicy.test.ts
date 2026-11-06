@@ -63,13 +63,19 @@ describe('owned-agent private broadcasts', () => {
   it('publishes the same owner-scoped agent change on events and the retiring legacy topic', async () => {
     const agent = randomUUID()
     await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Event owner'),($2,'human','Peer')", [owner, peer])
-    await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id) VALUES($1,'agent','Agent',$2)", [agent, owner])
+    const device = `agent-${randomUUID()}`
+    await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Event device','fixture','linux')", [device, owner])
+    await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Agent',$2,$3)", [agent, owner, device])
     const { rows } = await db.query('SELECT topic,private,payload FROM realtime.messages WHERE event=$1 AND payload #>> $2=$3 ORDER BY topic',
       ['agent_changed', '{agent,id}', agent])
     expect(rows.map(row => ({ topic: row.topic, private: row.private }))).toEqual([
       { topic: topics[0], private: true }, { topic: topics[5], private: true },
     ])
-    expect(rows[0].payload).toEqual(rows[1].payload)
+    // realtime.send assigns each transport envelope its own delivery ID.
+    expect(rows[0].payload.agent).toEqual(rows[1].payload.agent)
+    expect(rows[0].payload.op).toBe(rows[1].payload.op)
+    expect(rows[0].payload.id).toEqual(expect.any(String))
+    expect(rows[1].payload.id).toEqual(expect.any(String))
     await as('authenticated', peer)
     expect((await db.query('SELECT topic FROM realtime.messages WHERE payload #>> $1=$2', ['{agent,id}', agent])).rows).toEqual([])
   })
