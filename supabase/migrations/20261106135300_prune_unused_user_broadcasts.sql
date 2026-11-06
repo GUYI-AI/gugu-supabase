@@ -1,5 +1,5 @@
 -- Remove direct producers after checking every deployed client version.
--- moments_changed and the legacy agents topic still have old consumers.
+-- Keep moments/agents compatibility; a main read needs only its read revision.
 SET LOCAL lock_timeout = '5s';
 
 DROP TRIGGER chat_members_broadcast_trg ON chat.chat_members;
@@ -33,21 +33,34 @@ BEGIN
                 true
             );
         END IF;
-$topic$),
+$topic$, ''),
     ('public.forum_points_apply()'::regprocedure, $points$    PERFORM chat.send_user_event(
         jsonb_build_object('event', 'forum_points_changed', 'entity_id', NEW.user_id),
         'forum_points_changed',
         'gugu:user:' || NEW.user_id || ':events',
         true
     );
-$points$)
-  ) edits(signature, removed) LOOP
+$points$, ''),
+    ('chat.publish_membership_revision()'::regprocedure, $old$    IF TG_OP = 'UPDATE'
+       AND (NEW.role, NEW.listen_mode, NEW.chat_id, NEW.user_id)
+           IS NOT DISTINCT FROM (OLD.role, OLD.listen_mode, OLD.chat_id, OLD.user_id) THEN
+$old$, $new$    IF TG_OP = 'UPDATE'
+       AND (NEW.role, NEW.listen_mode, NEW.chat_id, NEW.user_id)
+           IS NOT DISTINCT FROM (OLD.role, OLD.listen_mode, OLD.chat_id, OLD.user_id) THEN
+      IF NEW.last_read_seq IS DISTINCT FROM OLD.last_read_seq
+         AND (to_jsonb(NEW) - ARRAY['last_read_seq', 'is_marked_unread', 'version', 'updated_at'])
+             IS NOT DISTINCT FROM
+             (to_jsonb(OLD) - ARRAY['last_read_seq', 'is_marked_unread', 'version', 'updated_at']) THEN
+        RETURN NEW;
+      END IF;
+$new$)
+  ) edits(signature, previous, replacement) LOOP
     SELECT pg_get_functiondef(p.oid), COALESCE(p.proacl, acldefault('f',p.proowner))
       INTO definition, grants FROM pg_proc p WHERE p.oid=r.signature;
-    IF length(definition)-length(replace(definition,r.removed,'')) <> length(r.removed) THEN
+    IF length(definition)-length(replace(definition,r.previous,'')) <> length(r.previous) THEN
       RAISE EXCEPTION 'Unexpected legacy broadcaster predecessor: %', r.signature;
     END IF;
-    EXECUTE replace(definition,r.removed,'');
+    EXECUTE replace(definition,r.previous,r.replacement);
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated, service_role',r.signature);
     FOR permission IN SELECT grantee,bool_or(is_grantable) AS grantable
       FROM aclexplode(grants) WHERE privilege_type='EXECUTE' GROUP BY grantee LOOP
