@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import {execFileSync, spawnSync} from 'node:child_process'
-import {mkdtempSync, readFileSync, mkdirSync, writeFileSync, rmSync} from 'node:fs'
+import {mkdtempSync, readFileSync, mkdirSync, writeFileSync, rmSync, realpathSync} from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {test} from 'node:test'
-import {fileURLToPath} from 'node:url'
+import {fileURLToPath, pathToFileURL} from 'node:url'
 import {checkTree, checkPullRequest, githubReader, checkGitHub, localTree} from '../../scripts/ci/migration-versions.mjs'
 
 const empty = {schema: 1, duplicates: {}}
@@ -151,12 +151,55 @@ test('the committed repository tree passes its exact historical allowlist', () =
 })
 test('the existing required unit gate fails on every unsuccessful migration outcome', () => {
   const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
-  assert(workflow.includes('  unit:\n    needs: migration-versions\n    if: always()'))
-  const command = workflow.match(/run: (test "\$MIGRATION_CHECK_RESULT" = success)/)?.[1]
-  assert(command)
-  for (const outcome of ['success', 'failure', 'cancelled', 'skipped', '']) {
-    const result = spawnSync('/bin/sh', ['-c', command], {env: {MIGRATION_CHECK_RESULT: outcome}})
-    assert.equal(result.status, outcome === 'success' ? 0 : 1)
+  assert(workflow.includes('  unit:\n    needs: [migration-source, migration-versions]\n    if: always()'))
+  const section = workflow.split('      - name: Require the migration version check to pass\n')[1].split('      - uses:')[0]
+  const command = section.split('        run: |\n')[1]
+  for (const enforced of ['true', 'false', '']) {
+    for (const outcome of ['success', 'failure', 'cancelled', 'skipped', '']) {
+      const env = {MIGRATION_SOURCE_RESULT: 'success', MIGRATION_ENFORCED: enforced, MIGRATION_CHECK_RESULT: outcome}
+      const result = spawnSync('/bin/sh', ['-c', command], {env})
+      assert.equal(result.status, (enforced === 'true' && outcome === 'success') || (enforced === 'false' && outcome === 'skipped') ? 0 : 1)
+    }
+  }
+  assert.equal(spawnSync('/bin/sh', ['-c', command], {env: {MIGRATION_SOURCE_RESULT: 'failure', MIGRATION_ENFORCED: 'false', MIGRATION_CHECK_RESULT: 'skipped'}}).status, 1)
+})
+test('the API gate uses only the base checkout, with candidate tests in another job', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  const gate = workflow.split('  migration-versions:\n')[1].split('  unit:\n')[0]
+  assert(gate.includes("if: needs.migration-source.outputs.enforced == 'true'"))
+  assert(gate.includes("github.event.pull_request.base.sha || github.sha"))
+  assert(gate.includes('working-directory: trusted'))
+  assert(gate.includes('persist-credentials: false'))
+  assert(!gate.includes('node --test') && !gate.includes('pnpm') && !gate.includes('head.sha'))
+  assert(!workflow.includes('pull_request_target'))
+})
+test('the real source probe distinguishes bootstrap, stale events and incomplete trusted files', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  const section = workflow.split('      - name: Locate the migration check in the trusted source\n')[1].split('  migration-versions:')[0]
+  const command = section.split('        run: |\n')[1]
+  for (const mode of ['bootstrap', 'stale-event', 'enforced', 'partial', 'missing-ref']) {
+    const temp = mkdtempSync(path.join(os.tmpdir(), 'migration-source-'))
+    try {
+      const trusted = path.join(temp, 'trusted');mkdirSync(trusted)
+      const git = args => execFileSync('git', args, {cwd: trusted, encoding: 'utf8'})
+      git(['init', '-q']);writeFileSync(path.join(trusted, 'README.md'), 'fixture')
+      git(['add', '.']);git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Old base'])
+      const old = git(['rev-parse', 'HEAD']).trim()
+      if (mode !== 'bootstrap' && mode !== 'missing-ref') {
+        mkdirSync(path.join(trusted, 'scripts/ci'), {recursive: true})
+        writeFileSync(path.join(trusted, 'scripts/ci/migration-versions.mjs'), 'not executed')
+        if (mode !== 'partial') writeFileSync(path.join(trusted, 'scripts/ci/migration-version-allowlist.json'), '{}')
+        git(['add', '.']);git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'New base'])
+      }
+      if (mode !== 'missing-ref') git(['update-ref', 'refs/remotes/origin/dev', git(['rev-parse', 'HEAD']).trim()])
+      if (mode === 'stale-event') git(['checkout', '-q', '--detach', old])
+      const output = path.join(temp, 'output')
+      const result = spawnSync('/bin/sh', ['-c', command], {cwd: temp, encoding: 'utf8', env: {PATH: process.env.PATH, GITHUB_EVENT_NAME: 'pull_request', BASE_BRANCH: 'dev', GITHUB_OUTPUT: output}})
+      if (['bootstrap', 'enforced'].includes(mode)) assert.equal(result.status, 0)
+      else assert.notEqual(result.status, 0)
+      if (mode === 'bootstrap') {assert(result.stdout.includes('not enforced'));assert.equal(readFileSync(output, 'utf8'), 'enforced=false\n')}
+      if (mode === 'enforced') assert.equal(readFileSync(output, 'utf8'), 'enforced=true\n')
+    } finally {rmSync(temp, {recursive: true, force: true})}
   }
 })
 test('the real tree CLI exits nonzero on a new duplicate, without network access', () => {
@@ -173,5 +216,30 @@ test('the real tree CLI exits nonzero on a new duplicate, without network access
     assert.equal(result.status, 1)
     assert(result.stderr.includes('20261106110000'))
     assert(!result.stdout.includes('passed'))
+  } finally {rmSync(temp, {recursive: true, force: true})}
+})
+test('returning zero in the candidate PR entry cannot change the trusted PR command', () => {
+  const temp = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'migration-trust-')))
+  try {
+    const source = readFileSync(new URL('../../scripts/ci/migration-versions.mjs', import.meta.url), 'utf8')
+    const clause = "else if (argv[0] === '--pull-request' && argv.length === 1) {"
+    assert(source.includes(clause))
+    for (const folder of ['trusted', 'candidate']) {
+      mkdirSync(path.join(temp, folder))
+      writeFileSync(path.join(temp, folder, 'migration-versions.mjs'), folder === 'trusted' ? source : source.replace(clause, clause + '\n    return 0'))
+      writeFileSync(path.join(temp, folder, 'migration-version-allowlist.json'), JSON.stringify(empty))
+    }
+    const event = path.join(temp, 'event.json'), log = path.join(temp, 'requests'), loader = path.join(temp, 'fixture.mjs')
+    writeFileSync(event, JSON.stringify({number: 7, pull_request: {head: {sha: sha(7)}}}))
+    writeFileSync(loader, `import assert from 'node:assert/strict';import fs from 'node:fs';\nconst sha=${sha.toString()},added=${added.toString()};\nconst empty=${JSON.stringify(empty)},one=${JSON.stringify(one)},two=${JSON.stringify(two)},next=${JSON.stringify(next)};\n${server.toString()}\nconst fixture=server({otherCount:0,devTree:[two]});globalThis.fetch=(...args)=>{fs.appendFileSync(process.env.FIXTURE_LOG,'request\\n');return fixture.fetchImpl(...args)};`)
+    const env = {PATH: process.env.PATH, NODE_OPTIONS: `--import=${pathToFileURL(loader).href}`, GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: event, GITHUB_REPOSITORY: 'example/community', GITHUB_TOKEN: 'fixture-read-only', FIXTURE_LOG: log}
+    writeFileSync(log, '')
+    const candidate = spawnSync(process.execPath, [path.join(temp, 'candidate/migration-versions.mjs'), '--pull-request'], {encoding: 'utf8', env})
+    assert.equal(candidate.status, 0, candidate.stderr)
+    assert.equal(readFileSync(log, 'utf8'), '')
+    const trusted = spawnSync(process.execPath, [path.join(temp, 'trusted/migration-versions.mjs'), '--pull-request'], {encoding: 'utf8', env})
+    assert.equal(trusted.status, 1)
+    assert(trusted.stderr.includes('20261106110000') && trusted.stderr.includes(two.path))
+    assert(readFileSync(log, 'utf8').includes('request'))
   } finally {rmSync(temp, {recursive: true, force: true})}
 })
