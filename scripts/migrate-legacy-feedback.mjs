@@ -1,7 +1,8 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomUUID, X509Certificate } from 'node:crypto'
 import { open, readFile, rename, unlink, lstat, realpath } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { rootCertificates, checkServerIdentity } from 'node:tls'
 
 const check = (ok) => { if (!ok) throw new Error('Migration refused') }
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -13,26 +14,61 @@ const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-
 const hex = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const integer = value => Number.isSafeInteger(value) && value >= 0
 const modes = ['dry-run', 'migrate', 'report', 'delete']
+const controlCharacters = /[\u0000-\u001f\u007f-\u009f]/u
 
 export function databaseAddress(databaseUrl) {
+  check(typeof databaseUrl === 'string' && !controlCharacters.test(databaseUrl))
   const database = new URL(databaseUrl), parameters = [...database.searchParams]
   check(['postgres:', 'postgresql:'].includes(database.protocol) && database.hostname && database.username
     && database.pathname.length > 1 && !database.hash && parameters.length <= 1
-    && parameters.every(([key, value]) => key === 'sslmode' && ['disable', 'require', 'verify-ca', 'verify-full'].includes(value)))
+    && parameters.every(([key, value]) => key === 'sslmode' && ['require', 'verify-ca', 'verify-full'].includes(value)))
   // pg otherwise falls back to PGPORT when the URL omits a port.
   database.port = database.port || '5432'
   const port = Number(database.port)
   check(Number.isInteger(port) && port >= 1 && port <= 65535)
-  return { connectionString: database.href, host: database.hostname.replace(/^\[|\]$/g, ''), port,
-    database: decodeURIComponent(database.pathname.slice(1)), user: decodeURIComponent(database.username), parameters }
+  const address = { connectionString: database.href, host: decodeURIComponent(database.hostname).replace(/^\[|\]$/g, ''), port,
+    database: decodeURIComponent(database.pathname.slice(1)), user: decodeURIComponent(database.username),
+    password: decodeURIComponent(database.password), parameters }
+  check(['host', 'database', 'user'].every(key => address[key] && !controlCharacters.test(address[key]))
+    && !address.password.includes('\0'))
+  return address
 }
 
-export function createApprovedClient(Client, databaseUrl) {
+export function clearPgEnvironment() {
+  for (const name of Object.keys(process.env)) if (/^PG/i.test(name) || name === 'NODE_PG_FORCE_NATIVE') delete process.env[name]
+}
+
+function connectionPolicy(databaseCa, host) {
+  check(databaseCa === undefined || Array.isArray(databaseCa) && databaseCa.length > 0
+    && databaseCa.every(certificate => typeof certificate === 'string'))
+  const ca = databaseCa === undefined ? [...rootCertificates] : databaseCa.map(certificate => new X509Certificate(certificate).toString())
+  return { ssl: { rejectUnauthorized: true, ca,
+    checkServerIdentity: (_servername, certificate) => checkServerIdentity(host, certificate) }, options: '', replication: false,
+    application_name: 'legacy-evidence-migration', client_encoding: 'UTF8', binary: false }
+}
+
+function policyIdentity(policy) {
+  check(policy.ssl && typeof policy.ssl === 'object'
+    && digest(Object.keys(policy.ssl).sort()) === digest(['ca', 'checkServerIdentity', 'rejectUnauthorized'])
+    && typeof policy.ssl.checkServerIdentity === 'function')
+  return { ssl: { rejectUnauthorized: policy.ssl.rejectUnauthorized, caSha256: digest(policy.ssl.ca),
+    checkServerIdentity: 'approved-host-v1' },
+    options: policy.options ?? '', replication: policy.replication ?? false,
+    application_name: policy.application_name, client_encoding: policy.client_encoding, binary: policy.binary }
+}
+
+export function createApprovedClient(Client, databaseUrl, databaseCa) {
   const approved = databaseAddress(databaseUrl)
-  const client = new Client({ connectionString: approved.connectionString, application_name: 'legacy-evidence-migration',
+  const policy = connectionPolicy(databaseCa, approved.host)
+  clearPgEnvironment()
+  // Use explicit fields: pg-connection-string must not reinterpret SSL or startup policy.
+  const client = new Client({ host: approved.host, port: approved.port, database: approved.database,
+    user: approved.user, password: approved.password, ...policy,
     connectionTimeoutMillis: 10000, query_timeout: 60000 })
   const actual = client.connectionParameters
-  check(actual && ['host', 'port', 'database', 'user'].every(key => actual[key] === approved[key]))
+  check(actual && ['host', 'port', 'database', 'user'].every(key => actual[key] === approved[key])
+    && actual.ssl?.checkServerIdentity === policy.ssl.checkServerIdentity
+    && digest(policyIdentity(actual)) === digest(policyIdentity(policy)))
   return client
 }
 
@@ -50,8 +86,8 @@ export function environmentFingerprint(config, databaseUrl) {
   check(!config.storageRoot.endsWith('/') && config.publicRoot.endsWith('/'))
   const database = databaseAddress(databaseUrl)
   // No query parameter may override host, port, database, user, or connection options.
-  return digest([1, config.environment, config.installationId, database.host, String(database.port),
-    database.database, database.user, database.parameters,
+  return digest([2, config.environment, config.installationId, database.host, String(database.port),
+    database.database, database.user, database.parameters, policyIdentity(connectionPolicy(config.databaseCa, database.host)),
     config.storageRoot, config.publicRoot, config.sourceBucket, config.targetBucket, config.maxBytes])
 }
 
@@ -339,8 +375,9 @@ export function parseArguments(args) {
 
 // Runtime settings are deliberately supplied by private files/environment only.
 async function connect(config, databaseUrl, token, mutating, authorization) {
+  clearPgEnvironment()
   const { default: pg } = await import('pg')
-  const db = createApprovedClient(pg.Client, databaseUrl)
+  const db = createApprovedClient(pg.Client, databaseUrl, config.databaseCa)
   // The CLI emits a fixed failure receipt, never an asynchronous driver error object.
   db.on('error', () => {})
   await db.connect()

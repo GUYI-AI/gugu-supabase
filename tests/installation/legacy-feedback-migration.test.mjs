@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { rootCertificates } from 'node:tls'
 import { inventory, migrate, readback, deleteCopies, validateApproval, parseArguments,
   sourceName, targetName, sha256, digest, missingResponse, bindInstalledTarget,
   environmentFingerprint, validateEnvironment, authorizedConnection, validateDatabaseIdentity,
@@ -10,6 +11,18 @@ import { inventory, migrate, readback, deleteCopies, validateApproval, parseArgu
 
 const scriptSha = sha256('fixed fixture script')
 const copy = value => structuredClone(value)
+function withPgEnvironment(values, operation) {
+  const isPg = key => /^PG/i.test(key) || key === 'NODE_PG_FORCE_NATIVE'
+  const previous = Object.fromEntries(Object.entries(process.env).filter(([key]) => isPg(key)))
+  try {
+    for (const key of Object.keys(process.env)) if (isPg(key)) delete process.env[key]
+    Object.assign(process.env, values)
+    return operation()
+  } finally {
+    for (const key of Object.keys(process.env)) if (isPg(key)) delete process.env[key]
+    Object.assign(process.env, previous)
+  }
+}
 const validatorSource = target => `WHERE o.bucket_id = '${target}' AND o.name = object_path FOR KEY SHARE;
 evidence_blob := chat.file_blob_for_object('${target}', object_path);
 WHERE b.bucket_id = '${target}' AND b.object_name = object_path;`
@@ -123,9 +136,8 @@ test('pinned pg cannot redirect an approved omitted-port URL through PGPORT', ()
   const require = createRequire(import.meta.url), pg = require('pg')
   assert.equal(require('pg/package.json').version, '8.16.3')
   const f = environmentFixture(), address = new URL(f.databaseUrl); address.port = ''
-  const omitted = address.href, previousPort = process.env.PGPORT
-  try {
-    process.env.PGPORT = '6543'
+  const omitted = address.href
+  withPgEnvironment({ PGPORT: '6543' }, () => {
     // Reproduce the reviewer's old behavior without calling connect or resolving DNS.
     const legacy = new pg.Client({ connectionString: omitted })
     assert.equal(legacy.connectionParameters.port, 6543)
@@ -136,10 +148,7 @@ test('pinned pg cannot redirect an approved omitted-port URL through PGPORT', ()
     assert.equal(fixed._connecting, false); assert.equal(legacy._connecting, false)
     class DriftedClient { constructor() { return legacy } }
     assert.throws(() => createApprovedClient(DriftedClient, omitted))
-  } finally {
-    if (previousPort === undefined) delete process.env.PGPORT
-    else process.env.PGPORT = previousPort
-  }
+  })
 })
 
 test('the pinned driver resolves exactly the approved host, port, database and user before connect', () => {
@@ -154,6 +163,75 @@ test('the pinned driver resolves exactly the approved host, port, database and u
     }
     assert.equal(client._connecting, false)
   }
+})
+
+test('all inherited PG variables are removed and cannot weaken TLS or inject startup policy', () => {
+  const pg = createRequire(import.meta.url)('pg'), f = environmentFixture()
+  for (const sslmode of ['disable', 'no-verify']) withPgEnvironment({ PGSSLMODE: sslmode,
+    PGOPTIONS: '-c search_path=unsafe', PGREPLICATION: 'database', PGAPPNAME: 'unapproved',
+    PGCLIENT_ENCODING: 'SQL_ASCII', PGBINARY: '1', PGFUTURE_SETTING: 'unapproved', NODE_PG_FORCE_NATIVE: '1' }, () => {
+    const legacy = new pg.Client({ connectionString: f.databaseUrl })
+    if (sslmode === 'disable') assert.equal(legacy.connectionParameters.ssl, false)
+    else assert.equal(legacy.connectionParameters.ssl.rejectUnauthorized, false)
+    assert.equal(legacy.connectionParameters.options, '-c search_path=unsafe')
+    assert.equal(legacy.connectionParameters.replication, 'database')
+    assert.equal(environmentFingerprint(f.config, f.databaseUrl), f.authorization.fingerprint)
+    const fixed = createApprovedClient(pg.Client, f.databaseUrl), actual = fixed.connectionParameters
+    assert.deepEqual(Object.keys(process.env).filter(key => /^PG/i.test(key)), [])
+    assert.equal(process.env.NODE_PG_FORCE_NATIVE, undefined)
+    assert.equal(actual.ssl.rejectUnauthorized, true); assert.deepEqual(actual.ssl.ca, [...rootCertificates])
+    const host = new URL(f.databaseUrl).hostname
+    assert.equal(actual.ssl.checkServerIdentity('untrusted-input', { subjectaltname: 'DNS:' + host }), undefined)
+    assert.ok(actual.ssl.checkServerIdentity(host, { subjectaltname: 'DNS:unapproved.invalid' }) instanceof Error)
+    assert.equal(actual.options ?? '', ''); assert.equal(actual.replication ?? false, false)
+    assert.equal(actual.application_name, 'legacy-evidence-migration')
+    assert.equal(actual.client_encoding, 'UTF8'); assert.equal(actual.binary, false)
+    const startup = fixed.getStartupConf()
+    assert.ok(!('options' in startup)); assert.ok(!('replication' in startup))
+    assert.equal(startup.application_name, 'legacy-evidence-migration')
+    assert.equal(fixed._connecting, false); assert.equal(legacy._connecting, false)
+  })
+})
+
+test('resolved TLS trust, startup options, replication and application policy must match the fingerprinted policy', () => {
+  const pg = createRequire(import.meta.url)('pg'), f = environmentFixture()
+  const baseline = createApprovedClient(pg.Client, f.databaseUrl).connectionParameters
+  const changes = [{ ssl: false }, { ssl: { ...baseline.ssl, rejectUnauthorized: false } },
+    { ssl: { ...baseline.ssl, ca: [rootCertificates[0]] } },
+    { ssl: { ...baseline.ssl, checkServerIdentity: () => undefined } }, { options: '-c role=other' },
+    { replication: 'database' }, { application_name: 'other' }, { client_encoding: 'SQL_ASCII' }, { binary: true }]
+  for (const change of changes) {
+    class DriftedClient { constructor() { return { connectionParameters: { ...baseline, ...change } } } }
+    assert.throws(() => createApprovedClient(DriftedClient, f.databaseUrl))
+  }
+  const custom = { ...f.config, databaseCa: [rootCertificates[0]] }
+  assert.notEqual(environmentFingerprint(custom, f.databaseUrl), f.authorization.fingerprint)
+  const client = createApprovedClient(pg.Client, f.databaseUrl, custom.databaseCa)
+  assert.equal(client.connectionParameters.ssl.ca.length, 1)
+  assert.equal(client.connectionParameters.ssl.rejectUnauthorized, true)
+  assert.throws(() => databaseAddress(f.databaseUrl + '?sslmode=disable'))
+})
+
+test('decoded NUL and control characters in startup identifiers are refused before constructing a client', () => {
+  const pg = createRequire(import.meta.url)('pg'), f = environmentFixture()
+  const injected = new URL(f.databaseUrl); injected.username = 'operator%00options%00injected'
+  const legacy = new pg.Client({ connectionString: injected.href })
+  assert.ok(legacy.getStartupConf().user.includes('\0')); assert.equal(legacy._connecting, false)
+  let constructions = 0
+  class NeverConstruct { constructor() { constructions++; throw new Error('unexpected construction') } }
+  const invalid = [injected.href, f.databaseUrl + '\n']
+  for (const character of ['\0', '\u0001', '\t', '\r', '\n', '\u007f', '\u0085']) {
+    for (const field of ['username', 'pathname', 'hostname']) {
+      const url = new URL(f.databaseUrl)
+      url[field] = (field === 'pathname' ? '/' : '') + 'fixture' + encodeURIComponent(character) + 'suffix'
+      invalid.push(url.href)
+    }
+  }
+  for (const url of invalid) {
+    assert.throws(() => createApprovedClient(NeverConstruct, url))
+    assert.throws(() => environmentFingerprint(f.config, url))
+  }
+  assert.equal(constructions, 0)
 })
 
 test('every mode denies missing or mismatched environment approval before opening any connection', async () => {

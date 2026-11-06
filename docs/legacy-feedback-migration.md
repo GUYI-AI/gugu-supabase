@@ -61,6 +61,7 @@ The configuration has these keys; this guide deliberately supplies no deployment
 | --- | --- |
 | `environment` | Explicit `local`, `staging`, or `production` classification, matched against the independent grant |
 | `installationId` | Opaque UUID from the approved installation inventory, matched against the independent grant |
+| `databaseCa` | Optional nonempty array of PEM CA certificates; if omitted, use the Node bundled roots, explicitly passed to TLS and bound into the fingerprint |
 | `sourceBucket` | Explicit legacy source storage identifier; must currently be public |
 | `targetBucket` | Must equal the installed feedback validator's actual reference target, which must be private and different |
 | `publicRoot` | Exact historical public object root, including its storage identifier and trailing slash |
@@ -100,13 +101,26 @@ a human signature. Its enforcement binds the supplied grant to the exact connect
 and operation. The environment grant does not replace the later numeric deletion approval.
 
 The mapping digest covers the environment classification, installation UUID, explicit database
-host/port/name/user, permitted TLS option, both API roots, both storage identifiers, and size
-limit. Database URL query parameters that could override host, port, user, database or options
-are rejected; only a single supported `sslmode` is accepted. Passwords are excluded from the
-digest. Fingerprinting and driver construction share the same explicit address parser: an
-omitted port becomes an explicit 5432 in the connection URL, so `PGPORT` cannot redirect the
-approved address. Before `connect`, the script compares the actual driver's resolved host,
-port, database and user with those approved values and refuses any difference. After the
+host/port/name/user, complete effective connection policy, both API roots, both storage
+identifiers, and size limit. The policy requires TLS with certificate-chain validation and
+identity checks against the approved host, an exact CA trust-set digest, empty startup options,
+disabled replication, the fixed application name, UTF-8 encoding, and text results. Only
+`require`, `verify-ca`, or `verify-full` may appear as a single `sslmode`; all three are enforced
+with full certificate and hostname verification. There is no plaintext or unverified TLS
+fallback, including for loopback rehearsals. Custom CA material must be independently approved
+in `databaseCa`; changing it changes the fingerprint. Ambient extra-CA settings cannot expand
+the explicit trust set.
+
+Database URL query parameters that could override host, port, user, database or startup options
+are rejected. Passwords are excluded from the digest. Raw and percent-decoded NUL/control
+characters in connection identifiers are rejected before constructing a client. Fingerprinting
+and construction share the same address parser, with an explicit default 5432. Before driver
+import and again before construction, the dedicated script process removes every inherited
+`PG*` variable and the native-driver selection flag; this does not modify the parent shell.
+The driver receives explicit fields and TLS/startup settings, with no `connectionString`
+reparsing. Before `connect`, its resolved address and full effective policy must match the
+fingerprinted values, including the certificate verifier, trust set, options, replication,
+application name and encoding. After the
 authorized connection, the first query compares the approved database identity
 with `pg_control_system()` and the current database name/OID, before any inventory or Storage
 operation. The administrative connection must have permission to read that identity; absence
@@ -269,9 +283,11 @@ node --test tests/installation/legacy-feedback-migration.test.mjs
 ```
 
 The tests use synthetic bytes, generated identifiers and in-memory database/Storage doubles,
-plus real pinned `pg` 8.16.3 Client construction without connecting. The driver regression
-reproduces the old omitted-port URL plus `PGPORT=6543` redirection, then verifies the corrected
-client stays on the approved explicit 5432 and rejects resolved address drift.
+plus real pinned `pg` 8.16.3 Client construction without connecting. The driver regressions
+reproduce omitted-port redirection, ambient TLS downgrades, injected startup options and
+replication, and NUL-bearing identifiers. They verify the explicit address and complete policy,
+removal of inherited variables, CA/hostname checks, and rejection before client construction
+or connection when an identifier or resolved policy is invalid.
 They exercise metadata-only inventory, parser gates, wrong approvals, conflicting targets,
 compare-and-swap failures, restart without repeated uploads, readback corruption, remaining
 references, a crash after remote deletion, the wrong-private-target/reader-corruption counterexample,
