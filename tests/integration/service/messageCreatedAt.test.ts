@@ -58,20 +58,26 @@ describe('message insertion clock', () => {
   for (const topic of [false, true]) {
     for (const explicit of [false, true]) {
       it(`${topic ? 'topic/source' : 'group'} history keeps a post-join ${explicit ? 'future' : 'default'} insert visible in an older transaction`, async () => {
+        let chat = group
+        if (topic) {
+          const anchor = randomUUID()
+          await insert(anchor)
+          chat = (await db.query('SELECT chat_id FROM chat.create_topic($1,$2,$3)',
+            [group, anchor, 'Timestamp topic'])).rows[0].chat_id
+        }
         await db.query('RESET ROLE')
         // The transaction is already in flight. Establish a strictly later join
         // floor, then insert without resetting its transaction-start timestamp.
         await db.query('SELECT pg_sleep(0.01)')
-        await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role,hide_history_before)
-          VALUES($1,$2,'member',clock_timestamp())`, [group, reader])
-        let chat = group
-        if (topic) {
-          chat = randomUUID()
-          await db.query(`INSERT INTO chat.chats(id,kind,name,creator_user_id,source_chat_id)
-            VALUES($1,'topic','Timestamp topic',$2,$3)`, [chat, owner, group])
-        }
+        await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role)
+          VALUES($1,$2,'member')`, [group, reader])
+        // Membership initialization owns its initial floor. Set this controlled
+        // history boundary afterward rather than having its INSERT trigger reset it.
+        await db.query(`UPDATE chat.chat_members SET hide_history_before=clock_timestamp()
+          WHERE chat_id=$1 AND user_id=$2`, [group, reader])
         const floor = (await db.query('SELECT hide_history_before FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, reader])).rows[0].hide_history_before
         const start = (await db.query('SELECT now() AS at')).rows[0].at
+        expect(floor).not.toBeNull()
         expect(floor.getTime()).toBeGreaterThan(start.getTime())
         await asUser()
         const id = randomUUID()
