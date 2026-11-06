@@ -23,6 +23,34 @@ COMMENT ON TABLE chat.conversation_list_state IS
 -- KEY SHARE (identity then chat, including every FK parent) before its
 -- single own head; afterwards it writes private rows and publishes ONLY that account's revision.
 -- There is no visibility barrier and no new lock inserted into nested management/topic/file paths.
+-- Account erasure can publish a surviving peer's head while visiting an earlier DM. Acquire
+-- every existing affected chat/member parent in deterministic order before that first publication;
+-- otherwise a later chat FOR UPDATE cycles with that peer's hide holding its chat KEY SHARE.
+-- Preserve the installed erasure body and ACL; only add this admission-lock prelude.
+DO $erase_lock_order$
+DECLARE definition text; previous text; marker text := '    FOR affected_chat_id IN';
+BEGIN
+  SELECT pg_get_functiondef('identity.erase_human_account(text)'::regprocedure) INTO definition;
+  previous := definition;
+  IF (length(definition)-length(replace(definition,marker,'')))/length(marker) <> 1 THEN
+    RAISE EXCEPTION 'Unexpected erasure lock-order predecessor';
+  END IF;
+  definition := replace(definition,marker,
+    '    PERFORM 1 FROM chat.chats c WHERE EXISTS (
+        SELECT 1 FROM chat.chat_members cm
+        WHERE cm.chat_id=c.id AND cm.user_id=ANY(delete_user_ids)
+    ) ORDER BY c.id FOR UPDATE;
+    PERFORM 1 FROM chat.chat_members cm WHERE EXISTS (
+        SELECT 1 FROM chat.chat_members affected
+        WHERE affected.chat_id=cm.chat_id AND affected.user_id=ANY(delete_user_ids)
+    ) ORDER BY cm.chat_id,cm.user_id FOR UPDATE;
+
+' || marker);
+  IF definition=previous THEN RAISE EXCEPTION 'Missing erasure lock prelude'; END IF;
+  EXECUTE definition;
+END;
+$erase_lock_order$;
+
 CREATE FUNCTION chat.restore_conversation_list_rows(p_chat_id text, p_visible_users text[]) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE restored record;
@@ -169,15 +197,19 @@ GRANT EXECUTE ON FUNCTION chat.delete_my_dm_conversation(text) TO authenticated;
 -- A native message body stays in its transcript. This ledger only deduplicates live publication;
 -- it is not a second message/history store and is never populated by replay or heartbeat.
 CREATE TABLE chat.native_conversation_publications (
-  device_id text NOT NULL REFERENCES identity.gugu_devices(device_id) ON DELETE CASCADE,
+  -- Deduplication evidence outlives device unregister/re-register, Agent removal and chat removal.
+  -- Identity/device/chat strings are receipts, not authorization grants. Only owner erasure purges them.
+  owner_user_id text NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
+  device_id text NOT NULL,
   session_id text NOT NULL CHECK (length(session_id) BETWEEN 1 AND 256),
   message_id text NOT NULL CHECK (length(message_id) BETWEEN 1 AND 512),
-  agent_user_id text NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
-  chat_id text NOT NULL REFERENCES chat.chats(id) ON DELETE CASCADE,
+  agent_user_id text NOT NULL,
+  chat_id text NOT NULL,
   occurred_at timestamptz NOT NULL,
   published_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (device_id, session_id, message_id)
 );
+CREATE INDEX native_conversation_publications_owner ON chat.native_conversation_publications(owner_user_id);
 ALTER TABLE chat.native_conversation_publications ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON chat.native_conversation_publications FROM PUBLIC, anon, authenticated, service_role;
 
@@ -203,8 +235,8 @@ BEGIN
   PERFORM 1 FROM identity.gugu_devices d WHERE d.device_id = p_device_id FOR KEY SHARE;
   PERFORM 1 FROM identity.users u WHERE u.id IN (caller,p_agent_user_id) ORDER BY u.id FOR KEY SHARE;
   PERFORM 1 FROM chat.chats c WHERE c.id = p_chat_id FOR KEY SHARE;
-  INSERT INTO chat.native_conversation_publications(device_id,session_id,message_id,agent_user_id,chat_id,occurred_at)
-    VALUES(p_device_id,p_session_id,p_message_id,p_agent_user_id,p_chat_id,p_occurred_at)
+  INSERT INTO chat.native_conversation_publications(owner_user_id,device_id,session_id,message_id,agent_user_id,chat_id,occurred_at)
+    VALUES(caller,p_device_id,p_session_id,p_message_id,p_agent_user_id,p_chat_id,p_occurred_at)
     ON CONFLICT (device_id,session_id,message_id) DO NOTHING;
   inserted := FOUND;
   IF inserted THEN
@@ -215,7 +247,7 @@ BEGIN
   ELSE
     SELECT * INTO prior FROM chat.native_conversation_publications p
       WHERE p.device_id = p_device_id AND p.session_id = p_session_id AND p.message_id = p_message_id;
-    IF (prior.agent_user_id,prior.chat_id,prior.occurred_at) IS DISTINCT FROM (p_agent_user_id,p_chat_id,p_occurred_at) THEN
+    IF (prior.owner_user_id,prior.agent_user_id,prior.chat_id,prior.occurred_at) IS DISTINCT FROM (caller,p_agent_user_id,p_chat_id,p_occurred_at) THEN
       RAISE EXCEPTION 'native_conversation_publication_conflict' USING ERRCODE = '23505';
     END IF;
   END IF;

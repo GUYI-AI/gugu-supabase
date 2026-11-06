@@ -6,6 +6,7 @@ const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
 let admin: pg.Client, a: pg.Client, b: pg.Client
 let owner: string, peer: string, agent: string, device: string, room: string, anchor: string, gate: string
 let aPid: number, bPid: number, adminPid: number
+let extraChats: string[]=[]
 const events = (id: string) => `gugu:user:${id}:events`
 async function connect() {
   const c = new pg.Client({ connectionString: url }); await c.connect()
@@ -28,16 +29,27 @@ beforeAll(async () => {
       END IF;
       RETURN NEW;
     END $$`)
+  await admin.query(`CREATE FUNCTION chat.fixture_personal_erasure_latch() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.id=current_setting('gugu.fixture_erase_latch_chat',true) AND NEW.name='已注销用户' THEN
+        PERFORM pg_advisory_xact_lock(hashtextextended(current_setting('gugu.fixture_hide_latch_key'),0));
+      END IF;
+      RETURN NEW;
+    END $$`)
+  await admin.query('CREATE TRIGGER zz_fixture_personal_erasure_latch AFTER UPDATE ON chat.chats FOR EACH ROW EXECUTE FUNCTION chat.fixture_personal_erasure_latch()')
   await admin.query('CREATE TRIGGER messages_00_fixture_personal_hiding_latch BEFORE INSERT ON chat.messages FOR EACH ROW EXECUTE FUNCTION chat.fixture_personal_hiding_latch()')
 })
 afterAll(async () => {
   if (admin) {
+    await admin.query('DROP TRIGGER IF EXISTS zz_fixture_personal_erasure_latch ON chat.chats')
+    await admin.query('DROP FUNCTION IF EXISTS chat.fixture_personal_erasure_latch()')
     await admin.query('DROP TRIGGER IF EXISTS messages_00_fixture_personal_hiding_latch ON chat.messages')
     await admin.query('DROP FUNCTION IF EXISTS chat.fixture_personal_hiding_latch()')
   }
   await a?.end(); await b?.end(); await admin?.end()
 })
 beforeEach(async () => {
+  extraChats=[]
   ;[owner, peer, agent, device, room, anchor, gate] = Array.from({ length: 7 }, randomUUID)
   for (const id of [owner, peer]) await admin.query('INSERT INTO auth.users(id,email) VALUES($1,$2)', [id, `${id}@hiding-review.invalid`])
   await admin.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'fixture','fixture','linux')", [device, owner])
@@ -49,7 +61,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await a.query('ROLLBACK'); await b.query('ROLLBACK'); await admin.query('ROLLBACK')
   await admin.query('SELECT pg_advisory_unlock(hashtextextended($1,0))', [gate])
-  await admin.query('DELETE FROM chat.chats WHERE id=$1 OR source_chat_id=$1', [room])
+  await admin.query('DELETE FROM chat.chats WHERE id=$1 OR source_chat_id=$1 OR id=ANY($2::text[])', [room,extraChats])
   await admin.query('DELETE FROM identity.users WHERE id=$1', [agent])
   await admin.query('DELETE FROM identity.gugu_devices WHERE device_id=$1', [device])
   await admin.query('DELETE FROM auth.users WHERE id=ANY($1::uuid[])', [[owner, peer]])
@@ -127,4 +139,24 @@ it('takes the erasure lifecycle guard before FK parents and the owner head', asy
   await a.query('COMMIT')
   expect(await hidden).toBeNull()
   expect(await ownState()).not.toBeNull()
+})
+
+it('orders a different member account erasure across two DMs before surviving peer heads', async () => {
+  const [first,second]=[randomUUID(),randomUUID()].sort()
+  extraChats=[first,second]
+  for (const id of [first,second]) {
+    await admin.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'dm','peer DM',$2)",[id,owner])
+    await admin.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member'),($1,$3,'member')",[id,owner,peer])
+  }
+  await admin.query('SELECT pg_advisory_lock(hashtextextended($1,0))',[gate])
+  await a.query('BEGIN'); await auth(a,peer)
+  await a.query("SELECT set_config('gugu.fixture_erase_latch_chat',$1,true),set_config('gugu.fixture_hide_latch_key',$2,true)",[first,gate])
+  const erased=committed(a,'DELETE FROM auth.users WHERE id=$1::uuid',[peer])
+  await blocked(aPid,adminPid)
+  await b.query('BEGIN'); await auth(b)
+  const hidden=committed(b,'SELECT chat.hide_my_conversation($1,$2)',[second,randomUUID()])
+  await blocked(bPid,aPid)
+  await admin.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',[gate])
+  expect(await Promise.all([erased,hidden])).toEqual([null,null])
+  expect((await admin.query('SELECT conversation_hidden_at FROM chat.conversation_list_state WHERE chat_id=$1 AND user_id=$2',[second,owner])).rows[0].conversation_hidden_at).not.toBeNull()
 })

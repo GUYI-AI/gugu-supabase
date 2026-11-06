@@ -204,3 +204,25 @@ it('does not block privacy erasure with private list-state or native publication
   expect((await db.query('SELECT count(*)::int n FROM chat.conversation_hide_operations WHERE user_id=$1',[owner])).rows[0].n).toBe(0)
   expect((await db.query('SELECT count(*)::int n FROM chat.native_conversation_publications WHERE agent_user_id=$1',[agent])).rows[0].n).toBe(0)
 })
+
+it('retains native deduplication through real device removal and refuses old keys after re-registration',async()=>{
+  const session=randomUUID(),message=randomUUID(),at='2026-01-01T00:00:00Z'
+  const publish=(target=agent,chat=agentDm)=>as(owner,'SELECT chat.publish_native_conversation_message($1,$2,$3,$4,$5,$6) receipt',[device,target,session,message,chat,at])
+  expect((await publish())[0].receipt.already).toBe(false)
+  await hide(agentDm)
+  await as(owner,'SELECT identity.remove_device($1,true)',[device])
+  expect((await db.query('SELECT count(*)::int n FROM chat.native_conversation_publications WHERE device_id=$1',[device])).rows[0].n).toBe(1)
+  await denied(()=>publish(),'42501')
+  await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Re-registered','fixture','linux')",[device,owner])
+  // Removed Agent identities are immutable and cannot be rebound. Real registration creates a new
+  // identity: the old tuple stays denied, and reusing its publication key for the new tuple conflicts.
+  const nextAgent=randomUUID(),nextChat=randomUUID()
+  await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','New registration',$2,$3)",[nextAgent,owner,device])
+  await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'dm','New registration',$2)",[nextChat,owner])
+  await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member'),($1,$3,'member')",[nextChat,owner,nextAgent])
+  await hide(nextChat)
+  await denied(()=>publish(),'42501')
+  await denied(()=>publish(nextAgent,nextChat),'23505')
+  expect((await state(nextChat)).conversation_hidden_at).not.toBeNull()
+  expect((await db.query('SELECT count(*)::int n FROM chat.native_conversation_publications WHERE device_id=$1',[device])).rows[0].n).toBe(1)
+})
