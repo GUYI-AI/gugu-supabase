@@ -12,6 +12,71 @@ export const missingResponse = (status, body) => [400, 404].includes(status)
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(value)
 const hex = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const integer = value => Number.isSafeInteger(value) && value >= 0
+const modes = ['dry-run', 'migrate', 'report', 'delete']
+
+// This digest is compared with an independently provisioned authorization, not self-approved.
+export function environmentFingerprint(config, databaseUrl) {
+  check(['local', 'staging', 'production'].includes(config.environment) && uuid(config.installationId))
+  check(typeof config.sourceBucket === 'string' && config.sourceBucket && typeof config.targetBucket === 'string'
+    && config.targetBucket && config.sourceBucket !== config.targetBucket)
+  check(integer(config.maxBytes) && config.maxBytes > 0 && config.maxBytes <= 5242880)
+  for (const value of [config.storageRoot, config.publicRoot]) {
+    const url = new URL(value)
+    check(!url.username && !url.password && !url.search && !url.hash
+      && (url.protocol === 'https:' || url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))
+  }
+  check(!config.storageRoot.endsWith('/') && config.publicRoot.endsWith('/'))
+  const database = new URL(databaseUrl), parameters = [...database.searchParams]
+  check(['postgres:', 'postgresql:'].includes(database.protocol) && database.hostname && database.username
+    && database.pathname.length > 1 && !database.hash && parameters.length <= 1
+    && parameters.every(([key, value]) => key === 'sslmode' && ['disable', 'require', 'verify-ca', 'verify-full'].includes(value)))
+  // No query parameter may override host, port, database, user, or connection options.
+  return digest([1, config.environment, config.installationId, database.hostname, database.port || '5432',
+    decodeURIComponent(database.pathname.slice(1)), decodeURIComponent(database.username), parameters,
+    config.storageRoot, config.publicRoot, config.sourceBucket, config.targetBucket, config.maxBytes])
+}
+
+export function validateEnvironment(config, databaseUrl, authorization, mode, scriptSha256) {
+  const fingerprint = environmentFingerprint(config, databaseUrl)
+  check(authorization?.schema === 1 && authorization.kind === 'gugu-legacy-environment-authorization'
+    && authorization.environment === config.environment
+    && authorization.installationId === config.installationId && authorization.fingerprint === fingerprint
+    && hex(scriptSha256) && authorization.scriptSha256 === scriptSha256
+    && hex(authorization.databaseIdentitySha256) && hex(authorization.feedbackValidatorSha256)
+    && typeof authorization.approvedBy === 'string' && authorization.approvedBy.trim().length > 0
+    && Array.isArray(authorization.modes) && authorization.modes.every(item => modes.includes(item))
+    && authorization.modes.includes(mode)
+    && (config.environment !== 'production' || authorization.productionApproved === true))
+  return fingerprint
+}
+
+export function validateDatabaseIdentity(identity, authorization) {
+  check(identity && /^\d+$/.test(identity.cluster) && /^\d+$/.test(identity.oid)
+    && typeof identity.database === 'string' && identity.database.length > 0
+    && digest([identity.cluster, identity.database, identity.oid]) === authorization.databaseIdentitySha256)
+}
+
+// The opener (including importing pg) is unreachable until this independent gate passes.
+export async function authorizedConnection(config, databaseUrl, token, mode, authorization, scriptSha256, opener = connect) {
+  check(config.fingerprint === validateEnvironment(config, databaseUrl, authorization, mode, scriptSha256))
+  return opener(config, databaseUrl, token, mode !== 'dry-run', authorization)
+}
+
+export function bindInstalledTarget(config, validatorSource, authorization) {
+  check(typeof validatorSource === 'string' && sha256(validatorSource) === authorization.feedbackValidatorSha256)
+  const patterns = [
+    /WHERE\s+o\.bucket_id\s*=\s*'((?:[^']|'')*)'\s+AND\s+o\.name\s*=\s*object_path\s+FOR\s+KEY\s+SHARE\s*;/g,
+    /evidence_blob\s*:=\s*chat\.file_blob_for_object\(\s*'((?:[^']|'')*)'\s*,\s*object_path\s*\)\s*;/g,
+    /WHERE\s+b\.bucket_id\s*=\s*'((?:[^']|'')*)'\s+AND\s+b\.object_name\s*=\s*object_path\s*;/g
+  ]
+  const targets = patterns.map(pattern => {
+    const found = [...validatorSource.matchAll(pattern)]; check(found.length === 1)
+    return found[0][1].replaceAll("''", "'")
+  })
+  check(targets[0] && targets.every(value => value === targets[0]) && config.targetBucket === targets[0])
+  return targets[0]
+}
+
 export const targetName = object => `${object.owner}/feedback/${object.id}`
 const objectIdentity = object => digest([object.id, object.bucket_id, object.name, object.version, object.updated_at, object.metadata])
 const rowIdentity = row => digest([row.user_id, row.screenshot_urls, row.screenshot_paths])
@@ -36,6 +101,7 @@ export function sourceName(address, publicRoot, owner) {
 
 /** Metadata only: no GET, HEAD, upload, row update, or checkpoint is performed. */
 export async function inventory(io, config, scriptSha256) {
+  await io.assertTargetContract()
   const state = { schema: 1, run: randomUUID(), scriptSha256, environment: config.fingerprint,
     rows: [], objects: [], failures: [] }
   let number = 0
@@ -82,6 +148,7 @@ async function rowChecked(io, state, expected) {
 
 /** Save the content digest before an upload. An existing destination is never overwritten. */
 export async function migrate(io, state, save) {
+  await io.assertTargetContract()
   check(state.failures.length === 0 && state.objects.every(object => !object.deletion))
   const failures = []
   for (const object of state.objects) {
@@ -102,7 +169,7 @@ export async function migrate(io, state, save) {
   }
   // A row changes atomically only after ALL objects for the entire run verified.
   if (!failures.length) for (const row of state.rows) {
-    try { await io.replaceRow(row, mapping(state, row)); await rowChecked(io, state, row) }
+    try { await io.assertTargetContract(); await io.replaceRow(row, mapping(state, row)); await rowChecked(io, state, row) }
     catch { failures.push(row.number) }
   }
   state.failures = failures
@@ -112,6 +179,7 @@ export async function migrate(io, state, save) {
 
 /** This is a separate invocation, after migration. The immutable receipt contains no addresses. */
 export async function readback(io, state) {
+  await io.assertTargetContract()
   const failures = []
   let verifiedObjects = 0, verifiedBytes = 0, sourceObjects = 0, sourceBytes = 0,
     alreadyDeletedObjects = 0, alreadyDeletedBytes = 0
@@ -122,6 +190,7 @@ export async function readback(io, state) {
       if (source) {
         check(object.deletion !== 'done' && objectIdentity(source) === object.identity)
         await readChecked(io, object, { source })
+        await io.assertTargetContract()
         sourceObjects++; sourceBytes += object.bytes
       } else {
         check(['intent', 'done'].includes(object.deletion) && !await io.sourceByName(object.sourceName)
@@ -135,6 +204,7 @@ export async function readback(io, state) {
   for (const row of state.rows) {
     try { await rowChecked(io, state, row) } catch { failures.push(row.number) }
   }
+  await io.assertTargetContract()
   check((await io.legacyRows()).length === 0)
   return { schema: 1, run: state.run, scriptSha256: state.scriptSha256, stateSha256: stateIdentity(state),
     maintenanceSha256: io.maintenanceSha256, ...totals(state), verifiedObjects, verifiedBytes,
@@ -164,6 +234,7 @@ export function validateApproval(state, report, approval, scriptSha256) {
 /** Caller supplies an externally established, drained maintenance window, NOT a DB lock fence. */
 export async function deleteCopies(io, state, report, approval, scriptSha256, save) {
   validateApproval(state, report, approval, scriptSha256)
+  await io.assertTargetContract()
   check(io.maintenanceSha256 === report.maintenanceSha256)
   check((await io.legacyRows()).length === 0)
   for (const row of state.rows) await rowChecked(io, state, row)
@@ -180,11 +251,13 @@ export async function deleteCopies(io, state, report, approval, scriptSha256, sa
   const failures = []
   for (const object of state.objects) {
     try {
+      await io.assertTargetContract()
       await readChecked(io, object, { target: targetName(object) })
       const source = await io.sourceById(object.id)
       if (source) {
         check(object.deletion !== 'done' && objectIdentity(source) === object.identity && !await io.referenced(source))
         await readChecked(io, object, { source })
+        await io.assertTargetContract()
         // The durable intent distinguishes a crash after API deletion from an unexplained loss.
         object.deletion = 'intent'; await save(state)
         await io.remove(source)
@@ -246,7 +319,7 @@ export function parseArguments(args) {
 }
 
 // Runtime settings are deliberately supplied by private files/environment only.
-async function connect(config, databaseUrl, token, mutating) {
+async function connect(config, databaseUrl, token, mutating, authorization) {
   const { default: pg } = await import('pg')
   const db = new pg.Client({ connectionString: databaseUrl, application_name: 'legacy-evidence-migration',
     connectionTimeoutMillis: 10000, query_timeout: 60000 })
@@ -254,7 +327,20 @@ async function connect(config, databaseUrl, token, mutating) {
   db.on('error', () => {})
   await db.connect()
   const query = (sql, parameters = []) => db.query(sql, parameters)
+  async function installedTarget() {
+    const result = await query(`SELECT p.prosrc FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+      WHERE t.tgrelid='identity.feedback'::regclass AND t.tgname='validate_feedback_screenshots'
+        AND NOT t.tgisinternal AND t.tgenabled IN ('O','A')
+        AND t.tgfoid='identity.validate_feedback_screenshots()'::regprocedure`)
+    check(result.rows.length === 1)
+    return bindInstalledTarget(config, result.rows[0].prosrc, authorization)
+  }
+  let targetBucket
   try {
+    const identity = (await query(`SELECT system_identifier::text AS cluster, current_database() AS database,
+      (SELECT oid::text FROM pg_database WHERE datname=current_database()) AS oid FROM pg_control_system()`)).rows[0]
+    validateDatabaseIdentity(identity, authorization)
+    targetBucket = await installedTarget()
     await query("SET default_transaction_isolation='read committed'")
     check((await query("SELECT pg_try_advisory_lock(hashtextextended('gugu:legacy-evidence-migration',0)) AS ok")).rows[0].ok)
     if (mutating) check((await query("SELECT pg_try_advisory_lock(hashtextextended('gugu:file-transfer:quota',0)) AS ok")).rows[0].ok)
@@ -278,6 +364,7 @@ async function connect(config, databaseUrl, token, mutating) {
   const encoded = name => name.split('/').map(encodeURIComponent).join('/')
   return {
     close: () => db.end(),
+    assertTargetContract: async () => { check(await installedTarget() === targetBucket) },
     maintenanceSha256: digest(config.maintenanceId),
     legacyRows: async () => (await query('SELECT id,user_id,screenshot_urls,screenshot_paths FROM identity.feedback WHERE cardinality(screenshot_urls)>0 ORDER BY id')).rows,
     sourceByName: async name => (await query(`SELECT ${objects} FROM storage.objects WHERE bucket_id=$1 AND name=$2`, [config.sourceBucket, name])).rows[0],
@@ -291,9 +378,10 @@ async function connect(config, databaseUrl, token, mutating) {
       return missingResponse(response.status, JSON.parse(Buffer.concat(chunks).toString('utf8')))
     },
     row: async id => (await query('SELECT user_id,screenshot_urls,screenshot_paths FROM identity.feedback WHERE id=$1', [id])).rows[0],
-    targetExists: async name => (await query('SELECT 1 FROM storage.objects WHERE bucket_id=$1 AND name=$2', [config.targetBucket, name])).rowCount === 1,
+    targetExists: async name => (await query('SELECT 1 FROM storage.objects WHERE bucket_id=$1 AND name=$2', [targetBucket, name])).rowCount === 1,
     read: async (location, limit) => {
-      const bucket = location.source ? config.sourceBucket : config.targetBucket
+      if (!location.source) check(await installedTarget() === targetBucket)
+      const bucket = location.source ? config.sourceBucket : targetBucket
       const name = location.source ? location.source.name : location.target
       const response = await request(`/object/authenticated/${encodeURIComponent(bucket)}/${encoded(name)}`)
       const chunks = []; let size = 0
@@ -301,8 +389,9 @@ async function connect(config, databaseUrl, token, mutating) {
       return Buffer.concat(chunks)
     },
     upload: async (name, bytes, type) => {
+      check(await installedTarget() === targetBucket)
       check(typeof type === 'string' && /^image\/[A-Za-z0-9.+-]+$/.test(type))
-      const response = await request(`/object/${encodeURIComponent(config.targetBucket)}/${encoded(name)}`, 'POST', bytes, type)
+      const response = await request(`/object/${encodeURIComponent(targetBucket)}/${encoded(name)}`, 'POST', bytes, type)
       await response.body?.cancel()
     },
     replaceRow: async (expected, targets) => {
@@ -331,19 +420,14 @@ async function connect(config, databaseUrl, token, mutating) {
 async function main() {
   const { mode, options } = parseArguments(process.argv.slice(2))
   const scriptSha256 = sha256(await readFile(fileURLToPath(import.meta.url)))
-  const config = await load(process.env.GUGU_LEGACY_CONFIG || '')
+  const configFile = process.env.GUGU_LEGACY_CONFIG || '', authorizationFile = process.env.GUGU_LEGACY_ENV_AUTH || ''
+  const config = await load(configFile), authorization = await load(authorizationFile)
+  check(await realpath(configFile) !== await realpath(authorizationFile))
+  const configurationStat = await lstat(configFile), authorizationStat = await lstat(authorizationFile)
+  check(configurationStat.dev !== authorizationStat.dev || configurationStat.ino !== authorizationStat.ino)
   const databaseUrl = process.env.GUGU_LEGACY_DATABASE_URL, token = process.env.GUGU_LEGACY_STORAGE_KEY
-  check(databaseUrl && token && config.sourceBucket && config.targetBucket && config.sourceBucket !== config.targetBucket)
-  check(integer(config.maxBytes) && config.maxBytes > 0 && config.maxBytes <= 5242880)
-  for (const value of [config.storageRoot, config.publicRoot]) {
-    const url = new URL(value)
-    check(!url.username && !url.password && !url.search && !url.hash
-      && (url.protocol === 'https:' || url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))
-  }
-  check(!config.storageRoot.endsWith('/') && config.publicRoot.endsWith('/'))
-  const database = new URL(databaseUrl)
-  config.fingerprint = digest([database.hostname, database.port, database.pathname,
-    config.storageRoot, config.publicRoot, config.sourceBucket, config.targetBucket, config.maxBytes])
+  check(databaseUrl && token)
+  config.fingerprint = validateEnvironment(config, databaseUrl, authorization, mode, scriptSha256)
   const stateFile = options['--state']
   if (mode !== 'dry-run') check(config.maintenanceWindow === true
     && typeof config.maintenanceId === 'string' && config.maintenanceId.trim().length > 0)
@@ -365,7 +449,7 @@ async function main() {
       validateApproval(state, report, approval, scriptSha256)
       check(report.maintenanceSha256 === digest(config.maintenanceId))
     }
-    io = await connect(config, databaseUrl, token, mode !== 'dry-run')
+    io = await authorizedConnection(config, databaseUrl, token, mode, authorization, scriptSha256)
     const persist = value => save(stateFile, value)
     if (mode === 'dry-run') {
       const result = await inventory(io, config, scriptSha256)

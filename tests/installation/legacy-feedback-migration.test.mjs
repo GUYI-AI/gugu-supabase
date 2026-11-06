@@ -3,14 +3,20 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { inventory, migrate, readback, deleteCopies, validateApproval, parseArguments,
-  sourceName, targetName, sha256, digest, missingResponse } from '../../scripts/migrate-legacy-feedback.mjs'
+  sourceName, targetName, sha256, digest, missingResponse, bindInstalledTarget,
+  environmentFingerprint, validateEnvironment, authorizedConnection, validateDatabaseIdentity } from '../../scripts/migrate-legacy-feedback.mjs'
 
 const scriptSha = sha256('fixed fixture script')
 const copy = value => structuredClone(value)
+const validatorSource = target => `WHERE o.bucket_id = '${target}' AND o.name = object_path FOR KEY SHARE;
+evidence_blob := chat.file_blob_for_object('${target}', object_path);
+WHERE b.bucket_id = '${target}' AND b.object_name = object_path;`
 function fixture() {
   const owner = randomUUID(), sourceBucket = randomUUID(), targetBucket = randomUUID()
   const publicRoot = ['https:', '', 'fixture.invalid', randomUUID(), ''].join('/')
   const config = { sourceBucket, targetBucket, publicRoot, maxBytes: 5242880, fingerprint: digest(randomUUID()) }
+  const installedValidator = validatorSource(targetBucket)
+  const targetAuthorization = { feedbackValidatorSha256: sha256(installedValidator) }
   const source = { id: randomUUID(), bucket_id: sourceBucket, name: `${owner}/feedback/evidence`,
     version: randomUUID(), updated_at: 'stable', metadata: { size: 4, mimetype: 'image/png' } }
   const row = { id: randomUUID(), user_id: owner, screenshot_urls: [publicRoot + source.name], screenshot_paths: [] }
@@ -18,6 +24,7 @@ function fixture() {
   const calls = { reads: 0, uploads: 0, updates: 0, removes: 0 }
   let referenced = false, failUpdate = false
   const io = {
+    assertTargetContract: async () => { bindInstalledTarget(config, installedValidator, targetAuthorization) },
     maintenanceSha256: digest('scoped drained fixture window'),
     legacyRows: async () => [...rows.values()].filter(item => item.screenshot_urls.length).sort((a,b) => a.id.localeCompare(b.id)).map(copy),
     sourceByName: async name => copy([...sources.values()].find(item => item.name === name)),
@@ -70,6 +77,91 @@ test('dry-run is the default and deletion requires every explicit gate', () => {
     ['delete', '--state', 's', '--report', 'r', '--approval', 'a', '--execute-delete', '--execute-delete']]) {
     assert.throws(() => parseArguments(args))
   }
+})
+
+test('a different private target cannot validate another store and authorize deletion of reader evidence', async () => {
+  const f = await prepared(), name = targetName(f.state.objects[0])
+  // The configured store has correct bytes, while the backend reader's same-name object is corrupt.
+  const readerObjects = new Map([[name, Buffer.from('evil')]])
+  assert.notEqual(sha256(readerObjects.get(name)), f.state.objects[0].hash)
+  assert.equal(sha256(f.targets.get(name)), f.state.objects[0].hash)
+  f.config.targetBucket = randomUUID()
+  const readsBefore = f.calls.reads
+  await assert.rejects(readback(f.io, f.state))
+  await assert.rejects(deleteCopies(f.io, f.state, f.report, f.approval, scriptSha, f.save))
+  assert.equal(f.calls.reads, readsBefore); assert.equal(f.calls.removes, 0); assert.equal(f.sources.size, 1)
+})
+
+test('target binding refuses wrong configuration, unapproved validator code, and ambiguous target semantics', () => {
+  const config = { targetBucket: randomUUID() }, source = validatorSource(config.targetBucket)
+  const authorization = { feedbackValidatorSha256: sha256(source) }
+  assert.equal(bindInstalledTarget(config, source, authorization), config.targetBucket)
+  assert.throws(() => bindInstalledTarget({ targetBucket: randomUUID() }, source, authorization))
+  assert.throws(() => bindInstalledTarget(config, source + '\nchanged', authorization))
+  const ambiguous = source + '\n' + source
+  assert.throws(() => bindInstalledTarget(config, ambiguous, { feedbackValidatorSha256: sha256(ambiguous) }))
+  const divergent = source.replace('file_blob_for_object(\'' + config.targetBucket, 'file_blob_for_object(\'' + randomUUID())
+  assert.throws(() => bindInstalledTarget(config, divergent, { feedbackValidatorSha256: sha256(divergent) }))
+})
+
+function environmentFixture(environment = 'staging') {
+  const { config } = fixture()
+  config.environment = environment; config.installationId = randomUUID()
+  config.storageRoot = ['https:', '', randomUUID() + '.invalid', 'storage'].join('/')
+  const databaseUrl = ['postgresql:', '', 'operator:fixture@' + randomUUID() + '.invalid:5432', 'fixture'].join('/')
+  config.fingerprint = environmentFingerprint(config, databaseUrl)
+  const authorization = { schema: 1, kind: 'gugu-legacy-environment-authorization', environment, installationId: config.installationId,
+    fingerprint: config.fingerprint, scriptSha256: scriptSha, databaseIdentitySha256: sha256('fixture database'),
+    feedbackValidatorSha256: sha256(validatorSource(config.targetBucket)), approvedBy: 'independent fixture operator',
+    modes: ['dry-run', 'migrate', 'report', 'delete'] }
+  return { config, databaseUrl, authorization }
+}
+
+test('every mode denies missing or mismatched environment approval before opening any connection', async () => {
+  const f = environmentFixture(), opens = [], opener = async () => { opens.push(true); return {} }
+  const rejected = [null, { ...f.authorization, fingerprint: sha256('different endpoint') },
+    { ...f.authorization, installationId: randomUUID() }, { ...f.authorization, environment: 'local' },
+    { ...f.authorization, scriptSha256: sha256('different script') }, { ...f.authorization, approvedBy: '' },
+    { ...f.authorization, databaseIdentitySha256: '' }, { ...f.authorization, modes: [] }]
+  for (const mode of f.authorization.modes) for (const authorization of rejected) {
+    await assert.rejects(authorizedConnection(f.config, f.databaseUrl, 'fixture', mode, authorization, scriptSha, opener))
+  }
+  assert.equal(opens.length, 0)
+  await authorizedConnection(f.config, f.databaseUrl, 'fixture', 'dry-run', f.authorization, scriptSha, opener)
+  assert.equal(opens.length, 1)
+})
+
+test('production HTTPS and credentials never connect without an explicit independent production grant', async () => {
+  const f = environmentFixture('production'), opens = [], opener = async () => { opens.push(true); return {} }
+  for (const mode of f.authorization.modes) {
+    await assert.rejects(authorizedConnection(f.config, f.databaseUrl, 'fixture', mode, f.authorization, scriptSha, opener))
+  }
+  assert.equal(opens.length, 0)
+  const authorization = { ...f.authorization, productionApproved: true, modes: ['dry-run'] }
+  await authorizedConnection(f.config, f.databaseUrl, 'fixture', 'dry-run', authorization, scriptSha, opener)
+  await assert.rejects(authorizedConnection(f.config, f.databaseUrl, 'fixture', 'delete', authorization, scriptSha, opener))
+  assert.equal(opens.length, 1)
+})
+
+test('a runtime endpoint or libpq override cannot reuse an approved environment fingerprint', async () => {
+  const f = environmentFixture(), opens = [], opener = async () => { opens.push(true); return {} }
+  const changed = new URL(f.databaseUrl); changed.hostname = randomUUID() + '.invalid'
+  for (const url of [changed.href, f.databaseUrl + '?host=other', f.databaseUrl + '?options=other',
+    f.databaseUrl + '?sslmode=require&host=other']) {
+    await assert.rejects(authorizedConnection(f.config, url, 'fixture', 'dry-run', f.authorization, scriptSha, opener))
+  }
+  const changedConfig = { ...f.config, storageRoot: f.config.storageRoot + '/other' }
+  await assert.rejects(authorizedConnection(changedConfig, f.databaseUrl, 'fixture', 'dry-run', f.authorization, scriptSha, opener))
+  assert.equal(opens.length, 0)
+  assert.equal(validateEnvironment(f.config, f.databaseUrl, f.authorization, 'dry-run', scriptSha), f.config.fingerprint)
+})
+
+test('the first database identity read must match the independently approved installation', () => {
+  const identity = { cluster: '123456', database: 'fixture', oid: '16384' }
+  const authorization = { databaseIdentitySha256: digest([identity.cluster, identity.database, identity.oid]) }
+  validateDatabaseIdentity(identity, authorization)
+  for (const changed of [{ ...identity, cluster: '654321' }, { ...identity, database: 'other' },
+    { ...identity, oid: '16385' }, {}]) assert.throws(() => validateDatabaseIdentity(changed, authorization))
 })
 
 test('CLI refusal never loads runtime credentials or opens a connection', () => {

@@ -50,6 +50,7 @@ PRs, chat, shell arguments, or test logs.
 Set these environment variables privately, without enabling shell tracing:
 
 - `GUGU_LEGACY_CONFIG`: absolute path of a private JSON configuration file.
+- `GUGU_LEGACY_ENV_AUTH`: absolute path of an independently human-approved environment authorization.
 - `GUGU_LEGACY_DATABASE_URL`: administrative database connection for the authorized installation.
 - `GUGU_LEGACY_STORAGE_KEY`: the matching installation's server Storage credential.
 
@@ -57,18 +58,68 @@ The configuration has these keys; this guide deliberately supplies no deployment
 
 | Key | Meaning |
 | --- | --- |
+| `environment` | Explicit `local`, `staging`, or `production` classification, matched against the independent grant |
+| `installationId` | Opaque UUID from the approved installation inventory, matched against the independent grant |
 | `sourceBucket` | Explicit legacy source storage identifier; must currently be public |
-| `targetBucket` | Explicit destination storage identifier; must currently be private and different |
+| `targetBucket` | Must equal the installed feedback validator's actual reference target, which must be private and different |
 | `publicRoot` | Exact historical public object root, including its storage identifier and trailing slash |
 | `storageRoot` | Direct Storage API root for this installation, without a trailing slash |
 | `maxBytes` | Positive integer at most 5242880, matching the installed destination limit |
 | `maintenanceWindow` | Explicit operator assertion `true`, required for every non-statistical mode |
 | `maintenanceId` | Opaque identifier for the approved, continuously enforced maintenance window |
 
+Every mode, including the default statistics mode, requires a separate environment grant
+**before importing the database driver or opening any database/Storage connection**. The grant
+must be a distinct private regular file, not the configuration file, a symlink, a hard link to
+that configuration, or a command-line flag. The runtime configuration and maintenance assertion
+alone never authorize an environment. Missing grants, wrong identifiers/fingerprints, wrong
+script hashes, and unapproved modes are refused before connecting.
+
+The independently provisioned environment authorization contains these fields:
+
+| Field | Required value or meaning |
+| --- | --- |
+| `schema` | `1` |
+| `kind` | `gugu-legacy-environment-authorization` |
+| `environment`, `installationId` | The independently approved environment classification and inventory UUID |
+| `fingerprint` | Independently approved exact runtime mapping digest produced by `environmentFingerprint(config, databaseUrl)` |
+| `scriptSha256` | Human-approved SHA-256 of this complete script file |
+| `databaseIdentitySha256` | Digest of the approved database cluster system identifier, database name, and database OID, in that order as strings |
+| `feedbackValidatorSha256` | SHA-256 of the exact approved installed validator function body (`pg_proc.prosrc`) |
+| `modes` | Explicit approved subset of `dry-run`, `migrate`, `report`, `delete` |
+| `approvedBy` | Human environment approver identifier |
+| `productionApproved` | Must explicitly be `true` for any production connection, including statistics; otherwise production is refused |
+
+The human environment approver must obtain the classification, installation identity,
+database identity, endpoints and validator hash from independently authorized installation
+records and approved backend source. Do not infer staging from an HTTPS endpoint, let this
+tool discover an unapproved endpoint, or generate an approval from untrusted runtime settings.
+These fields describe an external human grant; the script does not issue one or authenticate
+a human signature. Its enforcement binds the supplied grant to the exact connection mapping
+and operation. The environment grant does not replace the later numeric deletion approval.
+
+The mapping digest covers the environment classification, installation UUID, explicit database
+host/port/name/user, permitted TLS option, both API roots, both storage identifiers, and size
+limit. Database URL query parameters that could override host, port, user, database or options
+are rejected; only a single supported `sslmode` is accepted. Passwords are excluded from the
+digest. After the authorized connection, the first query compares the approved database identity
+with `pg_control_system()` and the current database name/OID, before any inventory or Storage
+operation. The administrative connection must have permission to read that identity; absence
+of that permission fails closed, with no weaker fallback.
+
+The active feedback trigger must call the approved validator function. Its exact installed
+body must match the independently approved hash. The script resolves the reference target
+from the validator's object lookup, blob registration, and fallback lookup, requires all three
+to agree, and rejects any configured destination mismatch. Every destination existence check,
+upload and read uses that bound target. Readback and deletion recheck the active contract,
+including immediately before removal; a correct copy in some other private store cannot
+authorize deletion when the reader's actual object is corrupt. Unknown or changed validator
+semantics require review and a new grant, not a guessed destination.
+
 Remote API roots require HTTPS. The database and Storage credentials must belong to the same
-installation; their correspondence is an operator prerequisite, not something an HTTP status
-alone proves. A fingerprint binds the journal to the configured database location and Storage
-mapping. There are no default installations, endpoints, storage identifiers, or credentials.
+installation; their correspondence remains an operator prerequisite, not something an HTTP
+status alone proves. A fingerprint binds the journal to the approved mapping. There are no
+default installations, endpoints, storage identifiers, credentials, or environment approvals.
 
 The private journal contains row/object IDs, source names, expected metadata/row digests,
 content lengths and hashes, and deletion progress. It contains no image bytes, credentials,
@@ -82,7 +133,8 @@ failure, change its inventory, or mark missing sources as deleted.
 A human assertion is a prerequisite, not an automatically verified fence. Before `migrate`,
 keep the inventory's source/destination objects and relevant feedback stable. Before `report`
 and throughout approval and `delete`, freeze operations that can reference, overwrite or
-remove these objects, related account erasure, and parallel migration/cleanup. Stop relevant
+remove these objects, related account erasure, and parallel migration/cleanup. Keep the deployed
+feedback validator and reader storage mapping unchanged during this window. Stop relevant
 collector scheduling and wait for already claimed workers and in-flight HTTP requests to
 finish. Freeze only the affected scope when its completeness can be established; otherwise
 do not proceed. Read-only feedback/support access may continue.
@@ -214,7 +266,8 @@ node --test tests/installation/legacy-feedback-migration.test.mjs
 The tests use synthetic bytes, generated identifiers and in-memory database/Storage doubles.
 They exercise metadata-only inventory, parser gates, wrong approvals, conflicting targets,
 compare-and-swap failures, restart without repeated uploads, readback corruption, remaining
-references, and a crash after remote deletion. They are not real Storage/database integration
+references, a crash after remote deletion, the wrong-private-target/reader-corruption counterexample,
+and refusal of unauthorized or mismatched environments before any connection. They are not real Storage/database integration
 evidence. The release owner must separately arrange a disposable owned-fixture rehearsal of
 copying, trigger registration, HTTP removal, maintenance isolation, interruption recovery and
 the authorized owner/support reader paths before approving any real data operation.
