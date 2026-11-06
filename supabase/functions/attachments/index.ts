@@ -156,7 +156,7 @@ Deno.serve(async (request) => {
       if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY'))) {
         return json({ error: 'denied', message: 'gc is the server\'s own job' }, 401)
       }
-      const result = await handleGc(deps)
+      const result = await handleGc(deps, 'kick')
       // OSS expires abandoned staging uploads with its own lifecycle rule; only the Supabase bucket needs this sweep.
       if (storage.kind === 'oss') return json({ ...result, staging_deleted: 0 })
       const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })

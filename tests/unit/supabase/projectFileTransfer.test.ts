@@ -49,6 +49,8 @@ describe('temporary file HTTP protocol',()=>{
     expect(f.objects.remove).toHaveBeenCalledWith('temporary/old')
     expect(f.objects.invalidate).not.toHaveBeenCalled()
     expect(order.indexOf('file_blob_gc_finish')).toBeLessThan(order.indexOf('file_temporary_accept'))
+    expect(f.deps.log).toHaveBeenCalledExactlyOnceWith('gc_result', { entry: 'file-accept',
+      at: '2026-10-24T00:00:00.000Z', day: '2026-10-24', claimed: 1, deleted: 1, finished: 1, failed: 0, outcome: 'completed' })
   })
   it('refuses modified ciphertext and malformed key material before publication',async()=>{
     const f=fixture(),body={transfer_id:transfer,ciphertext_bytes:128,ciphertext_sha256:sha,key}
