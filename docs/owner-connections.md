@@ -1,7 +1,8 @@
 # Owner connection primitives
 
-These primitives require the preparation release in #209. They remain closed to
-all API roles: this release does not activate a second writer, replace legacy
+These primitives require the preparation release in #209. Application and mutation
+RPCs remain closed to all API roles; only the explicit routing reader is granted
+to authenticated owners. This release does not activate a second writer, replace legacy
 RPCs, select a minimum client version, or shut down old writes. Readiness and
 canonical mapping of prepared legacy rows must be verified before a separate
 authority transition can grant access. Do not run preparation again after native
@@ -76,7 +77,17 @@ and receipts intact. Legacy functions, tables and grants remain unchanged.
 After activation, do not restore legacy authority until original receipts and
 revocations have been reconciled; this release does not authorize that transition.
 
-The installation fixture exercises fifteen groups in a transaction that rolls back
+`connection_authority()` returns persisted mode/epoch/phase and intake eligibility
+without initializing a head. Its default is explicitly legacy/0/stable, and it
+must be installed before the first new-location client. An unavailable reader is
+an error, not legacy discovery. The closed internal
+`connection_authority_fence(text,bigint)` holds the authority advisory lock and
+head row lock for its surrounding transaction, rejects stale epochs/quiescence,
+and never grants operation admission. The actual write/effect entry-point wiring,
+legacy HTTP drain and epoch-based transition writer remain activation blockers;
+a mode read or API grant alone cannot supply that atomic transition.
+
+The installation fixture exercises eighteen groups in transactions that roll back
 its users and temporary API grants. The real production roles stay closed.
 Owner RPC/RLS and the separate official credential-deletion wrapper require
 non-author review before use.
