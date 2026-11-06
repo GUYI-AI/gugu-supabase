@@ -2,6 +2,7 @@
 -- approved activation release fences old writes. No legacy RPC is modified.
 ALTER TABLE identity.connection_heads ADD COLUMN publishers jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (jsonb_typeof(publishers) = 'object');
+ALTER TABLE identity.connection_heads ADD COLUMN native_initialized_at timestamptz;
 
 CREATE TABLE identity.connection_recreation_intents (
     recreation_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -27,6 +28,7 @@ CREATE TABLE identity.connection_admissions (
     device_id text,
     runtime_instance_id text,
     operation_revision bigint NOT NULL,
+    admitted_head_revision bigint NOT NULL,
     request_hash text NOT NULL,
     status text NOT NULL DEFAULT 'started' CHECK (status IN ('started','applied','failed')),
     error_code text,
@@ -79,8 +81,10 @@ BEGIN
         OR EXISTS (SELECT 1 FROM identity.assistant_panel_changes WHERE owner_user_id = p_owner AND domain = 'integrations'
             AND source = 'panel' AND status IN ('pending','failed'))
     ) THEN RAISE EXCEPTION 'Connection migration is not prepared' USING ERRCODE = '55000'; END IF;
-    INSERT INTO identity.connection_heads(owner_user_id) VALUES(p_owner) ON CONFLICT DO NOTHING;
+    INSERT INTO identity.connection_heads(owner_user_id,native_initialized_at) VALUES(p_owner,clock_timestamp()) ON CONFLICT DO NOTHING;
     PERFORM 1 FROM identity.connection_heads WHERE owner_user_id = p_owner FOR UPDATE;
+    IF EXISTS (SELECT 1 FROM identity.connection_heads WHERE owner_user_id=p_owner AND native_initialized_at IS NULL) THEN
+        RAISE EXCEPTION 'Connection candidate has not completed authority handover' USING ERRCODE='55000'; END IF;
 END;
 $$;
 
@@ -128,12 +132,12 @@ $$;
 
 CREATE FUNCTION identity.connection_snapshot(p_device_id text DEFAULT NULL) RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
-DECLARE owner_id text := identity.connection_owner(); head_revision bigint; items jsonb; application jsonb; result jsonb; ready boolean;
+DECLARE owner_id text := identity.connection_owner(); head_revision bigint; items jsonb; application jsonb; result jsonb; initialized boolean;
 BEGIN
     PERFORM identity.connection_scope(owner_id,CASE WHEN p_device_id IS NULL THEN 'platform' ELSE 'device:' || p_device_id END,p_device_id);
-    SELECT revision INTO head_revision FROM identity.connection_heads WHERE owner_user_id = owner_id;
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('version',1,'state','not-ready','revision','0','items',NULL,'application',NULL);
+    SELECT revision,native_initialized_at IS NOT NULL INTO head_revision,initialized FROM identity.connection_heads WHERE owner_user_id = owner_id;
+    IF NOT FOUND OR NOT initialized THEN
+        RETURN jsonb_build_object('version',1,'state','not-ready','revision',COALESCE(head_revision,0)::text,'items',NULL,'application',NULL);
     END IF;
     IF (SELECT count(*) FROM identity.connection_items WHERE owner_user_id = owner_id) > 2000
         OR (SELECT count(*) FROM identity.connection_operations WHERE owner_user_id = owner_id AND status IN ('pending','failed')) > 2000 THEN
@@ -142,15 +146,10 @@ BEGIN
     SELECT COALESCE(jsonb_agg(identity.connection_item_projection(i) ORDER BY i.scope_key,i.resource_key),'[]'::jsonb)
       INTO items FROM identity.connection_items i WHERE i.owner_user_id = owner_id
         AND (p_device_id IS NULL OR i.scope_key = 'platform' OR i.scope_key = 'device:' || p_device_id);
-    SELECT COALESCE(bool_and(i.data->>'state' = 'ready'),false)
-      INTO ready FROM identity.connection_items i WHERE i.owner_user_id = owner_id
-        AND (i.resource_key = '__collection__' OR starts_with(i.resource_key,'__collection__:'))
-        AND i.deleted_at IS NULL AND i.stale_at IS NULL
-        AND (p_device_id IS NULL OR i.scope_key = 'platform' OR i.scope_key = 'device:' || p_device_id);
     SELECT COALESCE(jsonb_agg(identity.connection_operation_projection(c) ORDER BY c.revision),'[]'::jsonb)
       INTO application FROM identity.connection_operations c WHERE c.owner_user_id = owner_id AND c.status IN ('pending','failed')
         AND (p_device_id IS NULL OR c.device_id IS NULL OR c.device_id = p_device_id);
-    result := jsonb_build_object('version',1,'state',CASE WHEN ready THEN 'ready' ELSE 'not-ready' END,
+    result := jsonb_build_object('version',1,'state','ready',
         'revision',head_revision::text,'items',items,'application',application);
     IF octet_length(result::text) > 16777216 THEN RAISE EXCEPTION 'Connection snapshot exceeds the response limit' USING ERRCODE = '54000'; END IF;
     RETURN result;
@@ -161,7 +160,8 @@ CREATE FUNCTION identity.connection_resource(p_scope_key text,p_resource_key tex
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE owner_id text := identity.connection_owner(); head_revision bigint; item identity.connection_items%ROWTYPE;
 BEGIN
-    SELECT revision INTO head_revision FROM identity.connection_heads WHERE owner_user_id = owner_id;
+    SELECT revision INTO head_revision FROM identity.connection_heads WHERE owner_user_id = owner_id AND native_initialized_at IS NOT NULL;
+    IF NOT FOUND THEN RETURN jsonb_build_object('version',1,'state','not-ready','revision','0','item',NULL); END IF;
     SELECT * INTO item FROM identity.connection_items WHERE owner_user_id = owner_id AND scope_key = p_scope_key AND resource_key = p_resource_key;
     RETURN jsonb_build_object('version',1,'state',CASE WHEN head_revision IS NULL THEN 'not-ready' ELSE 'ready' END,
         'revision',COALESCE(head_revision,0)::text,'item',CASE WHEN item.owner_user_id IS NULL THEN NULL ELSE identity.connection_item_projection(item) END);
@@ -396,7 +396,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE owner_id text := identity.connection_owner(); device text; head_revision bigint; changes jsonb;
 BEGIN
     device := identity.connection_runtime(owner_id,p_runtime_instance_id);
-    SELECT revision INTO head_revision FROM identity.connection_heads WHERE owner_user_id=owner_id;
+    SELECT revision INTO head_revision FROM identity.connection_heads WHERE owner_user_id=owner_id AND native_initialized_at IS NOT NULL;
     IF NOT FOUND THEN RAISE EXCEPTION 'Connection account is not prepared' USING ERRCODE='55000'; END IF;
     IF (SELECT count(*) FROM identity.connection_operations WHERE owner_user_id=owner_id
         AND scope_key='device:' || device AND status IN ('pending','failed')) > 2000 THEN
@@ -462,7 +462,7 @@ BEGIN
         RETURN jsonb_build_object('admitted',false,'revision',current_revision::text,'operationId',p_operation,'reason','outcome-unknown');
     END IF;
     INSERT INTO identity.connection_admissions(operation_id,owner_user_id,executor_kind,device_id,runtime_instance_id,
-        operation_revision,request_hash) VALUES(p_operation,p_owner,p_kind,p_device,p_runtime,change.revision,change.request_hash)
+        operation_revision,admitted_head_revision,request_hash) VALUES(p_operation,p_owner,p_kind,p_device,p_runtime,change.revision,p_head,change.request_hash)
         RETURNING admission_id INTO admission;
     UPDATE identity.connection_operations SET last_admission_id=admission,status='pending',error_code=NULL WHERE operation_id=p_operation;
     RETURN jsonb_build_object('admitted',true,'revision',current_revision::text,'operationId',p_operation,

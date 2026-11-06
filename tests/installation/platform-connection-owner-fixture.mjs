@@ -180,4 +180,28 @@ export async function assertOwnerConnectionRuntime(db, test) {
     await db.query('UPDATE identity.runtime_instances SET last_heartbeat_at=clock_timestamp() WHERE instance_id=$1', [runtime])
     assert.equal((await admit(removed.operationId, await head())).admitted, true)
   })
+
+  await test('first platform authorization needs no host and prepared candidates never become ready from collection markers', async () => {
+    await db.query('DELETE FROM identity.runtime_instances WHERE owner_user_id=$1', [other])
+    await db.query('DELETE FROM identity.gugu_devices WHERE user_id=$1', [other])
+    const id = randomUUID()
+    const ticket = await rpc('connection_recreate_begin', '$1,$2,NULL,NULL,NULL,$3,$4', [id, 'platform', 'amap', '0'], other)
+    assert.equal((await rpc('connection_snapshot', 'NULL', [], other)).state, 'ready')
+    const data = { providerId: 'amap', accountId: 'default', configured: true }
+    const receipt = await rpc('connection_commit', '$1,$2,NULL,NULL,$3,$4,$5,NULL,NULL,$6',
+      [id, 'platform', 'save', data, JSON.stringify({ version: 1, ...data, configured: undefined }), ticket.recreationId], other)
+    assert.equal((await rpc('connection_snapshot', 'NULL', [], other)).items.length, 1)
+    await db.query('UPDATE identity.connection_heads SET native_initialized_at=NULL,prepared_at=clock_timestamp() WHERE owner_user_id=$1', [other])
+    const snapshot = await rpc('connection_snapshot', 'NULL', [], other)
+    assert.equal(snapshot.state, 'not-ready'); assert.equal(snapshot.items, null); assert.equal(snapshot.application, null)
+    assert.equal((await rpc('connection_resource', '$1,$2', ['platform', receipt.resourceKey], other)).item, null)
+    await reject(() => rpc('connection_recreate_begin', '$1,$2,$3,$4,NULL,NULL,NULL', [randomUUID(), 'platform', receipt.resourceKey, receipt.revision], other), '55000')
+  })
+
+  await test('owner deletion removes its new metadata and receipts without orphaning another account', async () => {
+    await db.query('DELETE FROM auth.users WHERE id=$1', [owner])
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM identity.connection_heads WHERE owner_user_id=$1', [owner])).rows[0].n,0)
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM identity.connection_admissions WHERE owner_user_id=$1', [owner])).rows[0].n,0)
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM identity.connection_heads WHERE owner_user_id=$1', [other])).rows[0].n,1)
+  })
 }

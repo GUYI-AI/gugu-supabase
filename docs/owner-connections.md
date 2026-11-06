@@ -12,6 +12,12 @@ All application RPCs derive the owner from `auth.uid()`. Scope is `platform` or
 metadata can be read offline, without an assistant, its home, or a private chat.
 Uninitialized snapshots return `not-ready` and null collections. Provider catalog
 presentation can come from the client registry while account state is unavailable.
+An explicit first authorization initializes a native head only after rejecting
+unprepared legacy accounts, revocations and queued effects. Platform publication
+then becomes ready without a native host or a renderer-created collection marker.
+Prepared candidates keep a null native initialization timestamp, return not-ready
+and reject writes until a separately approved handover. Collection markers cannot
+promote a candidate.
 
 The native API consists of snapshot/resource, commit, recreate_begin,
 commit_batch, pending, admit and ack. Use named arguments and decimal strings for
@@ -62,7 +68,7 @@ and receipts intact. Legacy functions, tables and grants remain unchanged.
 After activation, do not restore legacy authority until original receipts and
 revocations have been reconciled; this release does not authorize that transition.
 
-The installation fixture exercises nine groups in a transaction that rolls back
+The installation fixture exercises eleven groups in a transaction that rolls back
 its users and temporary API grants. The real production roles stay closed.
 Owner RPC/RLS and the separate official credential-deletion wrapper require
 non-author review before use.
