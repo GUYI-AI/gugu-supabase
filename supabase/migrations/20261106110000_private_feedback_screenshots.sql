@@ -2,9 +2,18 @@
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES ('feedback-screenshots', 'feedback-screenshots', false, 5242880, ARRAY['image/*']);
 
-ALTER TABLE identity.feedback
-    ADD COLUMN screenshot_paths text[] NOT NULL DEFAULT '{}',
-    ADD CONSTRAINT feedback_screenshot_paths_count CHECK (cardinality(screenshot_paths) <= 4);
+DO $constraints$
+DECLARE previous_lock_timeout text := current_setting('lock_timeout');
+BEGIN
+    PERFORM set_config('lock_timeout', '1s', true);
+    ALTER TABLE identity.feedback
+        ADD COLUMN screenshot_paths text[] NOT NULL DEFAULT '{}',
+        ADD CONSTRAINT feedback_screenshot_paths_count CHECK (cardinality(screenshot_paths) <= 4) NOT VALID;
+    ALTER TABLE chat.file_blobs DROP CONSTRAINT file_blobs_bucket_id_check;
+    ALTER TABLE chat.file_blobs ADD CONSTRAINT file_blobs_bucket_id_check
+        CHECK (bucket_id IN ('oss','temporary','workspace','avatars','chat-media','attachments','feedback-screenshots')) NOT VALID;
+    PERFORM set_config('lock_timeout', previous_lock_timeout, true);
+END $constraints$;
 GRANT INSERT (screenshot_paths) ON identity.feedback TO authenticated;
 
 CREATE FUNCTION identity.validate_feedback_screenshots() RETURNS trigger
@@ -60,10 +69,6 @@ CREATE POLICY feedback_legacy_upload_closed ON storage.objects AS RESTRICTIVE FO
 WITH CHECK (bucket_id <> 'chat-media' OR (storage.foldername(name))[2] IS DISTINCT FROM 'feedback');
 
 -- Keep retained evidence and abandoned uploads in the existing collection system.
-ALTER TABLE chat.file_blobs DROP CONSTRAINT file_blobs_bucket_id_check;
-ALTER TABLE chat.file_blobs ADD CONSTRAINT file_blobs_bucket_id_check
-    CHECK (bucket_id IN ('oss','temporary','workspace','avatars','chat-media','attachments','feedback-screenshots'));
-
 CREATE FUNCTION identity.feedback_screenshot_is_referenced(p_bucket text, p_name text) RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
     SELECT EXISTS (SELECT 1 FROM identity.feedback f WHERE

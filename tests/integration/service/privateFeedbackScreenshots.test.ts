@@ -46,6 +46,10 @@ describe('private feedback evidence', () => {
     const { rows } = await db.query("SELECT id,public,file_size_limit::int FROM storage.buckets WHERE id=ANY($1) ORDER BY id", [['chat-media',bucket]])
     expect(rows).toEqual([{id:'chat-media',public:true,file_size_limit:10485760},{id:bucket,public:false,file_size_limit:5242880}])
   })
+  it('validates the new constraints after the schema transaction', async () => {
+    const { rows }=await db.query("SELECT convalidated FROM pg_constraint WHERE conname=ANY($1)", [['feedback_screenshot_paths_count','file_blobs_bucket_id_check']])
+    expect(rows).toHaveLength(2); expect(rows.every((r: {convalidated:boolean})=>r.convalidated)).toBe(true)
+  })
   it('permits only the owner to upload and select; rejects anonymous and another user', async () => {
     const path=`${alice}/a.png`
     await role(alice); await object(path)
