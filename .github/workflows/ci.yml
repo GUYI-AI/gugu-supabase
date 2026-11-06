@@ -7,10 +7,96 @@ on:
 permissions:
   contents: read
 jobs:
+  migration-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      enforced: ${{ steps.source.outputs.enforced }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Locate the migration check in the trusted source
+        id: source
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          set -eu
+          script=trusted/scripts/ci/migration-versions.mjs
+          allowlist=trusted/scripts/ci/migration-version-allowlist.json
+          if test -f "$script" && test -f "$allowlist"; then
+            echo 'enforced=true' >> "$GITHUB_OUTPUT"
+          elif test ! -e "$script" && test ! -e "$allowlist"; then
+            if test "$GITHUB_EVENT_NAME" = pull_request; then
+              latest=$(git -C trusted rev-parse --verify "refs/remotes/origin/$BASE_BRANCH^{commit}")
+              if git -C trusted cat-file -e "$latest:scripts/ci/migration-versions.mjs" 2>/dev/null || git -C trusted cat-file -e "$latest:scripts/ci/migration-version-allowlist.json" 2>/dev/null; then
+                echo '::error::The target branch now has the checker. Synchronize this PR to obtain a current base event.'
+                exit 1
+              fi
+            fi
+            echo 'enforced=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::Migration versions not enforced: the base has no checker yet. Independent review is required for bootstrap.'
+          else
+            echo '::error::Incomplete migration checker in trusted source.'
+            exit 1
+          fi
+  migration-versions:
+    needs: migration-source
+    if: needs.migration-source.outputs.enforced == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    defaults:
+      run:
+        working-directory: trusted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: trusted/.node-version
+      - name: Check PR migration versions against branches and open PRs
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/ci/migration-versions.mjs --pull-request
+      - name: Check migration versions in the complete committed tree
+        if: github.event_name != 'pull_request'
+        env:
+          TREE_SHA: ${{ github.sha }}
+        run: node scripts/ci/migration-versions.mjs --tree "$TREE_SHA"
   unit:
+    needs: [migration-source, migration-versions]
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
+      - name: Require the migration version check to pass
+        env:
+          MIGRATION_SOURCE_RESULT: ${{ needs.migration-source.result }}
+          MIGRATION_ENFORCED: ${{ needs.migration-source.outputs.enforced }}
+          MIGRATION_CHECK_RESULT: ${{ needs.migration-versions.result }}
+        run: |
+          set -eu
+          test "$MIGRATION_SOURCE_RESULT" = success
+          if test "$MIGRATION_ENFORCED" = true; then
+            test "$MIGRATION_CHECK_RESULT" = success
+          else
+            test "$MIGRATION_ENFORCED" = false
+            test "$MIGRATION_CHECK_RESULT" = skipped
+            echo '::notice::Migration versions not enforced during bootstrap; this is not a successful collision check.'
+          fi
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
@@ -18,6 +104,8 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Test candidate migration checker offline
+        run: node --test tests/ci/migration-versions.test.mjs
       - run: pnpm test
       - uses: denoland/setup-deno@v2
         with:

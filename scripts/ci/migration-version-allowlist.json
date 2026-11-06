@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "issue": 91,
+  "duplicates": {
+    "20261027120000": [
+      "supabase/migrations/20261027120000_document_import_panel_bodies.sql",
+      "supabase/migrations/20261027120000_message_agent_wakes_readable.sql"
+    ],
+    "20261028010000": [
+      "supabase/migrations/20261028010000_assistant_work_reopen_finished.sql",
+      "supabase/migrations/20261028010000_file_storage_classes.sql"
+    ],
+    "20261028070000": [
+      "supabase/migrations/20261028070000_file_device_publish_agent_sender.sql",
+      "supabase/migrations/20261028070000_local_file_rename_carries_revision.sql"
+    ],
+    "20261029050000": [
+      "supabase/migrations/20261029050000_offline_project_removal.sql",
+      "supabase/migrations/20261029050000_task_agent_name_serial.sql"
+    ],
+    "20261029213000": [
+      "supabase/migrations/20261029213000_file_urls_visibility_per_ref.sql",
+      "supabase/migrations/20261029213000_inbox_and_preview_read_cost.sql"
+    ]
+  }
+}
