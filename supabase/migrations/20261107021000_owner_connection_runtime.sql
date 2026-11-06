@@ -195,6 +195,10 @@ BEGIN
             RAISE EXCEPTION 'Connection operation identity was reused' USING ERRCODE = 'PT409';
         END IF;
     ELSE
+        IF EXISTS (SELECT 1 FROM identity.connection_operation_identities WHERE operation_id=p_operation_id)
+            OR EXISTS (SELECT 1 FROM identity.connection_operations WHERE operation_id=p_operation_id)
+            OR EXISTS (SELECT 1 FROM identity.connection_batches WHERE operation_id=p_operation_id) THEN
+            RAISE EXCEPTION 'Connection operation identity was already consumed' USING ERRCODE='PT409'; END IF;
         INSERT INTO identity.connection_recreation_intents(operation_id,owner_user_id,scope_key,resource_key,expected_item_revision,device_id,provider_id,expected_head_revision)
           VALUES(p_operation_id,owner_id,p_scope_key,p_resource_key,p_expected_revision,p_device_id,p_provider_id,p_expected_head_revision) RETURNING * INTO intent;
     END IF;
@@ -233,7 +237,7 @@ DECLARE
     intent identity.connection_recreation_intents%ROWTYPE; candidate identity.connection_items%ROWTYPE;
     request_hash text; new_revision bigint; actor_device text; catalog boolean; marker boolean; matches integer := 0;
     document text; public_metadata jsonb; parsed jsonb; data jsonb := p_data; payload jsonb;
-    provider text; account text; key_identity jsonb; outcome text;
+    provider text; account text; key_identity jsonb; outcome text; owner_metadata_intent boolean := false;
 BEGIN
     PERFORM identity.connection_scope(owner_id,p_scope_key,p_device_id);
     IF p_operation_id IS NULL OR p_data IS NULL OR p_operation IS NULL
@@ -244,6 +248,7 @@ BEGIN
     request_hash := encode(sha256(convert_to(jsonb_build_array(owner_id,p_scope_key,p_resource_key,p_expected_revision,
         p_operation,p_data,p_document,p_device_id,p_runtime_instance_id IS NOT NULL,p_recreation_id)::text,'UTF8')),'hex');
     PERFORM identity.connection_owner_lock(owner_id);
+    PERFORM identity.connection_claim_operation(owner_id,p_operation_id,'single',request_hash);
     SELECT * INTO existing FROM identity.connection_operations WHERE operation_id = p_operation_id;
     IF FOUND THEN
         IF existing.owner_user_id <> owner_id THEN RAISE EXCEPTION 'Connection operation is unavailable' USING ERRCODE = '42501'; END IF;
@@ -296,7 +301,12 @@ BEGIN
     END IF;
     marker := target_key = '__collection__' OR starts_with(target_key,'__collection__:');
     catalog := starts_with(target_key,'catalog:');
-    IF p_recreation_id IS NULL AND p_operation='save' AND NOT marker AND NOT catalog
+    owner_metadata_intent := p_operation='save' AND p_scope_key<>'platform' AND p_runtime_instance_id IS NULL
+        AND p_document IS NULL AND p_recreation_id IS NULL AND prior.owner_user_id IS NOT NULL AND prior.deleted_at IS NULL
+        AND p_data->'isDefault'='true'::jsonb AND p_data->>'providerId'=prior.provider_id AND p_data->>'accountId'=prior.account_id
+        AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(p_data) k WHERE k NOT IN ('providerId','accountId','isDefault'));
+    owner_metadata_intent := COALESCE(owner_metadata_intent,false);
+    IF p_recreation_id IS NULL AND p_operation='save' AND NOT marker AND NOT catalog AND NOT owner_metadata_intent
         AND EXISTS (SELECT 1 FROM (SELECT consumed_at FROM identity.connection_recreation_intents
             WHERE owner_user_id=owner_id AND scope_key=p_scope_key AND provider_id=p_data->>'providerId'
             ORDER BY created_at DESC,recreation_id DESC LIMIT 1) latest WHERE consumed_at IS NULL) THEN
@@ -308,11 +318,12 @@ BEGIN
     IF marker IS DISTINCT FROM (p_operation IN ('prepared','error')) AND p_operation <> 'remove' THEN
         RAISE EXCEPTION 'Connection operation does not match its resource' USING ERRCODE = '22023';
     END IF;
-    IF p_scope_key <> 'platform' AND p_operation IN ('save','prepared','error') AND p_runtime_instance_id IS NULL THEN
+    IF p_scope_key <> 'platform' AND p_operation IN ('save','prepared','error') AND p_runtime_instance_id IS NULL AND NOT owner_metadata_intent THEN
         RAISE EXCEPTION 'Device connection publication requires its current runtime' USING ERRCODE = '42501';
     END IF;
     IF p_operation IN ('save','prepared','error') THEN
-        PERFORM identity.assistant_panel_validate('integrations',target_key,p_data);
+        IF owner_metadata_intent THEN data := prior.data || jsonb_build_object('isDefault',true); END IF;
+        PERFORM identity.assistant_panel_validate('integrations',target_key,data);
         IF prior.deleted_at IS NOT NULL AND NOT marker AND NOT catalog AND p_recreation_id IS NULL THEN
             RAISE EXCEPTION 'Connection observation cannot clear a revocation' USING ERRCODE = 'PT409';
         END IF;
@@ -356,7 +367,7 @@ BEGIN
         ELSE data := jsonb_set(data,'{enabled}',to_jsonb(p_operation = 'enable')); END IF;
     END IF;
     new_revision := nextval(pg_get_serial_sequence('identity.assistant_panel_changes','revision'));
-    outcome := CASE WHEN p_runtime_instance_id IS NULL AND p_operation IN ('remove','enable','disable') THEN 'pending' ELSE 'applied' END;
+    outcome := CASE WHEN owner_metadata_intent OR p_runtime_instance_id IS NULL AND p_operation IN ('remove','enable','disable') THEN 'pending' ELSE 'applied' END;
     UPDATE identity.connection_operations SET status='superseded'
       WHERE owner_user_id=owner_id AND scope_key=p_scope_key AND resource_key=target_key AND status IN ('pending','failed');
     INSERT INTO identity.connection_items(owner_user_id,scope_key,resource_key,device_id,provider_id,account_id,revision,data,
@@ -482,7 +493,8 @@ BEGIN
     SELECT revision INTO current_revision FROM identity.connection_heads WHERE owner_user_id=owner_id;
     IF p_expected_revision IS DISTINCT FROM current_revision THEN RAISE EXCEPTION 'Connection changed before task admission' USING ERRCODE='PT409'; END IF;
     SELECT * INTO change FROM identity.connection_operations WHERE owner_user_id=owner_id AND status IN ('pending','failed')
-      AND terminal_at IS NULL ORDER BY revision LIMIT 1;
+      AND (terminal_at IS NULL OR error_code='CONNECTION_OUTCOME_UNKNOWN')
+      ORDER BY (error_code='CONNECTION_OUTCOME_UNKNOWN') DESC NULLS LAST,revision LIMIT 1;
     IF FOUND THEN RETURN jsonb_build_object('admitted',false,'revision',current_revision::text,'operationId',change.operation_id,
         'domain','integrations','resourceKey',change.resource_key,'errorCode',change.error_code); END IF;
     RETURN jsonb_build_object('admitted',true,'revision',current_revision::text);
@@ -540,6 +552,47 @@ CREATE TABLE identity.connection_batches (
 ALTER TABLE identity.connection_batches ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON identity.connection_batches FROM PUBLIC,anon,authenticated,service_role;
 
+-- One identity namespace across both public write entry points and all owners.
+-- This is the deduplication authority; the two receipt projections cannot each
+-- independently accept a UUID. Legacy imports are checked on first native use.
+CREATE TABLE identity.connection_operation_identities (
+    operation_id uuid PRIMARY KEY,
+    owner_user_id text NOT NULL REFERENCES identity.connection_heads(owner_user_id) ON DELETE CASCADE,
+    operation_kind text NOT NULL CHECK (operation_kind IN ('single','batch')),
+    request_hash text NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$')
+);
+ALTER TABLE identity.connection_operation_identities ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON identity.connection_operation_identities FROM PUBLIC,anon,authenticated,service_role;
+INSERT INTO identity.connection_operation_identities(operation_id,owner_user_id,operation_kind,request_hash)
+    SELECT operation_id,owner_user_id,'single',request_hash FROM identity.connection_operations
+    UNION ALL SELECT operation_id,owner_user_id,'batch',request_hash FROM identity.connection_batches;
+
+CREATE FUNCTION identity.connection_claim_operation(p_owner text,p_operation uuid,p_kind text,p_hash text) RETURNS void
+LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+DECLARE prior identity.connection_operation_identities%ROWTYPE; legacy_owner text; legacy_kind text; legacy_hash text;
+BEGIN
+    IF p_operation IS NULL OR p_kind IS NULL OR p_kind NOT IN ('single','batch') OR p_hash IS NULL OR p_hash !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'Connection operation identity is invalid' USING ERRCODE='22023'; END IF;
+    SELECT * INTO prior FROM identity.connection_operation_identities WHERE operation_id=p_operation;
+    IF NOT FOUND THEN
+        SELECT owner_user_id,'single',request_hash INTO legacy_owner,legacy_kind,legacy_hash FROM identity.connection_operations WHERE operation_id=p_operation;
+        IF NOT FOUND THEN
+            SELECT owner_user_id,'batch',request_hash INTO legacy_owner,legacy_kind,legacy_hash FROM identity.connection_batches WHERE operation_id=p_operation;
+        END IF;
+        INSERT INTO identity.connection_operation_identities(operation_id,owner_user_id,operation_kind,request_hash)
+          VALUES(p_operation,COALESCE(legacy_owner,p_owner),COALESCE(legacy_kind,p_kind),COALESCE(legacy_hash,p_hash)) ON CONFLICT DO NOTHING;
+        -- The global primary key also serializes two different owners racing on
+        -- the same UUID, even though they hold different owner-head locks.
+        SELECT * INTO prior FROM identity.connection_operation_identities WHERE operation_id=p_operation;
+    END IF;
+    IF prior.owner_user_id IS DISTINCT FROM p_owner THEN
+        RAISE EXCEPTION 'Connection operation is unavailable' USING ERRCODE='42501'; END IF;
+    IF prior.operation_kind IS DISTINCT FROM p_kind OR prior.request_hash IS DISTINCT FROM p_hash THEN
+        RAISE EXCEPTION 'Connection operation identity was reused' USING ERRCODE='PT409'; END IF;
+END;
+$$;
+REVOKE ALL ON FUNCTION identity.connection_claim_operation(text,uuid,text,text) FROM PUBLIC,anon,authenticated,service_role;
+
 -- An explicit CLI import can return several previously unknown accounts. One
 -- provider intent fences the entire set; partial publication is never visible.
 CREATE FUNCTION identity.connection_commit_batch(p_operation_id uuid,p_recreation_id uuid,p_operations jsonb,
@@ -555,6 +608,7 @@ BEGIN
     request_hash := encode(sha256(convert_to(jsonb_build_array(owner_id,p_recreation_id,p_operations,
         p_runtime_instance_id IS NOT NULL)::text,'UTF8')),'hex');
     PERFORM identity.connection_owner_lock(owner_id);
+    PERFORM identity.connection_claim_operation(owner_id,p_operation_id,'batch',request_hash);
     SELECT * INTO existing FROM identity.connection_batches WHERE operation_id=p_operation_id;
     IF FOUND THEN
         IF existing.owner_user_id<>owner_id THEN RAISE EXCEPTION 'Connection batch is unavailable' USING ERRCODE='42501'; END IF;

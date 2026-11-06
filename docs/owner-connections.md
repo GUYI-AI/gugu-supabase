@@ -22,10 +22,17 @@ promote a candidate.
 The native API consists of snapshot/resource, commit, recreate_begin,
 commit_batch, pending, admit and ack. Use named arguments and decimal strings for
 bigint revisions. Commit/recreate compare item revisions; admit compares the owner
-head. A repeated UUID must have the same request. Metadata documents are inline
+head. A single identity ledger binds every UUID to its owner, entry-point kind
+and request hash. A UUID cannot be reused between single and batch publication,
+for another account, or by another owner. Metadata documents are inline
 UTF-8 JSON with an exact SHA-256 digest and a scalar account-field whitelist.
 Null save content preserves the previous document; remove clears it and retains
 the tombstone. Ordinary observation can never clear an account tombstone.
+An owner may queue offline default selection only for an existing live device
+account: a null document and exactly `providerId, accountId, isDefault: true`.
+The identities must match the saved row. This restricted save preserves the
+document and other public fields, becomes pending, and executes on the original
+device. It cannot create, recreate or publish an account.
 
 Explicit authorization starts a one-use recreation intent before the existing
 provider flow. A known account uses item CAS. An unknown account uses a provider
@@ -49,6 +56,7 @@ ID before the effect. An already started operation cannot be admitted again.
 Ack records an immutable outcome and never changes an item. A replacement runtime
 on the same owned device can resend a known completed ack. An uncertain effect
 must be terminal `CONNECTION_OUTCOME_UNKNOWN`, without replay or a fresh UUID.
+Unknown outcomes continue to refuse new-task admission until reconciled.
 Null-operation admission is only a new-task barrier, never effect authorization.
 
 Imported pending is not evidence of an unstarted effect. The maintenance-only
@@ -68,7 +76,7 @@ and receipts intact. Legacy functions, tables and grants remain unchanged.
 After activation, do not restore legacy authority until original receipts and
 revocations have been reconciled; this release does not authorize that transition.
 
-The installation fixture exercises eleven groups in a transaction that rolls back
+The installation fixture exercises fifteen groups in a transaction that rolls back
 its users and temporary API grants. The real production roles stay closed.
 Owner RPC/RLS and the separate official credential-deletion wrapper require
 non-author review before use.

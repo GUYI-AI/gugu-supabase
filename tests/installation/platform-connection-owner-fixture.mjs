@@ -71,6 +71,21 @@ export async function assertOwnerConnectionRuntime(db, test) {
     assert.equal(saved.status, 'applied')
   })
 
+  await test('offline default selection is a restricted existing-account intent rather than account publication', async () => {
+    const saved = await commit('default-choice')
+    const selected = await commit('default-choice',saved.revision,'save',{runtime:null,document:null,
+      data:{providerId:'github',accountId:'default-choice',isDefault:true}})
+    assert.equal(selected.status,'pending')
+    const item = (await rpc('connection_resource','$1,$2',[scope,key('default-choice')])).item
+    assert.equal(item.data.isDefault,true); assert.equal(item.data.configured,true)
+    assert.equal(item.document,document('default-choice'))
+    assert.equal((await admit(selected.operationId,await head())).admitted,true)
+    await reject(() => commit('new-default-owner','0','save',{runtime:null,document:null,
+      data:{providerId:'github',accountId:'new-default-owner',isDefault:true}}),'42501')
+    await reject(() => commit('default-choice',selected.revision,'save',{runtime:null,document:null,
+      data:{providerId:'github',accountId:'default-choice',isDefault:true,configured:false}}),'42501')
+  })
+
   await test('revocation tombstones reject observations and require a fenced explicit recreation', async () => {
     const saved = await commit('revoked')
     const removed = await commit('revoked', saved.revision, 'remove', { runtime: null })
@@ -102,6 +117,8 @@ export async function assertOwnerConnectionRuntime(db, test) {
     const unknown = await ack(removed.operationId, retry.admissionId, 'CONNECTION_OUTCOME_UNKNOWN', true)
     assert.equal(unknown.terminal, true)
     assert.equal((await admit(removed.operationId, await head())).reason, 'outcome-unknown')
+    const taskBarrier = await admit(null,await head())
+    assert.equal(taskBarrier.admitted,false); assert.equal(taskBarrier.errorCode,'CONNECTION_OUTCOME_UNKNOWN')
     await reject(() => ack(removed.operationId, retry.admissionId), 'PT409')
   })
 
@@ -179,6 +196,31 @@ export async function assertOwnerConnectionRuntime(db, test) {
     await reject(() => record('a'.repeat(64), 'c'.repeat(64)), 'PT409')
     await db.query('UPDATE identity.runtime_instances SET last_heartbeat_at=clock_timestamp() WHERE instance_id=$1', [runtime])
     assert.equal((await admit(removed.operationId, await head())).admitted, true)
+  })
+
+  await test('a single commit UUID cannot be reused as a provider batch identity', async () => {
+    const id = randomUUID()
+    await commit('single-identity', '0', 'save', { id })
+    await reject(async () => {
+      const ticket = await intent(id, null, null, 'github', await head())
+      await rpc('connection_commit_batch', '$1,$2,$3,$4', [id,ticket.recreationId,
+        JSON.stringify([{ operationId:randomUUID(),data:{providerId:'github',accountId:'cross-entry-batch',configured:true},document:document('cross-entry-batch') }]),runtime])
+    }, 'PT409')
+  })
+
+  await test('a provider batch UUID cannot be reused by single commit or another account owner', async () => {
+    const id = randomUUID(), ticket = await intent(id, null, null, 'github', await head())
+    await rpc('connection_commit_batch', '$1,$2,$3,$4', [id,ticket.recreationId,
+      JSON.stringify([{ operationId:randomUUID(),data:{providerId:'github',accountId:'batch-identity',configured:true},document:document('batch-identity') }]),runtime])
+    await reject(() => commit('cross-entry-single', '0', 'save', { id }), 'PT409')
+    await reject(() => rpc('connection_commit', '$1,$2,$3,$4,$5,$6,$7', [id,'platform',key('foreign-uuid'),'0','save',
+      {providerId:'github',accountId:'foreign-uuid',configured:true},document('foreign-uuid')],other), '42501')
+  })
+
+  await test('one operation UUID cannot publish a second account even through the same entry point', async () => {
+    const id = randomUUID()
+    await commit('same-entry-first', '0', 'save', { id })
+    await reject(() => commit('same-entry-second', '0', 'save', { id }), 'PT409')
   })
 
   await test('first platform authorization needs no host and prepared candidates never become ready from collection markers', async () => {
