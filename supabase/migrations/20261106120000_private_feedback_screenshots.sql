@@ -18,7 +18,7 @@ GRANT INSERT (screenshot_paths) ON identity.feedback TO authenticated;
 
 CREATE FUNCTION identity.validate_feedback_screenshots() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
-DECLARE object_path text;
+DECLARE object_path text; evidence_blob uuid;
 BEGIN
     IF auth.role() IN ('anon', 'authenticated') THEN
         IF auth.uid() IS NULL OR NEW.user_id <> auth.uid() THEN
@@ -36,7 +36,8 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'Invalid feedback screenshot references' USING ERRCODE = '22023';
     END IF;
-    FOREACH object_path IN ARRAY NEW.screenshot_paths LOOP
+    -- Acquire object and first-registration locks in one order, preserving display order.
+    FOR object_path IN SELECT p FROM unnest(NEW.screenshot_paths) AS refs(p) ORDER BY p COLLATE "C" LOOP
         IF object_path !~ ('^' || NEW.user_id::text || '/(feedback/)?[A-Za-z0-9][A-Za-z0-9._-]*$')
            OR length(object_path) > 1024 THEN
             RAISE EXCEPTION 'Invalid feedback screenshot reference' USING ERRCODE = '22023';
@@ -47,7 +48,14 @@ BEGIN
             RAISE EXCEPTION 'Feedback screenshot is unavailable' USING ERRCODE = '22023';
         END IF;
         -- Share the collector's lock and reject objects whose byte deletion was claimed.
-        PERFORM chat.file_blob_take(chat.file_blob_for_object('feedback-screenshots', object_path));
+        evidence_blob := chat.file_blob_for_object('feedback-screenshots', object_path);
+        IF evidence_blob IS NULL THEN
+            -- A concurrent INSERT may win after the factory's statement snapshot was taken.
+            -- This separate statement sees its committed row under READ COMMITTED.
+            SELECT b.id INTO evidence_blob FROM chat.file_blobs b
+             WHERE b.bucket_id = 'feedback-screenshots' AND b.object_name = object_path;
+        END IF;
+        PERFORM chat.file_blob_take(evidence_blob);
     END LOOP;
     RETURN NEW;
 END;
