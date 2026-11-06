@@ -17,7 +17,7 @@ afterAll(async () => { await db?.end() })
 beforeEach(async () => {
   await db.query('BEGIN')
   owner = randomUUID(); peer = randomUUID()
-  topics = [`gugu:user:${owner}:agents`, `gugu:user:${peer}:agents`, `other:user:${owner}:agents`, `gugu:other:${owner}:agents`, `gugu:user:${owner}:other`, `gugu:user:${owner}:events`, `gugu:user:${peer}:events`]
+  topics = [`gugu:user:${owner}:agents`, `gugu:user:${peer}:agents`, `other:user:${owner}:agents`, `gugu:other:${owner}:agents`, `gugu:user:${owner}:other`]
   for (const topic of topics) {
     await db.query(`INSERT INTO realtime.messages(topic,event,payload,extension,private) VALUES($1,'agent_changed','{}','broadcast',true)`, [topic])
   }
@@ -32,10 +32,10 @@ describe('owned-agent private broadcasts', () => {
   it('lets each authenticated owner read only its own agent topic', async () => {
     await as('authenticated', owner)
     const read = () => db.query('SELECT topic FROM realtime.messages WHERE topic=ANY($1) ORDER BY topic', [topics])
-    expect((await read()).rows).toEqual([{ topic: topics[0] }, { topic: topics[5] }])
+    expect((await read()).rows).toEqual([{ topic: topics[0] }])
     await db.query('RESET ROLE')
     await as('authenticated', peer)
-    expect((await read()).rows).toEqual([{ topic: topics[1] }, { topic: topics[6] }])
+    expect((await read()).rows).toEqual([{ topic: topics[1] }])
   })
 
   it('does not admit an anonymous subscriber', async () => {
@@ -58,25 +58,5 @@ describe('owned-agent private broadcasts', () => {
     } catch (error) { failure = error }
     await db.query('ROLLBACK TO SAVEPOINT forged_broadcast')
     expect((failure as { code?: string } | undefined)?.code).toBe('42501')
-  })
-
-  it('publishes the same owner-scoped agent change on events and the retiring legacy topic', async () => {
-    const agent = randomUUID()
-    await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Event owner'),($2,'human','Peer')", [owner, peer])
-    const device = `agent-${randomUUID()}`
-    await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Event device','fixture','linux')", [device, owner])
-    await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Agent',$2,$3)", [agent, owner, device])
-    const { rows } = await db.query('SELECT topic,private,payload FROM realtime.messages WHERE event=$1 AND payload #>> $2=$3 ORDER BY topic',
-      ['agent_changed', '{agent,id}', agent])
-    expect(rows.map(row => ({ topic: row.topic, private: row.private }))).toEqual([
-      { topic: topics[0], private: true }, { topic: topics[5], private: true },
-    ])
-    // realtime.send assigns each transport envelope its own delivery ID.
-    expect(rows[0].payload.agent).toEqual(rows[1].payload.agent)
-    expect(rows[0].payload.op).toBe(rows[1].payload.op)
-    expect(rows[0].payload.id).toEqual(expect.any(String))
-    expect(rows[1].payload.id).toEqual(expect.any(String))
-    await as('authenticated', peer)
-    expect((await db.query('SELECT topic FROM realtime.messages WHERE payload #>> $1=$2', ['{agent,id}', agent])).rows).toEqual([])
   })
 })

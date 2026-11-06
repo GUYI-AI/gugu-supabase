@@ -87,8 +87,7 @@ describe('thread read account revisions', () => {
     expect(wakes.every(wake => wake.topic === `gugu:user:${reader}:events` && wake.private)).toBe(true)
     const legacy = (await db.query<{ payload: { member: Record<string, unknown> } }>(
       "SELECT payload FROM realtime.messages WHERE topic=$1 AND event='member_stream_read_changed'", [`gugu:user:${reader}:events`])).rows
-    const { entity_id, tombstone: _tombstone, ...streamState } = readPayload(state)
-    expect(legacy.map(event => event.payload.member)).toContainEqual({ ...streamState, user_id: entity_id })
+    expect(legacy).toEqual([])
     expect((await db.query('SELECT last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, reader])).rows).toEqual(mainBefore)
     expect((await asUser(reader, 'SELECT stream_id FROM chat.list_unread_locators($1)', [group])).map(row => row.stream_id)).not.toContain(stream)
   })
