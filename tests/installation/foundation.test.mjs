@@ -9,6 +9,7 @@ import { installTopicResourcesConcurrently } from './topic-resource-concurrency.
 import { assertAllocatedProjectPublisher, assertNoChatFileHost } from './project-publisher-contract.mjs'
 import { installConnectionStateWithEvidence } from './platform-connection-state-fixture.mjs'
 import { assertOwnerConnectionRuntime } from './platform-connection-owner-fixture.mjs'
+import { assertConnectionAuthorityReader } from './platform-connection-authority-fixture.mjs'
 
 // Deliberately requires an empty, disposable Supabase PostgreSQL 17 instance.
 // Never resets schemas, migration history, or user data to make a test pass.
@@ -40,6 +41,14 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     const validationRelease = releases.find((release) => release.constraintValidation)
     assert.ok(deviceCheckRelease && validationRelease)
     const releaseQuery = async (sql) => {
+      const authorityRelease = releases.find((release) => release.version.endsWith('_connection_authority_read'))
+      if (authorityRelease && sql.includes(authorityRelease.sql)) {
+        const result = await query(sql)
+        await query('BEGIN')
+        try { await assertConnectionAuthorityReader(db, (name, action) => t.test(name, action)) }
+        finally { await query('ROLLBACK') }
+        return result
+      }
       const ownerConnectionRelease = releases.find((release) => release.version.endsWith('_owner_connection_runtime'))
       if (ownerConnectionRelease && sql.includes(ownerConnectionRelease.sql)) {
         const result = await query(sql)
