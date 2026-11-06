@@ -103,13 +103,14 @@ async function moveHome() {
 describe('durable assistant panel contract', () => {
   it('names a removed assistant without weakening live body or owner authorization', async () => {
     const body = await file()
-    const saved = await commit({ domain: 'memory',key: 'live',body: body.id,hash: body.hash,runtime: instance })
+    const data = { relativePath: 'fixture.md',title: 'Fixture' }
+    const saved = await commit({ domain: 'memory',key: 'live',data,body: body.id,hash: body.hash,runtime: instance })
     expect(saved.status).toBe('applied')
-    await failure(() => commit({ domain: 'memory',key: 'wrong-hash',body: body.id,hash: 'a'.repeat(64),runtime: instance }),/matching file hash/)
+    await failure(() => commit({ domain: 'memory',key: 'wrong-hash',data,body: body.id,hash: 'a'.repeat(64),runtime: instance }),/matching file hash/)
     await as(owner,() => db.query('SELECT identity.remove_owned_agent($1)',[agent]))
     await db.query('SAVEPOINT removed_commit')
     try {
-      await expect(commit({ domain: 'memory',key: 'removed',body: body.id,hash: body.hash,runtime: instance }))
+      await expect(commit({ domain: 'memory',key: 'removed',data,body: body.id,hash: body.hash,runtime: instance }))
         .rejects.toMatchObject({ code: '42501',message: 'Personal assistant has been removed' })
     } finally { await db.query('ROLLBACK TO SAVEPOINT removed_commit') }
     await failure(() => as(stranger,() => call('assistant_panel_commit',[agent,randomUUID(),'personality','hidden',0,'save','{}',null,null,null,null])),/not available/)
