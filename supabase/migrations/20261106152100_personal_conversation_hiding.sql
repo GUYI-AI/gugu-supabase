@@ -28,24 +28,36 @@ COMMENT ON TABLE chat.conversation_list_state IS
 -- otherwise a later chat FOR UPDATE cycles with that peer's hide holding its chat KEY SHARE.
 -- Preserve the installed erasure body and ACL; only add this admission-lock prelude.
 DO $erase_lock_order$
-DECLARE definition text; previous text; marker text := '    FOR affected_chat_id IN';
+DECLARE definition text; previous text; iteration text;
 BEGIN
   SELECT pg_get_functiondef('identity.erase_human_account(text)'::regprocedure) INTO definition;
   previous := definition;
-  IF (length(definition)-length(replace(definition,marker,'')))/length(marker) <> 1 THEN
+  iteration := '    FOR affected_chat_id IN
+        SELECT DISTINCT cm.chat_id
+        FROM chat.active_members cm
+        JOIN chat.chats c ON c.id = cm.chat_id
+        WHERE cm.user_id = ANY(delete_user_ids)
+        ORDER BY cm.chat_id
+    LOOP';
+  IF strpos(definition,iteration)=0 OR strpos(definition,'    affected_chat_id TEXT;')=0 THEN
     RAISE EXCEPTION 'Unexpected erasure lock-order predecessor';
   END IF;
-  definition := replace(definition,marker,
-    '    PERFORM 1 FROM chat.chats c WHERE EXISTS (
-        SELECT 1 FROM chat.chat_members cm
-        WHERE cm.chat_id=c.id AND cm.user_id=ANY(delete_user_ids)
-    ) ORDER BY c.id FOR UPDATE;
-    PERFORM 1 FROM chat.chat_members cm WHERE EXISTS (
-        SELECT 1 FROM chat.chat_members affected
-        WHERE affected.chat_id=cm.chat_id AND affected.user_id=ANY(delete_user_ids)
-    ) ORDER BY cm.chat_id,cm.user_id FOR UPDATE;
+  definition := replace(definition,'    affected_chat_id TEXT;',
+    '    affected_chat_id TEXT;
+    locked_chat_ids TEXT[];');
+  -- Materialize once: READ COMMITTED may otherwise discover a newly admitted group in the later
+  -- loop after an earlier DM already published its peer head. Newly admitted seats still cascade
+  -- with the erased identity; they must not add a late chat-row lock to this management traversal.
+  definition := replace(definition,iteration,
+    '    SELECT COALESCE(array_agg(DISTINCT cm.chat_id ORDER BY cm.chat_id),ARRAY[]::text[])
+    INTO locked_chat_ids FROM chat.active_members cm JOIN chat.chats c ON c.id=cm.chat_id
+    WHERE cm.user_id=ANY(delete_user_ids);
+    PERFORM 1 FROM chat.chats c WHERE c.id=ANY(locked_chat_ids) ORDER BY c.id FOR UPDATE;
+    PERFORM 1 FROM chat.chat_members cm WHERE cm.chat_id=ANY(locked_chat_ids)
+    ORDER BY cm.chat_id,cm.user_id FOR UPDATE;
 
-' || marker);
+    FOREACH affected_chat_id IN ARRAY locked_chat_ids
+    LOOP');
   IF definition=previous THEN RAISE EXCEPTION 'Missing erasure lock prelude'; END IF;
   EXECUTE definition;
 END;

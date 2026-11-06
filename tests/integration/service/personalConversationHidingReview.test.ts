@@ -160,3 +160,32 @@ it('orders a different member account erasure across two DMs before surviving pe
   expect(await Promise.all([erased,hidden])).toEqual([null,null])
   expect((await admin.query('SELECT conversation_hidden_at FROM chat.conversation_list_state WHERE chat_id=$1 AND user_id=$2',[second,owner])).rows[0].conversation_hidden_at).not.toBeNull()
 })
+
+it('does not visit an un-prelocked group admitted while erasure waits on an old DM member', async () => {
+  const [first,joined]=[randomUUID(),randomUUID()].sort(); extraChats=[first,joined]
+  await admin.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'dm','Earlier DM',$3),($2,'group','Late admission',$3)",[first,joined,owner])
+  await admin.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$3,'member'),($1,$4,'member'),($2,$3,'owner'),($2,$5,'member')",[first,joined,owner,peer,agent])
+  await b.query('BEGIN'); await auth(b)
+  const invitation=(await b.query("SELECT chat.request_group_invitation_as($1,$2,'join',auth.uid()::text) receipt",[joined,peer])).rows[0].receipt.invitation_id
+  await b.query('COMMIT')
+  await admin.query('SELECT pg_advisory_lock(hashtextextended($1,0))',[gate])
+  await admin.query('BEGIN')
+  await admin.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2 FOR UPDATE',[first,peer])
+  await a.query('BEGIN'); await auth(a,peer)
+  await a.query("SELECT set_config('gugu.fixture_erase_latch_chat',$1,true),set_config('gugu.fixture_hide_latch_key',$2,true)",[first,gate])
+  const erased=committed(a,'DELETE FROM auth.users WHERE id=$1::uuid',[peer])
+  await blocked(aPid,adminPid)
+  await b.query('BEGIN'); await auth(b,peer)
+  await b.query('SELECT chat.decide_group_invitation_as($1,true,auth.uid()::text)',[invitation])
+  await b.query('COMMIT')
+  expect((await admin.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[joined,peer])).rowCount).toBe(1)
+  await admin.query('COMMIT')
+  await blocked(aPid,adminPid) // The unchanged erase body now reached the first DM notice, after its heads.
+  await b.query('BEGIN'); await auth(b)
+  const hidden=committed(b,'SELECT chat.hide_my_conversation($1,$2)',[joined,randomUUID()])
+  await blocked(bPid,aPid)
+  await admin.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',[gate])
+  expect(await Promise.all([erased,hidden])).toEqual([null,null])
+  expect((await admin.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[joined,peer])).rowCount).toBe(0)
+  expect((await admin.query('SELECT conversation_hidden_at FROM chat.conversation_list_state WHERE chat_id=$1 AND user_id=$2',[joined,owner])).rows[0].conversation_hidden_at).not.toBeNull()
+})
