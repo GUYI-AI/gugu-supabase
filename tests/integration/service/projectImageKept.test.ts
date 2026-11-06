@@ -141,6 +141,11 @@ describe('a project image also kept by the machine that sent it',()=>{
     expect(await adopt(first,memberDevice,one.sha)).toBe(true)
     expect((await pending(memberDevice)).map(row=>row.item_id)).toEqual([second])
   })
+  it('skips what the caller has already tried, so a failing image does not hide the next',async()=>{
+    const one=await send(),two=await send(),[first,second]=[await itemOf(one.message),await itemOf(two.message)]
+    await user();const rows=(await db.query('SELECT * FROM chat.file_device_adopt_pending($1,50,$2)',[memberDevice,[first]])).rows;await service()
+    expect(rows.map(row=>row.item_id)).toEqual([second])
+  })
   it('takes a path only under the kept images directory of its root',async()=>{
     const image=await send(),item=await itemOf(image.message)
     await user()

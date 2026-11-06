@@ -32,11 +32,12 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
       AND NOT EXISTS(SELECT 1 FROM chat.file_device_revisions d WHERE d.item_id=w.id AND d.version=w.version)
 $$;
 
-CREATE FUNCTION chat.file_device_adopt_pending(p_device text,p_limit integer DEFAULT 50)
+-- p_skip: what this drain has already tried, so an image that keeps failing does not stand in front of the rest.
+CREATE FUNCTION chat.file_device_adopt_pending(p_device text,p_limit integer DEFAULT 50,p_skip uuid[] DEFAULT '{}')
 RETURNS TABLE(item_id uuid,version integer,chat_id text,file_name text,content_type text,sha256 text,size_bytes bigint)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
     SELECT a.item_id,a.version,a.chat_id,a.file_name,a.content_type,a.sha256,a.size_bytes
-    FROM file_private.device_adoptable(p_device) a ORDER BY a.expires_at,a.item_id LIMIT LEAST(GREATEST(p_limit,1),200)
+    FROM file_private.device_adoptable(p_device) a WHERE NOT a.item_id=ANY(p_skip) ORDER BY a.expires_at,a.item_id LIMIT LEAST(GREATEST(p_limit,1),200)
 $$;
 
 -- False: nothing to do any more (another machine kept it first, it expired, or it is not this device's to keep).
@@ -129,6 +130,6 @@ BEGIN
 END $patch$;
 
 -- The installation DDL guard closes created and replaced functions; open only what the API uses.
-GRANT EXECUTE ON FUNCTION chat.file_device_adopt_pending(text,integer),chat.file_device_adopt(uuid,text,text,text,text,bigint),
+GRANT EXECUTE ON FUNCTION chat.file_device_adopt_pending(text,integer,uuid[]),chat.file_device_adopt(uuid,text,text,text,text,bigint),
     chat.file_holder_visible(text),chat.file_resolve_as(jsonb,text),chat.workspace_list_as(text,text,integer,integer,text,text,text,boolean) TO authenticated;
 NOTIFY pgrst,'reload schema';
