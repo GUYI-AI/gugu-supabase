@@ -6,8 +6,10 @@
 -- next version as a content change put every file someone tidied today under 「今天」 in the folder App's recent sort
 -- and day sections. The content changed exactly when the two versions' SHA-256 differ; a version with no revision row
 -- (one the carry trigger did not write) is a change, as before.
+-- It reads file_device_revisions whoever updates the file (a service role such as gugu_files cannot read that table), so
+-- it runs as its owner (SECURITY DEFINER with an empty search_path), as file_device_carry_revision does.
 CREATE OR REPLACE FUNCTION chat.set_workspace_item_updated_at() RETURNS trigger
-LANGUAGE plpgsql SET search_path='' AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 BEGIN
     IF (NEW.inline_text IS DISTINCT FROM OLD.inline_text AND NOT
           (OLD.kind='file' AND NEW.kind='document' AND NEW.blob_id IS NOT NULL))
