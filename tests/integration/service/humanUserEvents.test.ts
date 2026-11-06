@@ -102,6 +102,23 @@ const sources: { name: string; event: string; run: () => Promise<void> }[] = [
 ]
 
 describe('retained community user-event producers', () => {
+  it.each(['anon', 'authenticated'])('keeps replaced internal producers private from %s with SQLSTATE 42501', async (role) => {
+    const calls = [
+      ['chat.broadcast_to_chat_member_user_events(text,text,jsonb)', "SELECT chat.broadcast_to_chat_member_user_events('acl-probe'::text,'chat_changed'::text,'{}'::jsonb)", true],
+      ['public.forum_points_apply()', 'SELECT public.forum_points_apply()', false],
+      ['chat.publish_membership_revision()', 'SELECT chat.publish_membership_revision()', true],
+    ] as const
+    for (const [signature, sql, service] of calls) {
+      const { rows } = await db.query(
+        "SELECT has_function_privilege('anon',$1,'EXECUTE') AS anon,has_function_privilege('authenticated',$1,'EXECUTE') AS human,has_function_privilege('service_role',$1,'EXECUTE') AS service", [signature])
+      expect(rows).toEqual([{ anon: false, human: false, service }])
+      await db.query('SAVEPOINT denied_internal_producer')
+      await db.query(`SET LOCAL ROLE ${role}`)
+      await expect(db.query(sql)).rejects.toMatchObject({ code: '42501' })
+      await db.query('ROLLBACK TO SAVEPOINT denied_internal_producer')
+    }
+  })
+
   it.each(sources)('$name preserves the human event and sends nothing to agents', async ({ run, event }) => {
     await run()
     const received = await events(human, event)
