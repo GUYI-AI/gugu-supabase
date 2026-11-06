@@ -7,6 +7,7 @@ import { foundationDigest, installFoundation, installReleases, releases } from '
 import { topicResourcesFixture } from './topic-resources-fixture.mjs'
 import { installTopicResourcesConcurrently } from './topic-resource-concurrency.mjs'
 import { assertAllocatedProjectPublisher, assertNoChatFileHost } from './project-publisher-contract.mjs'
+import { installConnectionStateWithEvidence } from './platform-connection-state-fixture.mjs'
 
 // Deliberately requires an empty, disposable Supabase PostgreSQL 17 instance.
 // Never resets schemas, migration history, or user data to make a test pass.
@@ -38,6 +39,10 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     const validationRelease = releases.find((release) => release.constraintValidation)
     assert.ok(deviceCheckRelease && validationRelease)
     const releaseQuery = async (sql) => {
+      const connectionRelease = releases.find((release) => release.version.endsWith('_platform_connection_state'))
+      if (connectionRelease && sql.includes(connectionRelease.sql)) {
+        return installConnectionStateWithEvidence({ db, query, sql, release: connectionRelease, test: (name, action) => t.test(name, action) })
+      }
       const projectMetadataRelease = releases.find((release) => release.version.endsWith('_group_project_metadata'))
       if (projectMetadataRelease && sql.includes(projectMetadataRelease.sql)) {
         const snapshot = () => query(`SELECT oid,proargtypes::text,prorettype::regtype::text,provolatile,prosecdef,
