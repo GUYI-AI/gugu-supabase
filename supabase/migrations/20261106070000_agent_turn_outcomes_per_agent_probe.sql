@@ -1,6 +1,6 @@
 -- Read the latest delivery per agent with one index probe per agent instead of reading and sorting every
 -- delivery the owner ever made. Cost now follows the number of agents, not the number of messages.
--- Signature, grants and output are unchanged. The conversation-scope index is built CONCURRENTLY by
+-- Signature and output are unchanged. The conversation-scope index is built CONCURRENTLY by
 -- 20261106065900_agent_turn_outcomes_chat_index.sql just before this release.
 CREATE OR REPLACE FUNCTION identity.read_agent_turn_outcomes(
     p_chat_id text DEFAULT NULL,
@@ -72,6 +72,11 @@ BEGIN
     RETURN coalesce(v_rows, '[]'::jsonb);
 END;
 $$;
+
+-- The foundation's gg_revoke_public_execute_on_functions trigger revokes EXECUTE on every CREATE [OR REPLACE]
+-- FUNCTION here, so a replaced function has to state its grants again.
+REVOKE ALL ON FUNCTION identity.read_agent_turn_outcomes(text, text) FROM PUBLIC, anon, service_role;
+GRANT EXECUTE ON FUNCTION identity.read_agent_turn_outcomes(text, text) TO authenticated;
 
 COMMENT ON FUNCTION identity.read_agent_turn_outcomes(text, text) IS
 'Latest delivery per agent for auth.uid(), chat and exact thread scope; caller applies its display roster. Existing table reads remain available to older clients. A NULL chat includes all chats and threads. Reason is classified by the host when recording the command. One index probe per agent: cost follows agents, not messages.';
