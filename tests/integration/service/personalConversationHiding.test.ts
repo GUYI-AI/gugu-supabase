@@ -33,7 +33,7 @@ async function as(user: string, sql: string, values: unknown[] = []) {
 }
 const hide = async (chat=group, operation=randomUUID(), user=owner) => (await as(user,'SELECT chat.hide_my_conversation($1,$2) AS receipt',[chat,operation]))[0].receipt
 const listed = async (user=owner) => (await as(user,'SELECT chat_id FROM chat.list_my_chats_as($1)',[user])).map(row=>row.chat_id)
-const state = async (chat=group,user=owner) => (await db.query('SELECT conversation_hidden_at,conversation_deleted_at,last_read_seq,notification_level FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[chat,user])).rows[0]
+const state = async (chat=group,user=owner) => (await db.query('SELECT state.conversation_hidden_at,m.conversation_deleted_at,m.last_read_seq,m.notification_level FROM chat.chat_members m LEFT JOIN chat.conversation_list_state state USING(chat_id,user_id) WHERE m.chat_id=$1 AND m.user_id=$2',[chat,user])).rows[0]
 const snapshot = async () => (await as(owner,'SELECT chat.sync_snapshot() AS value'))[0].value
 const send = async (chat=group,sender: string|null=reader, extra: { whisper?: boolean; to?: string[]; client?: string; id?: string }={}) => {
   const id=extra.id??randomUUID()
@@ -165,7 +165,15 @@ it('rejects other-person writes and leaves the new API field, internal tables an
   for(const fn of ['chat.hide_my_conversation(text,uuid)','chat.publish_native_conversation_message(text,text,text,text,text,timestamptz)']) {
     for(const role of ['anon','service_role']) expect((await db.query("SELECT has_function_privilege($1,$2,'EXECUTE') allowed",[role,fn])).rows[0].allowed).toBe(false)
   }
-  expect((await db.query("SELECT has_column_privilege('authenticated','chat.chat_members','conversation_hidden_at','UPDATE') allowed")).rows[0].allowed).toBe(false)
+  for (const role of ['anon','authenticated','service_role']) {
+    for (const table of ['conversation_list_state','conversation_hide_operations','native_conversation_publications']) {
+      for (const privilege of ['SELECT','INSERT','UPDATE','DELETE']) {
+        expect((await db.query('SELECT has_table_privilege($1,$2,$3) allowed',[role,'chat.'+table,privilege])).rows[0].allowed).toBe(false)
+      }
+      expect((await db.query('SELECT relrowsecurity enabled FROM pg_class WHERE oid=$1::regclass',['chat.'+table])).rows[0].enabled).toBe(true)
+    }
+  }
+  await denied(()=>as(owner,'SELECT * FROM chat.conversation_list_state'),'42501')
   expect((await db.query("SELECT has_table_privilege('authenticated','chat.native_conversation_publications','SELECT') allowed")).rows[0].allowed).toBe(false)
   expect((await db.query("SELECT pg_get_userbyid(proowner) owner FROM pg_proc WHERE oid='chat.hide_my_conversation(text,uuid)'::regprocedure")).rows[0].owner).toBe('postgres')
 })
@@ -185,4 +193,14 @@ it('deduplicates native publications and orders delayed first delivery after hid
   await denied(()=>publish(randomUUID(),owner,randomUUID()),'42501')
   await denied(()=>as(owner,'SELECT chat.publish_native_conversation_message($1,$2,$3,$4,$5,$6)',[device,agent,session,id,agentDm,'2026-01-02T00:00:00Z']),'23505')
   expect((await db.query('SELECT count(*)::int n FROM chat.messages WHERE chat_id=$1',[agentDm])).rows[0].n).toBe(0)
+})
+
+it('does not block privacy erasure with private list-state or native publication foreign keys',async()=>{
+  await hide(group)
+  await as(owner,'SELECT chat.publish_native_conversation_message($1,$2,$3,$4,$5,$6)',[device,agent,randomUUID(),randomUUID(),agentDm,'2026-01-01T00:00:00Z'])
+  await hide(agentDm)
+  await db.query('DELETE FROM auth.users WHERE id=$1',[owner])
+  expect((await db.query('SELECT count(*)::int n FROM chat.conversation_list_state WHERE user_id=$1',[owner])).rows[0].n).toBe(0)
+  expect((await db.query('SELECT count(*)::int n FROM chat.conversation_hide_operations WHERE user_id=$1',[owner])).rows[0].n).toBe(0)
+  expect((await db.query('SELECT count(*)::int n FROM chat.native_conversation_publications WHERE agent_user_id=$1',[agent])).rows[0].n).toBe(0)
 })

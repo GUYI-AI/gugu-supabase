@@ -28,7 +28,7 @@ async function auth(c:pg.Client){
 }
 const hide=(c:pg.Client)=>c.query('SELECT chat.hide_my_conversation($1,$2)',[room,randomUUID()])
 const message=(c:pg.Client)=>c.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'race')",[randomUUID(),room,reader])
-const hidden=async()=>!!(await a.query('SELECT conversation_hidden_at FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[room,owner])).rows[0].conversation_hidden_at
+const hidden=async()=>!!(await a.query('SELECT conversation_hidden_at FROM chat.conversation_list_state WHERE chat_id=$1 AND user_id=$2',[room,owner])).rows[0].conversation_hidden_at
 async function waiting(){
   const until=Date.now()+4000
   while(Date.now()<until){

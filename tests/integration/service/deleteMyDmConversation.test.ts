@@ -28,14 +28,14 @@ it('keeps the legacy receipt shape while future calls use reversible list mainte
   expect(receipt.deleted_at).toBe(receipt.hidden_at)
   expect((await db.query('SELECT conversation_deleted_at FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[dm,owner])).rows[0].conversation_deleted_at).toBeNull()
   await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'returns')",[randomUUID(),dm,peer])
-  expect((await db.query('SELECT conversation_hidden_at FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[dm,owner])).rows[0].conversation_hidden_at).toBeNull()
+  expect((await db.query('SELECT state.conversation_hidden_at FROM chat.chat_members m LEFT JOIN chat.conversation_list_state state USING(chat_id,user_id) WHERE m.chat_id=$1 AND m.user_id=$2',[dm,owner])).rows[0].conversation_hidden_at).toBeNull()
 })
 it('replays historical permanent deletion without converting or restoring it',async()=>{
   await db.query('UPDATE chat.chat_members SET conversation_deleted_at=$1 WHERE chat_id=$2 AND user_id=$3',['2026-11-01T00:00:00Z',dm,owner])
   const receipt=await remove()
   expect(receipt).toMatchObject({chat_id:dm,already:true})
   expect(new Date(receipt.deleted_at).toISOString()).toBe('2026-11-01T00:00:00.000Z')
-  expect((await db.query('SELECT conversation_hidden_at FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[dm,owner])).rows[0].conversation_hidden_at).toBeNull()
+  expect((await db.query('SELECT state.conversation_hidden_at FROM chat.chat_members m LEFT JOIN chat.conversation_list_state state USING(chat_id,user_id) WHERE m.chat_id=$1 AND m.user_id=$2',[dm,owner])).rows[0].conversation_hidden_at).toBeNull()
 })
 it('keeps its anonymous and service-role execution ACL closed',async()=>{
   for(const role of ['anon','service_role'])expect((await db.query("SELECT has_function_privilege($1,'chat.delete_my_dm_conversation(text)','EXECUTE') allowed",[role])).rows[0].allowed).toBe(false)
