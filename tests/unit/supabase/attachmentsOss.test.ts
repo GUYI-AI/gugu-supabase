@@ -684,7 +684,7 @@ describe('直传表单、签名链接、回收', () => {
     try {
       expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 1, deleted: 1, failed: 0 })
       expect(f.removed).toEqual(['workspace/c/u/old'])
-      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error: String(loggingError) }))
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
     } finally { stderr.mockRestore() }
   })
   it.each([false, true])('gc preserves the original exception when summary logging throws (stderr unavailable: %s)', async stderrFails => {
@@ -695,7 +695,22 @@ describe('直传表单、签名链接、回收', () => {
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => { if (stderrFails) throw new Error('stderr unavailable') })
     try {
       await expect(handleGc(f.deps, 'kick')).rejects.toBe(original)
-      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error: String(loggingError) }))
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
+    } finally { stderr.mockRestore() }
+  })
+  it('gc excludes sensitive exception fields from its fallback log', async () => {
+    const sensitive = ['synthetic-private-report.pdf', 'synthetic-user@example.invalid', '/synthetic/private/upload', 'SyntheticSensitiveName', 'synthetic-stack-marker']
+    const loggingError = new Error(sensitive.slice(0, 3).join(' '))
+    loggingError.name = sensitive[3]!
+    loggingError.stack = sensitive[4]
+    const f = fakes()
+    f.deps.log = () => { throw loggingError }
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 0, deleted: 0, failed: 0 })
+      const output = JSON.stringify(stderr.mock.calls)
+      for (const value of sensitive) expect(output).not.toContain(value)
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
     } finally { stderr.mockRestore() }
   })
 })

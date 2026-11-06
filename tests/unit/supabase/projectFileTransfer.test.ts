@@ -61,7 +61,7 @@ describe('temporary file HTTP protocol',()=>{
       expect(await handleProjectFiles(f.deps,host,'file-accept',{transfer_id:transfer,ciphertext_bytes:128})).toMatchObject({transfer_id:transfer,max_bytes:128})
       expect(f.userRpc).toHaveBeenCalledWith('file_temporary_accept',{p_id:transfer,p_size:128})
       expect(f.objects.upload).toHaveBeenCalled()
-      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({fn:'attachments',stage:'gc_result_log_failed',entry:'file-accept',error:String(loggingError)}))
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({fn:'attachments',stage:'gc_result_log_failed',entry:'file-accept',error_type:'object',message:'GC summary logging failed'}))
     } finally {stderr.mockRestore()}
   })
   it('refuses modified ciphertext and malformed key material before publication',async()=>{

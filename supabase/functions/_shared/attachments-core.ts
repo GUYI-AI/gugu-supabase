@@ -536,7 +536,8 @@ export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-acce
         finished: result.deleted, failed: result.failed, outcome: completed ? 'completed' : 'error' })
     } catch (error) {
       try {
-        console.error(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry, error: String(error) }))
+        console.error(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry,
+          error_type: typeof error, message: 'GC summary logging failed' }))
       } catch { /* Even unavailable stderr must not replace the GC result or original exception. */ }
     }
   }
