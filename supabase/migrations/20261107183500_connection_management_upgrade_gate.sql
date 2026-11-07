@@ -81,7 +81,10 @@ BEGIN
     allowed:=NOT p_enforced OR COALESCE(identity.connection_semver_compare(p_version,minimum)>=0,false);
     RETURN jsonb_build_object('version',1,'feature','connection-management','policyRevision',p_revision::text,
       'enforced',p_enforced,'allowed',allowed,'minimumVersion',minimum,'clientPlatform',platform,
-      'errorCode',CASE WHEN NOT allowed THEN 'CONNECTION_CLIENT_UPGRADE_REQUIRED' END);
+      'errorCode',CASE WHEN NOT allowed THEN 'CONNECTION_CLIENT_UPGRADE_REQUIRED' END,
+      'message',CASE WHEN NOT allowed THEN CASE WHEN minimum IS NOT NULL
+        THEN format('请升级到 %s 版本后再管理连接',minimum)
+        ELSE '当前平台尚未配置连接管理最低版本，暂时无法管理连接' END END);
 END;
 $$;
 CREATE FUNCTION identity.connection_management_access() RETURNS jsonb
@@ -107,8 +110,9 @@ BEGIN
     headers:=identity.connection_management_headers();
     access:=identity.connection_management_decision(headers[1],headers[2],cfg.minimum_versions,cfg.enforced,cfg.revision);
     IF NOT (access->>'allowed')::boolean THEN
-        RAISE EXCEPTION 'CONNECTION_CLIENT_UPGRADE_REQUIRED' USING ERRCODE='PT426',
-          DETAIL=jsonb_build_object('feature','connection-management','minimumVersion',access->'minimumVersion',
+        RAISE EXCEPTION USING ERRCODE='PT426', MESSAGE=access->>'message',
+          DETAIL=jsonb_build_object('errorCode','CONNECTION_CLIENT_UPGRADE_REQUIRED',
+            'feature','connection-management','minimumVersion',access->'minimumVersion',
             'clientPlatform',access->'clientPlatform','policyRevision',access->>'policyRevision')::text;
     END IF;
 END;

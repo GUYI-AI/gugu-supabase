@@ -29,7 +29,7 @@ export async function assertConnectionManagementGate(db,test) {
   await test('management gate defaults off, is owner-authenticated and does not initialize assistant or head',async()=>{
     await db.query("SELECT set_config('request.headers','{}',true)")
     assert.deepEqual(await read(),{version:1,feature:'connection-management',policyRevision:'0',enforced:false,
-      allowed:true,minimumVersion:null,clientPlatform:null,errorCode:null})
+      allowed:true,minimumVersion:null,clientPlatform:null,errorCode:null,message:null})
     assert.equal((await db.query('SELECT count(*)::int n FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].n,0)
     for(const role of ['anon','service_role']) {
       assert.equal((await db.query("SELECT has_function_privilege($1,'identity.connection_management_access()','EXECUTE') allowed",[role])).rows[0].allowed,false)
@@ -49,20 +49,23 @@ export async function assertConnectionManagementGate(db,test) {
       await headers(version)
       const result=await read();assert.equal(result.allowed,allowed,`${version}`)
       assert.equal(result.errorCode,allowed?null:'CONNECTION_CLIENT_UPGRADE_REQUIRED')
+      assert.equal(result.message,allowed?null:'请升级到 1.2.3-beta.2 版本后再管理连接');
       assert.equal(result.minimumVersion,'1.2.3-beta.2');assert.equal(result.policyRevision,'1')
     }
     await headers('2.0.0-beta.1','phone');assert.equal((await read()).allowed,false)
     await headers('2.0.0','phone');assert.equal((await read()).allowed,true)
     await headers('9.0.0','unknown');const unknown=await read();assert.equal(unknown.allowed,false);assert.equal(unknown.clientPlatform,null)
-    await headers('9.0.0','web');assert.equal((await read()).allowed,false)
+    await headers('9.0.0','web');const unconfigured=await read();assert.equal(unconfigured.allowed,false);
+    assert.equal(unconfigured.minimumVersion,null);
+    assert.equal(unconfigured.message,'当前平台尚未配置连接管理最低版本，暂时无法管理连接')
     assert.equal((await db.query('SELECT identity.connection_authority() value')).rows[0].value.mode,'legacy')
     assert.equal((await db.query('SELECT count(*)::int n FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].n,0)
   })
   await test('blocked SQL has exact PT426 and public details; configuration changes are revision fenced and API closed',async()=>{
     await headers('0.3.1')
     const error=await refused('SELECT identity.connection_management_require_access()','PT426')
-    assert.equal(error.message,'CONNECTION_CLIENT_UPGRADE_REQUIRED')
-    assert.deepEqual(JSON.parse(error.detail),{feature:'connection-management',minimumVersion:'1.2.3-beta.2',clientPlatform:'desktop',policyRevision:'1'})
+    assert.equal(error.message,'请升级到 1.2.3-beta.2 版本后再管理连接')
+    assert.deepEqual(JSON.parse(error.detail),{errorCode:'CONNECTION_CLIENT_UPGRADE_REQUIRED',feature:'connection-management',minimumVersion:'1.2.3-beta.2',clientPlatform:'desktop',policyRevision:'1'})
     await refused("SELECT identity.connection_management_set_policy(0,false,'{}')",'PT409')
     await refused("SELECT identity.connection_management_set_policy(1,true,'{}')",'22023')
     await refused("SELECT identity.connection_management_set_policy(1,true,'{\"desktop\":\"1.2.3-beta.01\"}')",'22023')

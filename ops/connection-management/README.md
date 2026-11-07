@@ -24,11 +24,17 @@ numerically. Versions are bounded to 128 characters and nine-digit core numbers.
 The availability DTO is:
 `{version:1, feature:'connection-management', policyRevision:string,
 enforced:boolean, allowed:boolean, minimumVersion:string|null,
-clientPlatform:string|null, errorCode:'CONNECTION_CLIENT_UPGRADE_REQUIRED'|null}`.
+clientPlatform:string|null, errorCode:'CONNECTION_CLIENT_UPGRADE_REQUIRED'|null,
+message:string|null}`. Allowed responses have a null message. Denied responses
+carry the server instruction verbatim.
 
-A blocked SQL call has SQLSTATE `PT426`, exact message
-`CONNECTION_CLIENT_UPGRADE_REQUIRED`, and JSON DETAIL containing only feature,
-minimumVersion, clientPlatform and policyRevision. Permission, missing-RPC and
+A blocked SQL call has SQLSTATE `PT426`, with a human-readable MESSAGE and
+JSON DETAIL containing `errorCode=CONNECTION_CLIENT_UPGRADE_REQUIRED`, feature,
+minimumVersion, clientPlatform and policyRevision. With a configured minimum X,
+the MESSAGE is exactly `请升级到 X 版本后再管理连接`. The access reader returns the
+same text; the client preserves it rather than inventing its own prompt. An
+unknown or unconfigured platform retains a null minimum and the explicit policy
+message `当前平台尚未配置连接管理最低版本，暂时无法管理连接`; no version is fabricated. Permission, missing-RPC and
 transport failures are not upgrade decisions. The declaration is a rollout
 compatibility signal; it never substitutes for owner/device authorization.
 
