@@ -323,10 +323,11 @@ DECLARE target regprocedure := 'chat.sync_snapshot()'::regprocedure;
 BEGIN
   SELECT pg_get_functiondef(p.oid),COALESCE(p.proacl,acldefault('f',p.proowner))
     INTO definition,prior_acl FROM pg_proc p WHERE p.oid=target;
-  IF (length(definition)-length(replace(definition,old_projection,''))) <> length(old_projection) THEN
+  IF (length(definition)-length(replace(definition,old_projection,''))) = length(old_projection) THEN
+    EXECUTE replace(definition,old_projection,new_projection);
+  ELSIF (length(definition)-length(replace(definition,new_projection,''))) <> length(new_projection) THEN
     RAISE EXCEPTION 'Unexpected account snapshot presence projection';
   END IF;
-  EXECUTE replace(definition,old_projection,new_projection);
   FOR permission IN SELECT grantee,bool_or(is_grantable) AS grantable FROM aclexplode(prior_acl)
     WHERE privilege_type='EXECUTE' GROUP BY grantee LOOP
     EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %s%s',target,

@@ -39,7 +39,7 @@ function previous(file: string, name: string, alias: string) {
   const delimiter = /\bAS (\$[A-Za-z_]*\$)/i.exec(tail)
   if (!delimiter) throw new Error('Missing predecessor body')
   const end = tail.indexOf(delimiter[1]!, delimiter.index + delimiter[0].length)
-  return tail.slice(0, end + delimiter[1]!.length) .replace(`CREATE FUNCTION ${name}(`, `CREATE FUNCTION ${alias}(`) + ';'
+  return tail.slice(0, end + delimiter[1]!.length).replace(`CREATE FUNCTION ${name}(`, `CREATE FUNCTION ${alias}(`) + ';'
 }
 
 async function fixture(body: (f: { owner: string; peer: string; stranger: string; group: string; own: string; shared: string; hidden: string }) => Promise<void>) {
@@ -104,6 +104,9 @@ describe('account snapshot set projections', () => {
     const guard=/DO \$presence_predecessor\$[\s\S]*?END \$presence_predecessor\$;/.exec(migration)?.[0]
     if (!guard) throw new Error('Missing presence predecessor guard')
     await db.query(guard)
+    // Replay the complete installed migration, including the API-grant DDL guard.
+    await db.query(migration)
+    await db.query(migration)
     const values=await as<{old:unknown;current:{results:Record<string,{presence:Row}>}}>(f.owner,
       'SELECT identity.before_batch_224($1) AS old,identity.get_agent_presence_batch($1) AS current',[[f.own,f.shared,f.hidden]])
     expect(values[0]!.current).toEqual(values[0]!.old)
@@ -114,6 +117,28 @@ describe('account snapshot set projections', () => {
     await db.query(scalar.replace('DECLARE','-- unknown predecessor\nDECLARE'))
     await expect(db.query(guard)).rejects.toThrow(/Unexpected scalar presence predecessor/)
     await db.query('ROLLBACK TO SAVEPOINT unknown_presence')
+  }))
+
+  it('avoids the scalar presence and per-message ownership paths', () => fixture(async f => {
+    const anchor=randomUUID()
+    await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'own anchor')", [anchor,f.group,f.owner])
+    await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,reply_to_message_id) VALUES($1,$2,$3,'owned reply',$4)", [randomUUID(),f.group,f.own,anchor])
+    // The two old implementations must hit these sentinels. Restoring either
+    // per-row path is a regression even when it still returns equal JSON.
+    await db.query(`CREATE OR REPLACE FUNCTION identity.build_agent_presence_payload(p_agent_user_id text) RETURNS jsonb
+      LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=identity,public,pg_catalog
+      AS $$ BEGIN RAISE EXCEPTION 'scalar presence regression'; END $$`)
+    await db.query(`CREATE OR REPLACE FUNCTION chat.is_owned_agent_user(p_user_id text) RETURNS boolean
+      LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=chat,public,pg_catalog
+      AS $$ BEGIN RAISE EXCEPTION 'scalar ownership regression'; END $$`)
+    await expect(as(f.owner,'SELECT identity.before_batch_224($1)',[[f.own]])).rejects.toThrow(/scalar presence regression/)
+    await expect(as(f.owner,'SELECT * FROM chat.before_unread_224($1)',[[f.group]])).rejects.toThrow(/scalar ownership regression/)
+    const batch=await as<{value:{results:Record<string,{status:string}>}}>(f.owner,'SELECT identity.get_agent_presence_batch($1) AS value',[[f.own,f.shared]])
+    expect(batch[0]!.value.results[f.own]!.status).toBe('presence')
+    const unread=await as<{unread_count:string}>(f.owner,'SELECT unread_count FROM chat.list_unread_locators_for_chats($1)',[[f.group]])
+    expect(unread.some(row=>Number(row.unread_count)>0)).toBe(true)
+    const snapshot=await as<{value:{presence:Record<string,unknown>}}>(f.owner,'SELECT chat.sync_snapshot() AS value')
+    expect(snapshot[0]!.value.presence).toHaveProperty(f.own)
   }))
 
   it('keeps the snapshot wrapper and invoker boundary while batching more than 200 owned agents', () => fixture(async f => {
