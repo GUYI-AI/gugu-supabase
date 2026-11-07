@@ -130,8 +130,10 @@ describe('archive terminates identity without touching seats or history', () => 
     const functions = (await db.query(`SELECT n.nspname||'.'||p.proname AS name,p.prosrc FROM pg_proc p
       JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
       WHERE n.nspname IN ('chat','identity','file_private','public') AND l.lanname IN ('sql','plpgsql') AND p.prokind='f'`)).rows
-    // Personal deletion verifies the owner's retained historical DM seats without removing their access.
-    const physical = new Set(['chat.chats_membership_invariants','chat.chats_status_invariants','chat.historical_dm_peer','chat.delete_my_dm_conversation'])
+    // Personal deletion verifies the owner's retained historical DM seats without removing their access;
+    // byte release finds a just-removed identity's own DM seats, which are no longer live.
+    const physical = new Set(['chat.chats_membership_invariants','chat.chats_status_invariants','chat.historical_dm_peer','chat.delete_my_dm_conversation',
+      'chat.conversation_release_on_change'])
     expect(functions.filter(r => !physical.has(r.name) && /\b(?:FROM|JOIN|USING)\s+chat\.chat_members\b/i.test(
       r.prosrc.replace(/\bDELETE\s+FROM\s+chat\.chat_members\b/gi, 'DELETE TARGET'))).map(r => r.name)).toEqual([])
     expect(functions.find(r => r.name === 'chat.chats_membership_invariants')?.prosrc).toContain('FROM chat.active_members m')

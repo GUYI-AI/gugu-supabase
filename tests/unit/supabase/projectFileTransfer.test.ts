@@ -49,6 +49,20 @@ describe('temporary file HTTP protocol',()=>{
     expect(f.objects.remove).toHaveBeenCalledWith('temporary/old')
     expect(f.objects.invalidate).not.toHaveBeenCalled()
     expect(order.indexOf('file_blob_gc_finish')).toBeLessThan(order.indexOf('file_temporary_accept'))
+    expect(f.deps.log).toHaveBeenCalledExactlyOnceWith('gc_result', { entry: 'file-accept',
+      at: '2026-10-24T00:00:00.000Z', day: '2026-10-24', claimed: 1, deleted: 1, finished: 1, failed: 0, outcome: 'completed' })
+  })
+  it('continues file-accept permission issuance when the GC summary logger throws', async () => {
+    const f=fixture(), loggingError=new Error('summary logger unavailable')
+    f.serviceRpc.mockImplementation(async(fn)=>({data:fn==='file_temporary_expire'?1:fn==='file_blob_gc_claim'?[]:null,error:null}))
+    f.deps.log=()=>{throw loggingError}
+    const stderr=vi.spyOn(console,'error').mockImplementation(()=>{})
+    try {
+      expect(await handleProjectFiles(f.deps,host,'file-accept',{transfer_id:transfer,ciphertext_bytes:128})).toMatchObject({transfer_id:transfer,max_bytes:128})
+      expect(f.userRpc).toHaveBeenCalledWith('file_temporary_accept',{p_id:transfer,p_size:128})
+      expect(f.objects.upload).toHaveBeenCalled()
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({fn:'attachments',stage:'gc_result_log_failed',entry:'file-accept',error_type:'object',message:'GC summary logging failed'}))
+    } finally {stderr.mockRestore()}
   })
   it('refuses modified ciphertext and malformed key material before publication',async()=>{
     const f=fixture(),body={transfer_id:transfer,ciphertext_bytes:128,ciphertext_sha256:sha,key}
