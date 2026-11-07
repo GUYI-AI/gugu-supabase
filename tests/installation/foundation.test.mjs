@@ -370,7 +370,7 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     assert.deepEqual(await installReleases(query), { applied: [], versions })
     await assertAllocatedProjectPublisher(query)
     assert.deepEqual(await query('SELECT version,digest,installed_at FROM gugu_install.releases'), before)
-    assert.equal((await query("SELECT count(*)::integer AS n FROM pg_policies WHERE schemaname='realtime' AND policyname LIKE 'gugu_%'"))[0].n, 9, 'foundation 7 + forum events + owned agents')
+    assert.equal((await query("SELECT count(*)::integer AS n FROM pg_policies WHERE schemaname='realtime' AND policyname LIKE 'gugu_%'"))[0].n, 10, 'foundation 7 + forum events + owned agents + file holders')
     assert.equal((await query("SELECT count(*)::integer AS n FROM cron.job WHERE active AND jobname IN ('device-lease-sweep','file-blob-upload-sweep','file-blob-gc-kick')"))[0].n, 3)
     assert.equal((await query("SELECT to_regnamespace('billing') AS billing"))[0].billing, null)
     assert.equal((await query("SELECT count(*)::integer AS n FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('model_access_reserve','cloud_computer_charge','gateway_pool_claim')"))[0].n, 0)
