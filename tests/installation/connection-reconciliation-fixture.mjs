@@ -108,6 +108,22 @@ export async function assertConnectionReconciliation(db,runTest) {
     await age(operationId);assert.equal(await resolve(operationId),null);
     await db.query('ROLLBACK TO lost_native_admit; RELEASE lost_native_admit');
   })
+  await test('a newer provider intent fences an older effect and publication even at the identical head revision',async()=>{
+    await db.query('SAVEPOINT provider_intent_order');
+    const operationId=randomUUID(),head=(await db.query('SELECT revision::text AS v FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].v;
+    const ticket=await rpc('connection_recreate_begin',"$1,$2,NULL,NULL,$3,'github',$4",[operationId,scope,device,head]);
+    const context=await rpc('connection_attempt_prepare','$1,1,$2',[operationId,runtime]);
+    const data={providerId:'github',accountId:'older-unpublished',configured:true};
+    const document=JSON.stringify({version:1,providerId:'github',accountId:'older-unpublished'});
+    const publication={operationId,scopeKey:scope,resourceKey:null,expectedRevision:null,operation:'save',data,document,deviceId:device,recreationId:ticket.recreationId};
+    await rpc('connection_record_effect',"$1,$2,$3,$4,'github','older-unpublished','applied','native-transaction',$5,$6",[owner,operationId,context.attemptId,context.credentialGeneration,'e'.repeat(64),publication]);
+    await rpc('connection_recreate_begin',"$1,$2,NULL,NULL,$3,'github',$4",[randomUUID(),scope,device,head]);
+    await reject(()=>rpc('connection_attempt_write_fence','$1,$2,$3,1',[owner,operationId,context.attemptId]),'PT409');
+    await reject(()=>rpc('connection_commit',"$1,$2,NULL,NULL,'save',$3,$4,$5,$6,$7",[operationId,scope,data,document,device,runtime,ticket.recreationId]),'PT409');
+    assert.equal((await resolve(operationId)).outcome,'applied');
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM identity.connection_items WHERE owner_user_id=$1 AND resource_key=$2',[owner,key('older-unpublished')])).rows[0].n,0);
+    await db.query('ROLLBACK TO provider_intent_order; RELEASE provider_intent_order');
+  })
   await test('native preparation rejects a stale authorization head before an attempt can start',async()=>{
     await db.query('SAVEPOINT stale_native_prepare');
     const operationId=randomUUID(),head=(await db.query('SELECT revision::text AS v FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].v;

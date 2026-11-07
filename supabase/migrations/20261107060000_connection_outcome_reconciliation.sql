@@ -181,6 +181,9 @@ BEGIN
     ELSE
         IF NOT EXISTS (SELECT 1 FROM identity.connection_recreation_intents i WHERE i.recreation_id=a.recreation_id
             AND i.owner_user_id=p_owner AND i.operation_id=p_operation_id AND i.consumed_at IS NULL AND i.expires_at>clock_timestamp()
+            AND NOT EXISTS (SELECT 1 FROM identity.connection_recreation_intents newer WHERE newer.owner_user_id=p_owner
+              AND newer.scope_key=i.scope_key AND COALESCE(newer.provider_id,identity.connection_account_key(newer.resource_key)->>0)=a.provider_id
+              AND newer.intent_generation>i.intent_generation)
             AND (i.expected_head_revision IS NULL OR i.expected_head_revision=h.revision)
             AND (i.resource_key IS NULL OR COALESCE((SELECT revision FROM identity.connection_items
                 WHERE owner_user_id=p_owner AND scope_key=i.scope_key AND resource_key=i.resource_key),0)=i.expected_item_revision)) THEN
@@ -468,6 +471,15 @@ BEGIN
             RAISE EXCEPTION 'Connection changed during provider authorization' USING ERRCODE = 'PT409';
         END IF;
     END IF;
+    -- A newer explicit provider intent wins even when the owner head has not
+    -- changed yet. Bound historical success is evidence, not permission to
+    -- publish over a more recent authorization that has no item revision yet.
+    IF p_recreation_id IS NOT NULL AND intent.evidence_protocol AND EXISTS (
+        SELECT 1 FROM identity.connection_recreation_intents newer WHERE newer.owner_user_id=owner_id
+          AND newer.scope_key=p_scope_key
+          AND COALESCE(newer.provider_id,identity.connection_account_key(newer.resource_key)->>0)=p_data->>'providerId'
+          AND newer.intent_generation>intent.intent_generation) THEN
+        RAISE EXCEPTION 'Connection authorization was superseded' USING ERRCODE='PT409'; END IF;
     IF p_recreation_id IS NOT NULL AND intent.evidence_protocol AND NOT EXISTS (
         SELECT 1 FROM identity.connection_attempts a JOIN identity.connection_effect_evidence e USING(operation_id)
         WHERE a.operation_id=p_operation_id AND a.owner_user_id=owner_id AND a.recreation_id=p_recreation_id
