@@ -24,7 +24,7 @@ export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:
   const store=objectStorage(deps)
   if(route==='file-accept') {
     const retired=await call(deps.serviceRpc,'file_temporary_expire',{p_limit:500,p_request:transfer,p_host:user,p_needed:bytes})
-    if(Number(retired)>0) await handleGc(deps)
+    if(Number(retired)>0) await handleGc(deps,'file-accept')
     const permit=await call(deps.userRpc,'file_temporary_accept',{p_id:transfer,p_size:bytes}) as {staging_key:string;signed_at:string;expires_at:string;max_bytes:number}
     const seconds=(Date.parse(permit.expires_at)-Date.parse(permit.signed_at))/1000
     const bounds=await store.uploadBounds(bytes,seconds)
