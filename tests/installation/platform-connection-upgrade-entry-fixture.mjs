@@ -26,6 +26,10 @@ export async function installConnectionEntryGateWithEvidence({db,query,sql,test}
         try{await action()}catch(e){error=e}
         await db.query('ROLLBACK TO entry_rejection; RELEASE entry_rejection')
         assert.equal(error?.code,code,error?.message ?? 'expected refusal')
+        if(code==='PT426') {
+          assert.equal(error.message,'请升级到 8.0.0 版本后再管理连接')
+          assert.deepEqual(JSON.parse(error.detail),{errorCode:'CONNECTION_CLIENT_UPGRADE_REQUIRED',feature:'connection-management',minimumVersion:'8.0.0',clientPlatform:'desktop',policyRevision:'1'})
+        }
       }
       const declarations=async(version)=>db.query("SELECT set_config('request.headers',$1,true)",[
         JSON.stringify({'x-gugu-connection-client-version':version,'x-gugu-connection-client-platform':'desktop'})])
