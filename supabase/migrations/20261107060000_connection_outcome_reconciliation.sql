@@ -27,13 +27,15 @@ CREATE TABLE identity.connection_attempts (
     credential_generation uuid NOT NULL DEFAULT gen_random_uuid(),
     executor_kind text NOT NULL CHECK (executor_kind IN ('platform','runtime')),
     runtime_instance_id text,
+    prepared_at timestamptz,
+    initial_head_revision bigint NOT NULL,
     started_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     deadline_at timestamptz NOT NULL DEFAULT statement_timestamp() + interval '10 minutes',
     fenced_at timestamptz,
-    fence_kind text CHECK (fence_kind IN ('platform-transaction','native-transaction')),
+    fence_kind text CHECK (fence_kind IN ('platform-transaction','native-transaction','unprepared-intent')),
     fence_digest text CHECK (fence_digest IS NULL OR fence_digest ~ '^[0-9a-f]{64}$'),
     CHECK ((scope_key='platform' AND device_id IS NULL AND executor_kind='platform' AND runtime_instance_id IS NULL)
-        OR (device_id IS NOT NULL AND scope_key='device:' || device_id AND executor_kind='runtime' AND runtime_instance_id IS NOT NULL)),
+        OR (device_id IS NOT NULL AND scope_key='device:' || device_id AND executor_kind='runtime' AND (runtime_instance_id IS NOT NULL OR prepared_at IS NULL))),
     CHECK ((fenced_at IS NULL AND fence_kind IS NULL AND fence_digest IS NULL)
         OR (fenced_at IS NOT NULL AND fence_kind IS NOT NULL AND fence_digest IS NOT NULL)),
     CHECK (deadline_at > started_at AND deadline_at <= started_at + interval '10 minutes')
@@ -71,6 +73,28 @@ ALTER TABLE identity.connection_resolutions ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON identity.connection_attempts,identity.connection_effect_evidence,identity.connection_resolutions
     FROM PUBLIC,anon,authenticated,service_role;
 
+-- Register the original protocol-2 authorization BEFORE returning its ticket.
+-- Until prepare binds a runtime, no credential generation is disclosed to a
+-- device. A lost ticket/prepare response therefore remains a durable candidate.
+CREATE FUNCTION identity.connection_attempt_initialize(p_owner text,p_operation_id uuid) RETURNS void
+LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+DECLARE i identity.connection_recreation_intents%ROWTYPE; h identity.connection_heads%ROWTYPE;
+BEGIN
+    SELECT * INTO h FROM identity.connection_heads WHERE owner_user_id=p_owner FOR UPDATE;
+    SELECT * INTO i FROM identity.connection_recreation_intents WHERE owner_user_id=p_owner AND operation_id=p_operation_id;
+    IF NOT FOUND OR NOT i.evidence_protocol THEN RETURN; END IF;
+    INSERT INTO identity.connection_attempts(operation_id,owner_user_id,scope_key,resource_key,device_id,provider_id,account_id,
+        operation,request_hash,recreation_id,authority_epoch,executor_kind,initial_head_revision)
+      VALUES(i.operation_id,p_owner,i.scope_key,i.resource_key,i.device_id,
+        COALESCE(i.provider_id,identity.connection_account_key(i.resource_key)->>0),identity.connection_account_key(i.resource_key)->>1,
+        'save',encode(sha256(convert_to(jsonb_build_array(i.operation_id,i.recreation_id,p_owner,i.scope_key,i.resource_key,
+          i.device_id,i.provider_id,i.expected_item_revision,i.expected_head_revision)::text,'UTF8')),'hex'),
+        i.recreation_id,h.authority_epoch,CASE WHEN i.device_id IS NULL THEN 'platform' ELSE 'runtime' END,h.revision)
+      ON CONFLICT(operation_id) DO NOTHING;
+END;
+$$;
+REVOKE ALL ON FUNCTION identity.connection_attempt_initialize(text,uuid) FROM PUBLIC,anon,authenticated,service_role;
+
 -- Trusted custody adapters call this inside their effect protocol. The owner
 -- argument is never a client-selected identity; wrappers must derive it from
 -- the validated JWT or an authenticated device response. All writers stay closed.
@@ -84,8 +108,15 @@ BEGIN
     SELECT * INTO a FROM identity.connection_attempts WHERE operation_id=p_operation_id;
     IF FOUND THEN
         IF a.owner_user_id IS DISTINCT FROM p_owner OR a.authority_epoch IS DISTINCT FROM p_epoch
-            OR a.runtime_instance_id IS DISTINCT FROM p_runtime_instance_id THEN
+            OR a.prepared_at IS NOT NULL AND a.runtime_instance_id IS DISTINCT FROM p_runtime_instance_id THEN
             RAISE EXCEPTION 'Connection attempt is unavailable' USING ERRCODE='42501'; END IF;
+        IF a.prepared_at IS NULL THEN
+            IF a.device_id IS NOT NULL AND identity.connection_runtime(p_owner,p_runtime_instance_id) IS DISTINCT FROM a.device_id
+                OR a.device_id IS NULL AND p_runtime_instance_id IS NOT NULL THEN
+                RAISE EXCEPTION 'Connection attempt device is unavailable' USING ERRCODE='42501'; END IF;
+            UPDATE identity.connection_attempts SET runtime_instance_id=p_runtime_instance_id,prepared_at=clock_timestamp()
+              WHERE attempt_id=a.attempt_id;
+        END IF;
         RETURN a.attempt_id;
     END IF;
     SELECT * INTO h FROM identity.connection_heads WHERE owner_user_id=p_owner;
@@ -118,9 +149,9 @@ BEGIN
         OR v_device IS NULL AND p_runtime_instance_id IS NOT NULL THEN
         RAISE EXCEPTION 'Connection attempt device is unavailable' USING ERRCODE='42501'; END IF;
     INSERT INTO identity.connection_attempts(operation_id,owner_user_id,scope_key,resource_key,device_id,provider_id,account_id,
-        operation,request_hash,operation_revision,admission_id,recreation_id,authority_epoch,executor_kind,runtime_instance_id)
+        operation,request_hash,operation_revision,admission_id,recreation_id,authority_epoch,executor_kind,runtime_instance_id,prepared_at,initial_head_revision)
       VALUES(p_operation_id,p_owner,v_scope,v_key,v_device,v_provider,v_account,v_operation,v_hash,c.revision,c.last_admission_id,i.recreation_id,
-        p_epoch,CASE WHEN v_device IS NULL THEN 'platform' ELSE 'runtime' END,p_runtime_instance_id) RETURNING * INTO a;
+        p_epoch,CASE WHEN v_device IS NULL THEN 'platform' ELSE 'runtime' END,p_runtime_instance_id,clock_timestamp(),h.revision) RETURNING * INTO a;
     RETURN a.attempt_id;
 END;
 $$;
@@ -133,7 +164,7 @@ DECLARE a identity.connection_attempts%ROWTYPE; h identity.connection_heads%ROWT
 BEGIN
     SELECT * INTO h FROM identity.connection_heads WHERE owner_user_id=p_owner FOR UPDATE;
     SELECT * INTO a FROM identity.connection_attempts WHERE owner_user_id=p_owner AND operation_id=p_operation_id AND attempt_id=p_attempt_id FOR UPDATE;
-    IF NOT FOUND OR a.fenced_at IS NOT NULL OR a.authority_epoch IS DISTINCT FROM p_epoch OR h.authority_epoch IS DISTINCT FROM p_epoch
+    IF NOT FOUND OR a.prepared_at IS NULL OR a.fenced_at IS NOT NULL OR a.authority_epoch IS DISTINCT FROM p_epoch OR h.authority_epoch IS DISTINCT FROM p_epoch
         OR h.authority_mode<>'owner' OR h.authority_phase<>'stable' OR clock_timestamp()>=a.deadline_at THEN
         RAISE EXCEPTION 'Connection attempt is fenced' USING ERRCODE='PT409'; END IF;
     IF a.device_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM identity.gugu_devices WHERE device_id=a.device_id AND user_id::text=p_owner) THEN
@@ -255,11 +286,11 @@ BEGIN
     applied:=COALESCE(applied,false);
     IF NOT applied AND e.operation_id IS NULL AND clock_timestamp()<a.deadline_at AND a.fenced_at IS NULL THEN RETURN NULL; END IF;
     IF NOT applied AND a.fenced_at IS NULL THEN
-        IF a.executor_kind<>'platform' THEN RETURN NULL; END IF;
+        IF a.executor_kind<>'platform' AND NOT (a.recreation_id IS NOT NULL AND a.prepared_at IS NULL) THEN RETURN NULL; END IF;
         -- Platform custody writers take this same owner/attempt row lock and
         -- check the fence in their actual credential transaction. The separate
         -- cloud adapter must be installed before this capability is activated.
-        UPDATE identity.connection_attempts SET fenced_at=clock_timestamp(),fence_kind='platform-transaction',
+        UPDATE identity.connection_attempts SET fenced_at=clock_timestamp(),fence_kind=CASE WHEN a.executor_kind='runtime' THEN 'unprepared-intent' ELSE 'platform-transaction' END,
             fence_digest=encode(sha256(convert_to(jsonb_build_array(a.attempt_id,a.credential_generation,'fenced')::text,'UTF8')),'hex')
           WHERE attempt_id=a.attempt_id RETURNING * INTO a;
     END IF;
@@ -332,11 +363,17 @@ REVOKE ALL ON FUNCTION identity.connection_attempt_begin(text,uuid,bigint,text),
 CREATE OR REPLACE FUNCTION identity.connection_admit(p_runtime_instance_id text,p_expected_revision bigint,p_operation_id uuid DEFAULT NULL) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE owner_id text := identity.connection_owner(); device text; current_revision bigint; change identity.connection_operations%ROWTYPE;
+    result jsonb; epoch bigint;
 BEGIN
     PERFORM identity.connection_owner_lock(owner_id);
     device := identity.connection_runtime(owner_id,p_runtime_instance_id);
     IF p_operation_id IS NOT NULL THEN
-        RETURN identity.connection_admit_operation(owner_id,p_operation_id,p_expected_revision,'runtime',device,p_runtime_instance_id);
+        result:=identity.connection_admit_operation(owner_id,p_operation_id,p_expected_revision,'runtime',device,p_runtime_instance_id);
+        IF result->'admitted'='true'::jsonb AND (SELECT verification_protocol=2 FROM identity.connection_heads WHERE owner_user_id=owner_id) THEN
+            SELECT authority_epoch INTO epoch FROM identity.connection_heads WHERE owner_user_id=owner_id;
+            PERFORM identity.connection_attempt_begin(owner_id,p_operation_id,epoch,p_runtime_instance_id);
+        END IF;
+        RETURN result;
     END IF;
     SELECT revision INTO current_revision FROM identity.connection_heads WHERE owner_user_id=owner_id;
     IF p_expected_revision IS DISTINCT FROM current_revision THEN RAISE EXCEPTION 'Connection changed before task admission' USING ERRCODE='PT409'; END IF;
@@ -596,6 +633,7 @@ LANGUAGE sql STABLE SET search_path=pg_catalog AS $$
                 i.device_id,i.provider_id,i.expected_item_revision,i.expected_head_revision)::text,'UTF8')),'hex') END,
         'operationRevision',CASE WHEN a.recreation_id IS NULL THEN a.operation_revision::text END,
         'admissionId',a.admission_id,'recreationId',a.recreation_id,'expectedItemRevision',i.expected_item_revision::text,
+        'expectedHeadRevision',CASE WHEN a.recreation_id IS NOT NULL THEN a.initial_head_revision::text END,
         'deadlineAt',floor(extract(epoch FROM a.deadline_at)*1000),
         'effectKind',CASE WHEN a.operation='remove' THEN 'remove' WHEN a.recreation_id IS NOT NULL THEN 'authorize' ELSE 'default' END)
     FROM identity.connection_attempts a LEFT JOIN identity.connection_recreation_intents i ON i.recreation_id=a.recreation_id
@@ -604,10 +642,11 @@ $$;
 
 CREATE FUNCTION identity.connection_attempt_prepare(p_operation_id uuid,p_epoch bigint,p_runtime_instance_id text) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
-DECLARE owner_id text:=identity.connection_owner(); device text; context jsonb;
+DECLARE owner_id text:=identity.connection_owner(); device text; context jsonb; attempt uuid;
 BEGIN
     device:=identity.connection_runtime(owner_id,p_runtime_instance_id);
-    PERFORM identity.connection_attempt_begin(owner_id,p_operation_id,p_epoch,p_runtime_instance_id);
+    attempt:=identity.connection_attempt_begin(owner_id,p_operation_id,p_epoch,p_runtime_instance_id);
+    PERFORM identity.connection_attempt_write_fence(owner_id,p_operation_id,attempt,p_epoch);
     context:=identity.connection_attempt_context(owner_id,p_operation_id);
     IF context->>'deviceId' IS DISTINCT FROM device OR context->>'scopeKey' IS DISTINCT FROM 'device:' || device THEN
         RAISE EXCEPTION 'Connection native attempt is unavailable' USING ERRCODE='42501'; END IF;
@@ -716,6 +755,7 @@ BEGIN
           VALUES(p_operation_id,owner_id,p_scope_key,p_resource_key,p_expected_revision,p_device_id,p_provider_id,p_expected_head_revision,
             (SELECT verification_protocol=2 FROM identity.connection_heads WHERE owner_user_id=owner_id)) RETURNING * INTO intent;
     END IF;
+    PERFORM identity.connection_attempt_initialize(owner_id,p_operation_id);
     RETURN jsonb_build_object('recreationId',intent.recreation_id,'operationId',intent.operation_id,
         'expectedItemRevision',intent.expected_item_revision::text,'expectedHeadRevision',intent.expected_head_revision::text,
         'providerId',intent.provider_id,'revision',(SELECT revision::text FROM identity.connection_heads WHERE owner_user_id = owner_id),
@@ -834,7 +874,8 @@ DECLARE owner_id text:=identity.connection_owner(); device text; context jsonb;
 BEGIN
     device:=identity.connection_runtime(owner_id,p_runtime_instance_id);
     context:=identity.connection_attempt_context(owner_id,p_operation_id);
-    IF context IS NULL OR context->>'deviceId' IS DISTINCT FROM device THEN RETURN NULL; END IF;
+    IF context IS NULL OR context->>'deviceId' IS DISTINCT FROM device OR NOT EXISTS (
+        SELECT 1 FROM identity.connection_attempts WHERE owner_user_id=owner_id AND operation_id=p_operation_id AND prepared_at IS NOT NULL) THEN RETURN NULL; END IF;
     RETURN context;
 END;
 $$;

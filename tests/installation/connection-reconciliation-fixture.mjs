@@ -85,6 +85,39 @@ export async function assertConnectionReconciliation(db,runTest) {
     const result=await resolve(operationId);assert.equal(result.outcome,'failed');assert.deepEqual(await resolve(operationId),result)
     await reject(()=>rpc('connection_record_effect',"$1,$2,$3,$4,'github','unfenceable','applied','native-transaction',$5",[owner,operationId,attempt.attempt_id,attempt.credential_generation,'b'.repeat(64)]),'PT409')
   })
+  await test('a lost native authorization ticket response expires without any disclosed generation or device effect',async()=>{
+    await db.query('SAVEPOINT unprepared_native');
+    const operationId=randomUUID(),head=(await db.query('SELECT revision::text AS v FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].v;
+    await rpc('connection_recreate_begin',"$1,$2,NULL,NULL,$3,'github',$4",[operationId,scope,device,head]);
+    const row=(await db.query('SELECT * FROM identity.connection_attempts WHERE operation_id=$1',[operationId])).rows[0];
+    assert.equal(row.prepared_at,null);assert.equal(row.runtime_instance_id,null);
+    assert.equal(await rpc('connection_attempt_inspect','$1,$2',[operationId,runtime]),null);
+    assert.equal(await resolve(operationId),null);await age(operationId);
+    const decision=await resolve(operationId);assert.equal(decision.outcome,'failed');assert.deepEqual(await resolve(operationId),decision);
+    assert.equal((await db.query('SELECT fence_kind FROM identity.connection_attempts WHERE operation_id=$1',[operationId])).rows[0].fence_kind,'unprepared-intent');
+    await reject(()=>rpc('connection_attempt_prepare','$1,1,$2',[operationId,runtime]),'PT409');
+    await db.query('ROLLBACK TO unprepared_native; RELEASE unprepared_native');
+  })
+  await test('the original native admission is a durable candidate before its response can be lost',async()=>{
+    await db.query('SAVEPOINT lost_native_admit');
+    const saved=await save('lost-admit'),operationId=randomUUID();
+    const removed=await rpc('connection_commit',"$1,$2,$3,$4,'remove',$5,NULL,$6,NULL",[operationId,scope,key('lost-admit'),saved.revision,{},device]);
+    const receipt=await rpc('connection_admit','$1,$2,$3',[runtime,removed.revision,operationId]);
+    const row=(await db.query('SELECT * FROM identity.connection_attempts WHERE operation_id=$1',[operationId])).rows[0];
+    assert.equal(row.admission_id,receipt.admissionId);assert.ok(row.prepared_at);
+    await age(operationId);assert.equal(await resolve(operationId),null);
+    await db.query('ROLLBACK TO lost_native_admit; RELEASE lost_native_admit');
+  })
+  await test('native preparation rejects a stale authorization head before an attempt can start',async()=>{
+    await db.query('SAVEPOINT stale_native_prepare');
+    const operationId=randomUUID(),head=(await db.query('SELECT revision::text AS v FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].v;
+    await rpc('connection_recreate_begin',"$1,$2,NULL,NULL,$3,'github',$4",[operationId,scope,device,head]);
+    await db.query('UPDATE identity.connection_heads SET revision=revision+1 WHERE owner_user_id=$1',[owner]);
+    await reject(()=>rpc('connection_attempt_prepare','$1,1,$2',[operationId,runtime]),'PT409');
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM identity.connection_attempts WHERE operation_id=$1',[operationId])).rows[0].n,1);
+    assert.equal((await db.query('SELECT prepared_at FROM identity.connection_attempts WHERE operation_id=$1',[operationId])).rows[0].prepared_at,null);
+    await db.query('ROLLBACK TO stale_native_prepare; RELEASE stale_native_prepare');
+  })
   await test('missing and foreign operation reads have identical public results',async()=>{
     const own=await unknown('private');await claims(other)
     assert.equal(await rpc('connection_operation_status','$1',[own.operationId]),null)
