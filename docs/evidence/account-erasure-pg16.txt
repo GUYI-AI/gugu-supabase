@@ -1,0 +1,312 @@
+Community plan/assertion excerpts. Unrelated control output is omitted; community plan lines are unchanged.
+
+Pager usage is off.
+PG16 isolated subset: real target table definitions/FKs; no foundation, platform hooks, RLS or erase function.
+                                                             version                                                              | inet_server_addr | inet_server_port 
+----------------------------------------------------------------------------------------------------------------------------------+------------------+------------------
+ PostgreSQL 16.14 (Homebrew) on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.0.123.102), 64-bit | 127.0.0.1        |            56620
+(1 row)
+
+ enable_seqscan 
+----------------
+ on
+(1 row)
+
+ random_page_cost 
+------------------
+ 4
+(1 row)
+
+ plan_cache_mode 
+-----------------
+ auto
+(1 row)
+
+CREATE SCHEMA
+CREATE SCHEMA
+CREATE SCHEMA
+CREATE SCHEMA
+CREATE SEQUENCE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE FUNCTION
+CREATE TABLE
+ALTER TABLE
+CREATE TABLE
+ALTER TABLE
+CREATE TABLE
+ALTER TABLE
+CREATE TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+INSERT 0 25000
+INSERT 0 25000
+INSERT 0 2886
+INSERT 0 195717
+INSERT 0 195717
+INSERT 0 28375
+INSERT 0 20914
+INSERT 0 20914
+INSERT 0 30615
+ANALYZE
+ANALYZE
+ANALYZE
+ANALYZE
+ANALYZE
+             relation             | count  
+----------------------------------+--------
+ chat.workspace_item_versions     |  20914
+ identity.users                   |  27886
+ identity.assistant_panel_changes |  28375
+ chat.message_agent_wakes         | 195717
+(4 rows)
+
+BEFORE (plain EXPLAIN, no ANALYZE or planner overrides)
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Seq Scan on message_agent_wakes  (cost=0.00..4464.46 rows=68 width=51)
+   Filter: (agent_user_id = '26096ca9-acde-bc31-7d4c-479ef452b5aa'::text)
+(2 rows)
+
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Seq Scan on assistant_panel_changes  (cost=0.00..1114.69 rows=28 width=283)
+   Filter: (owner_user_id = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+(2 rows)
+
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Seq Scan on workspace_item_versions  (cost=0.00..599.42 rows=21 width=120)
+   Filter: (made_by = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+(2 rows)
+
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Seq Scan on users  (cost=0.00..851.58 rows=3 width=420)
+   Filter: (owner_user_id = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+(2 rows)
+
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+AFTER (same data and statistics)
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on message_agent_wakes  (cost=4.95..237.17 rows=68 width=51)
+   Recheck Cond: (agent_user_id = '26096ca9-acde-bc31-7d4c-479ef452b5aa'::text)
+   ->  Bitmap Index Scan on idx_message_agent_wakes_agent_user_id  (cost=0.00..4.93 rows=68 width=0)
+         Index Cond: (agent_user_id = '26096ca9-acde-bc31-7d4c-479ef452b5aa'::text)
+(4 rows)
+
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on assistant_panel_changes  (cost=4.50..100.73 rows=28 width=283)
+   Recheck Cond: (owner_user_id = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+   ->  Bitmap Index Scan on idx_assistant_panel_changes_owner_user_id  (cost=0.00..4.50 rows=28 width=0)
+         Index Cond: (owner_user_id = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+(4 rows)
+
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on workspace_item_versions  (cost=4.45..73.01 rows=21 width=120)
+   Recheck Cond: (made_by = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+   ->  Bitmap Index Scan on workspace_item_versions_made_by_idx  (cost=0.00..4.44 rows=21 width=0)
+         Index Cond: (made_by = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+(4 rows)
+
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Bitmap Heap Scan on users  (cost=4.30..15.65 rows=3 width=420)
+   Recheck Cond: (owner_user_id = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+   ->  Bitmap Index Scan on idx_users_owner_user_id  (cost=0.00..4.30 rows=3 width=0)
+         Index Cond: (owner_user_id = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+(4 rows)
+
+INDEX DEFINITIONS
+                                                          pg_get_indexdef                                                           | indisvalid | indisready |          predicate          
+------------------------------------------------------------------------------------------------------------------------------------+------------+------------+-----------------------------
+ CREATE INDEX idx_message_agent_wakes_agent_user_id ON chat.message_agent_wakes USING btree (agent_user_id)                         | t          | t          | 
+ CREATE INDEX idx_assistant_panel_changes_owner_user_id ON identity.assistant_panel_changes USING btree (owner_user_id)             | t          | t          | 
+ CREATE INDEX workspace_item_versions_made_by_idx ON chat.workspace_item_versions USING btree (made_by) WHERE (made_by IS NOT NULL) | t          | t          | (made_by IS NOT NULL)
+ CREATE INDEX idx_users_owner_user_id ON identity.users USING btree (owner_user_id) WHERE (owner_user_id IS NOT NULL)               | t          | t          | (owner_user_id IS NOT NULL)
+(4 rows)
+
+DIRECT FK ACTION PLANS (not executed)
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ Delete on message_agent_wakes  (cost=4.95..237.17 rows=0 width=0)
+   ->  Bitmap Heap Scan on message_agent_wakes  (cost=4.95..237.17 rows=68 width=6)
+         Recheck Cond: ('26096ca9-acde-bc31-7d4c-479ef452b5aa'::text = agent_user_id)
+         ->  Bitmap Index Scan on idx_message_agent_wakes_agent_user_id  (cost=0.00..4.93 rows=68 width=0)
+               Index Cond: (agent_user_id = '26096ca9-acde-bc31-7d4c-479ef452b5aa'::text)
+(5 rows)
+
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Delete on assistant_panel_changes  (cost=4.50..100.73 rows=0 width=0)
+   ->  Bitmap Heap Scan on assistant_panel_changes  (cost=4.50..100.73 rows=28 width=6)
+         Recheck Cond: ('c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text = owner_user_id)
+         ->  Bitmap Index Scan on idx_assistant_panel_changes_owner_user_id  (cost=0.00..4.50 rows=28 width=0)
+               Index Cond: (owner_user_id = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+(5 rows)
+
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Update on workspace_item_versions  (cost=4.45..73.01 rows=0 width=0)
+   ->  Bitmap Heap Scan on workspace_item_versions  (cost=4.45..73.01 rows=21 width=38)
+         Recheck Cond: ('c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text = made_by)
+         ->  Bitmap Index Scan on workspace_item_versions_made_by_idx  (cost=0.00..4.44 rows=21 width=0)
+               Index Cond: (made_by = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+(5 rows)
+
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
+ Delete on users  (cost=4.30..15.65 rows=0 width=0)
+   ->  Bitmap Heap Scan on users  (cost=4.30..15.65 rows=3 width=6)
+         Recheck Cond: ('c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text = owner_user_id)
+         ->  Bitmap Index Scan on idx_users_owner_user_id  (cost=0.00..4.30 rows=3 width=0)
+               Index Cond: (owner_user_id = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+(5 rows)
+
+PARAMETERIZED EQUALITY (default plan_cache_mode, no forced plans)
+PREPARE
+PREPARE
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Bitmap Heap Scan on users  (cost=4.30..15.65 rows=3 width=420)
+   Recheck Cond: ('c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text = owner_user_id)
+   ->  Bitmap Index Scan on idx_users_owner_user_id  (cost=0.00..4.30 rows=3 width=0)
+         Index Cond: (owner_user_id = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+(4 rows)
+
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Bitmap Heap Scan on users  (cost=4.30..15.65 rows=3 width=420)
+   Recheck Cond: ('c81e728d-9d4c-2f63-6f06-7f89cc14862c'::text = owner_user_id)
+   ->  Bitmap Index Scan on idx_users_owner_user_id  (cost=0.00..4.30 rows=3 width=0)
+         Index Cond: (owner_user_id = 'c81e728d-9d4c-2f63-6f06-7f89cc14862c'::text)
+(4 rows)
+
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Bitmap Heap Scan on users  (cost=4.30..15.65 rows=3 width=420)
+   Recheck Cond: ('eccbc87e-4b5c-e2fe-2830-8fd9f2a7baf3'::text = owner_user_id)
+   ->  Bitmap Index Scan on idx_users_owner_user_id  (cost=0.00..4.30 rows=3 width=0)
+         Index Cond: (owner_user_id = 'eccbc87e-4b5c-e2fe-2830-8fd9f2a7baf3'::text)
+(4 rows)
+
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Bitmap Heap Scan on users  (cost=4.30..15.65 rows=3 width=420)
+   Recheck Cond: ('a87ff679-a2f3-e71d-9181-a67b7542122c'::text = owner_user_id)
+   ->  Bitmap Index Scan on idx_users_owner_user_id  (cost=0.00..4.30 rows=3 width=0)
+         Index Cond: (owner_user_id = 'a87ff679-a2f3-e71d-9181-a67b7542122c'::text)
+(4 rows)
+
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Bitmap Heap Scan on users  (cost=4.30..15.65 rows=3 width=420)
+   Recheck Cond: ('e4da3b7f-bbce-2345-d777-2b0674a318d5'::text = owner_user_id)
+   ->  Bitmap Index Scan on idx_users_owner_user_id  (cost=0.00..4.30 rows=3 width=0)
+         Index Cond: (owner_user_id = 'e4da3b7f-bbce-2345-d777-2b0674a318d5'::text)
+(4 rows)
+
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Bitmap Heap Scan on users  (cost=4.30..15.65 rows=3 width=420)
+   Recheck Cond: ($1 = owner_user_id)
+   ->  Bitmap Index Scan on idx_users_owner_user_id  (cost=0.00..4.30 rows=3 width=0)
+         Index Cond: (owner_user_id = $1)
+(4 rows)
+
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on workspace_item_versions  (cost=4.45..73.01 rows=21 width=120)
+   Recheck Cond: ('c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text = made_by)
+   ->  Bitmap Index Scan on workspace_item_versions_made_by_idx  (cost=0.00..4.44 rows=21 width=0)
+         Index Cond: (made_by = 'c4ca4238-a0b9-2382-0dcc-509a6f75849b'::text)
+(4 rows)
+
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on workspace_item_versions  (cost=4.45..73.01 rows=21 width=120)
+   Recheck Cond: ('c81e728d-9d4c-2f63-6f06-7f89cc14862c'::text = made_by)
+   ->  Bitmap Index Scan on workspace_item_versions_made_by_idx  (cost=0.00..4.44 rows=21 width=0)
+         Index Cond: (made_by = 'c81e728d-9d4c-2f63-6f06-7f89cc14862c'::text)
+(4 rows)
+
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on workspace_item_versions  (cost=4.45..73.01 rows=21 width=120)
+   Recheck Cond: ('eccbc87e-4b5c-e2fe-2830-8fd9f2a7baf3'::text = made_by)
+   ->  Bitmap Index Scan on workspace_item_versions_made_by_idx  (cost=0.00..4.44 rows=21 width=0)
+         Index Cond: (made_by = 'eccbc87e-4b5c-e2fe-2830-8fd9f2a7baf3'::text)
+(4 rows)
+
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on workspace_item_versions  (cost=4.45..73.01 rows=21 width=120)
+   Recheck Cond: ('a87ff679-a2f3-e71d-9181-a67b7542122c'::text = made_by)
+   ->  Bitmap Index Scan on workspace_item_versions_made_by_idx  (cost=0.00..4.44 rows=21 width=0)
+         Index Cond: (made_by = 'a87ff679-a2f3-e71d-9181-a67b7542122c'::text)
+(4 rows)
+
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on workspace_item_versions  (cost=4.45..73.01 rows=21 width=120)
+   Recheck Cond: ('e4da3b7f-bbce-2345-d777-2b0674a318d5'::text = made_by)
+   ->  Bitmap Index Scan on workspace_item_versions_made_by_idx  (cost=0.00..4.44 rows=21 width=0)
+         Index Cond: (made_by = 'e4da3b7f-bbce-2345-d777-2b0674a318d5'::text)
+(4 rows)
+
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on workspace_item_versions  (cost=4.45..73.01 rows=21 width=120)
+   Recheck Cond: ($1 = made_by)
+   ->  Bitmap Index Scan on workspace_item_versions_made_by_idx  (cost=0.00..4.44 rows=21 width=0)
+         Index Cond: (made_by = $1)
+(4 rows)
+
+   name    | generic_plans | custom_plans 
+-----------+---------------+--------------
+ author_fk |             1 |            5
+ owner_fk  |             1 |            5
+(2 rows)
+
+LOCAL FK SEMANTICS (not the full erase function)
+BEGIN
+INSERT 0 2
+INSERT 0 2
+INSERT 0 3
+INSERT 0 1
+INSERT 0 3
+INSERT 0 3
+INSERT 0 1
+INSERT 0 5
+INSERT 0 3
+DELETE 1
+DELETE 1
+NOTICE:  PASS: two owned agents (one removed), wakes/panel CASCADE, five retained versions with four NULL authors, unrelated peer rows preserved
+DO
+ROLLBACK
