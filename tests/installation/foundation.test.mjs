@@ -38,6 +38,31 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     const validationRelease = releases.find((release) => release.constraintValidation)
     assert.ok(deviceCheckRelease && validationRelease)
     const releaseQuery = async (sql) => {
+      const supportRelease = releases.find(release => release.version.endsWith('_support_agent_boundary'))
+      if (supportRelease && sql.includes(supportRelease.sql)) {
+        const snapshot = async () => ({
+          functions: await query(`SELECT p.oid,p.proacl::text,p.prosrc,p.prosecdef,p.proconfig,p.proowner
+            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+            WHERE n.nspname IN ('chat','identity','auth') ORDER BY p.oid`),
+          tables: await query(`SELECT c.oid,c.relacl::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname IN ('chat','identity','auth') ORDER BY c.oid`),
+        })
+        const before = await snapshot()
+        const result = await query(sql)
+        await t.test('support release preserves ordinary functions and ACLs while denying general API roles', async () => {
+          assert.deepEqual(await snapshot(), before)
+          for (const role of ['anon','authenticated','service_role']) {
+            assert.equal((await db.query("SELECT has_schema_privilege($1,'support_agent','USAGE') AS allowed", [role])).rows[0].allowed, false)
+            assert.equal((await db.query("SELECT has_function_privilege($1,'support_agent.request(text,text,jsonb)','EXECUTE') AS allowed", [role])).rows[0].allowed, false)
+          }
+          const signatures = await query(`SELECT p.proname,p.proowner='postgres'::regrole AS owned_by_postgres,p.proconfig
+            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='support_agent'`)
+          assert.ok(signatures.every(row => row.owned_by_postgres && row.proconfig.includes('search_path=""')))
+          await query('BEGIN;\n' + supportRelease.sql + '\nROLLBACK;')
+          assert.deepEqual(await snapshot(), before, 'idempotent replay changes no ordinary authority')
+        })
+        return result
+      }
       const projectMetadataRelease = releases.find((release) => release.version.endsWith('_group_project_metadata'))
       if (projectMetadataRelease && sql.includes(projectMetadataRelease.sql)) {
         const snapshot = () => query(`SELECT oid,proargtypes::text,prorettype::regtype::text,provolatile,prosecdef,
