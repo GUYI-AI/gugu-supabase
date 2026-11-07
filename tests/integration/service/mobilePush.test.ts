@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
 let db: pg.Client
-type Fixture = { owner: string; other: string; session: string; otherSession: string; install: string; chat: string; agent: string }
+type Fixture = { owner: string; other: string; session: string; otherSession: string; install: string; chat: string; agent: string; device: string }
 beforeAll(async () => {
   const target = new URL(url)
   if (!['postgres:', 'postgresql:'].includes(target.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(target.hostname)) {
@@ -17,14 +17,15 @@ afterAll(async () => { await db?.end() })
 
 async function fixture(body: (f: Fixture) => Promise<void>, kind = 'dm') {
   const f: Fixture = { owner: randomUUID(), other: randomUUID(), session: randomUUID(),
-    otherSession: randomUUID(), install: randomUUID(), chat: randomUUID(), agent: randomUUID() }
+    otherSession: randomUUID(), install: randomUUID(), chat: randomUUID(), agent: randomUUID(), device: `push-fixture-${randomUUID()}` }
   try {
     for (const [owner, session] of [[f.owner, f.session], [f.other, f.otherSession]]) {
       await db.query(`INSERT INTO auth.users(id,email) VALUES($1,$2)`, [owner, owner + '@push.invalid'])
       await db.query(`INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Push fixture') ON CONFLICT DO NOTHING`, [owner])
       await db.query('INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())', [session, owner])
     }
-    await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id) VALUES($1,'agent','Push fixture agent',$2)", [f.agent, f.owner])
+    await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Push fixture host','fixture','linux')", [f.device, f.owner])
+    await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Push fixture agent',$2,$3)", [f.agent, f.owner, f.device])
     await db.query("INSERT INTO identity.agent_runtime_states(agent_user_id,owner_user_id,agent_status,agent_status_detail,runtime_status,last_seen_at) VALUES($1,$2,'idle','plain','online',now())", [f.agent, f.owner])
     await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,$2,'Push fixture',$3)", [f.chat, kind, f.owner])
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [f.chat, f.owner, f.other])
@@ -34,6 +35,7 @@ async function fixture(body: (f: Fixture) => Promise<void>, kind = 'dm') {
     await db.query('DELETE FROM chat.chats WHERE id=$1', [f.chat])
     await db.query('DELETE FROM identity.agent_runtime_states WHERE agent_user_id=$1', [f.agent])
     await db.query('DELETE FROM identity.users WHERE id=$1', [f.agent])
+    await db.query('DELETE FROM identity.gugu_devices WHERE device_id=$1', [f.device])
     await db.query('DELETE FROM auth.users WHERE id=ANY($1::uuid[])', [[f.owner, f.other]])
     await db.query('DELETE FROM identity.users WHERE id=ANY($1::text[])', [[f.owner, f.other]])
     await db.query('DELETE FROM chat.account_revision_heads WHERE user_id=ANY($1::text[])', [[f.owner, f.other, f.agent]])
@@ -184,5 +186,21 @@ describe('mobile push binding and existing notification sources', () => {
         'SELECT identity.mobile_push_admit($1) AS yes', [reservations[0]])))
       expect(admissions.flat().filter(x => x.yes)).toHaveLength(1)
     } finally { await other.end() }
+  }))
+  it('rotates registrations when an earlier endpoint continuously fills the batch', async () => fixture(async f => {
+    await register(f)
+    await register(f, { install: randomUUID(), token: 'cd'.repeat(32) })
+    for (let i = 0; i < 25; i++) await send(f)
+    const first = await reserve(); expect(first).toHaveLength(20)
+    const registrationsFor = async (ids: string[]) => (await db.query(
+      'SELECT DISTINCT registration_id FROM identity.mobile_push_attempts WHERE id=ANY($1::uuid[])', [ids])).rows.map(r => r.registration_id)
+    const firstRegistration = await registrationsFor(first)
+    expect(firstRegistration).toHaveLength(1)
+    // Keep the first endpoint busy enough to consume another entire batch.
+    for (let i = 0; i < 20; i++) await send(f)
+    const second = await reserve(); expect(second).toHaveLength(20)
+    const secondRegistration = await registrationsFor(second)
+    expect(secondRegistration).toHaveLength(1)
+    expect(secondRegistration[0]).not.toBe(firstRegistration[0])
   }))
 })

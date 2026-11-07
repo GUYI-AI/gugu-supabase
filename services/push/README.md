@@ -95,6 +95,9 @@ events using a durable cursor. No account revision event is added or changed.
 Message IDs deduplicate repeated publications. Task attention compares adjacent
 canonical `needs_user` readings and detail changes, following the existing
 client policy. An earlier wait is suppressed if a later state already left it.
+Each visited registration moves to the back of the transport scan order. A
+busy earlier registration filling one batch therefore cannot keep later
+registrations from being visited on subsequent batches.
 
 Reservations and one-time admission commit **before** network I/O. Worker
 restarts, duplicate admissions and uncertain results never replay a reservation.

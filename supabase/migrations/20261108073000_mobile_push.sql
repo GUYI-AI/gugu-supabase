@@ -7,6 +7,9 @@ DO $role$ BEGIN
   END IF;
 END $role$;
 GRANT USAGE ON SCHEMA identity TO gugu_push;
+CREATE SEQUENCE identity.mobile_push_scan_sequence;
+REVOKE ALL ON SEQUENCE identity.mobile_push_scan_sequence
+  FROM PUBLIC, anon, authenticated, service_role, gugu_files, gugu_push;
 
 CREATE TABLE identity.mobile_push_registrations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -23,6 +26,7 @@ CREATE TABLE identity.mobile_push_registrations (
   task_enabled boolean NOT NULL,
   sound_enabled boolean NOT NULL,
   cursor_revision bigint NOT NULL CHECK (cursor_revision >= 0),
+  scan_order bigint NOT NULL DEFAULT 0,
   registered_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   UNIQUE (installation_id, topic),
   UNIQUE (token_hash, environment, topic),
@@ -31,7 +35,7 @@ CREATE TABLE identity.mobile_push_registrations (
 );
 CREATE INDEX mobile_push_owner_idx ON identity.mobile_push_registrations(owner_user_id);
 CREATE INDEX mobile_push_session_idx ON identity.mobile_push_registrations(session_id);
-CREATE INDEX mobile_push_scan_idx ON identity.mobile_push_registrations(environment,registered_at,id);
+CREATE INDEX mobile_push_scan_idx ON identity.mobile_push_registrations(environment,scan_order,id);
 CREATE TABLE identity.mobile_push_attempts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   registration_id uuid NOT NULL REFERENCES identity.mobile_push_registrations(id) ON DELETE CASCADE,
@@ -189,8 +193,12 @@ BEGIN
     JOIN auth.sessions s ON s.id = r.session_id AND s.user_id::text = r.owner_user_id
     WHERE r.environment = p_environment AND (s.not_after IS NULL OR s.not_after > now())
       AND EXISTS (SELECT 1 FROM chat.account_revisions a WHERE a.user_id = r.owner_user_id AND a.revision > r.cursor_revision)
-    ORDER BY r.registered_at, r.id LIMIT 100 FOR UPDATE OF r SKIP LOCKED
+    ORDER BY r.scan_order, r.id LIMIT 100 FOR UPDATE OF r SKIP LOCKED
   LOOP
+    -- Move every visited endpoint behind the others, even when its first page
+    -- fills the batch. Cursor progress alone does not provide fairness.
+    UPDATE identity.mobile_push_registrations
+      SET scan_order = nextval('identity.mobile_push_scan_sequence'::regclass) WHERE id = endpoint.id;
     FOR revision_row IN SELECT * FROM chat.account_revisions
       WHERE user_id = endpoint.owner_user_id AND revision > endpoint.cursor_revision
       ORDER BY revision LIMIT 100
