@@ -48,6 +48,7 @@ export async function assertConnectionReconciliation(db,runTest) {
       'connection_record_effect(text,uuid,uuid,uuid,text,text,text,text,text,jsonb)',
       'connection_record_native_fence(text,uuid,uuid,text,uuid,text)','connection_resolve_attempt(text,uuid)','connection_operation_status(uuid)']
     for(const role of ['anon','authenticated','service_role']) {
+      assert.equal((await db.query("SELECT has_function_privilege($1,'identity.connection_authority()','EXECUTE') AS allowed",[role])).rows[0].allowed,role==='authenticated');
       for(const fn of functions)assert.equal((await db.query("SELECT has_function_privilege($1,$2,'EXECUTE') AS allowed",[role,'identity.'+fn])).rows[0].allowed,false)
       for(const table of ['connection_attempts','connection_effect_evidence','connection_resolutions'])assert.equal((await db.query("SELECT has_table_privilege($1,$2,'SELECT,INSERT,UPDATE,DELETE') AS allowed",[role,'identity.'+table])).rows[0].allowed,false)
     }

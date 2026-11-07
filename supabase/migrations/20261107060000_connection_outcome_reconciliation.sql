@@ -880,6 +880,10 @@ BEGIN
         'verificationProtocol',COALESCE(head.verification_protocol,1));
 END;
 $$;
+-- CREATE OR REPLACE passes through the platform DDL guard, which closes
+-- function grants. Restore only the reviewed pure authenticated route reader.
+REVOKE ALL ON FUNCTION identity.connection_authority() FROM PUBLIC,anon,authenticated,service_role;
+GRANT EXECUTE ON FUNCTION identity.connection_authority() TO authenticated;
 CREATE FUNCTION identity.connection_attempt_inspect(p_operation_id uuid,p_runtime_instance_id text) RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE owner_id text:=identity.connection_owner(); device text; context jsonb;
