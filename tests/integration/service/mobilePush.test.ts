@@ -1,9 +1,13 @@
-import { randomUUID } from 'node:crypto'
+import { randomUUID, randomBytes } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
 let db: pg.Client
+let worker: pg.Client
+let workerUrl: string
+const workerLogin = `push_test_${randomBytes(6).toString('hex')}`
+let workerLoginCreated = false
 type Fixture = { owner: string; other: string; session: string; otherSession: string; install: string; chat: string; agent: string; device: string }
 beforeAll(async () => {
   const target = new URL(url)
@@ -12,8 +16,19 @@ beforeAll(async () => {
   }
   db = new pg.Client({ connectionString: url }); await db.connect()
   await db.query("SET statement_timeout='10s'")
+  // Model the operator-provisioned login, not an assumed admin SET ROLE grant.
+  const password = randomBytes(18).toString('hex')
+  await db.query(`CREATE ROLE ${workerLogin} LOGIN NOINHERIT PASSWORD '${password}' IN ROLE gugu_push`)
+  workerLoginCreated = true
+  const connection = new URL(url); connection.username = workerLogin; connection.password = password
+  workerUrl = connection.href
+  worker = new pg.Client({ connectionString: workerUrl }); await worker.connect()
 })
-afterAll(async () => { await db?.end() })
+afterAll(async () => {
+  await worker?.end()
+  if (workerLoginCreated) await db.query(`DROP ROLE ${workerLogin}`)
+  await db?.end()
+})
 
 async function fixture(body: (f: Fixture) => Promise<void>, kind = 'dm') {
   const f: Fixture = { owner: randomUUID(), other: randomUUID(), session: randomUUID(),
@@ -56,12 +71,12 @@ async function register(f: Fixture, overrides: { owner?: string; session?: strin
     [install, overrides.device ?? `phone-${install}-${owner}`, overrides.token ?? 'ab'.repeat(32), 'production', 'app.gugu.chat'],
     { sub: owner, session_id: overrides.session ?? f.session, role: 'authenticated' }))[0].value as { registration_id: string; generation: string }
 }
-async function reserve(client = db) {
+async function reserve(client = worker) {
   return (await rpc(client, 'gugu_push', "SELECT identity.mobile_push_reserve('production',20) AS id", [])).map(r => r.id as string)
 }
 async function prepare(id: string) {
-  expect((await rpc(db, 'gugu_push', 'SELECT identity.mobile_push_admit($1) AS yes', [id]))[0].yes).toBe(true)
-  return (await rpc(db, 'gugu_push', 'SELECT identity.mobile_push_prepare($1) AS value', [id]))[0].value
+  expect((await rpc(worker, 'gugu_push', 'SELECT identity.mobile_push_admit($1) AS yes', [id]))[0].yes).toBe(true)
+  return (await rpc(worker, 'gugu_push', 'SELECT identity.mobile_push_prepare($1) AS value', [id]))[0].value
 }
 async function send(f: Fixture, options: { sender?: string; addressed?: string[]; whisper?: boolean; reply?: string } = {}) {
   const id = randomUUID()
@@ -91,6 +106,7 @@ describe('mobile push binding and existing notification sources', () => {
     await expect(rpc(db, 'authenticated', "SELECT identity.mobile_push_reserve('production',20)", [],
       { sub: f.owner, role: 'authenticated' })).rejects.toMatchObject({ code: '42501' })
     await expect(rpc(db, 'anon', 'SELECT identity.mobile_push_revoke($1,$2,$3)', [f.install, randomUUID(), randomUUID()])).rejects.toMatchObject({ code: '42501' })
+    await expect(rpc(worker, 'gugu_push', 'SELECT token FROM identity.mobile_push_registrations', [])).rejects.toMatchObject({ code: '42501' })
   }))
   it('revokes only the exact current owner/install/session/generation', async () => fixture(async f => {
     const binding = await register(f)
@@ -123,16 +139,16 @@ describe('mobile push binding and existing notification sources', () => {
     const next = await register(f, { token: 'cd'.repeat(40) })
     expect(next.generation).not.toBe(old.generation)
     expect(await prepare(attempt)).toBeNull()
-    await rpc(db, 'gugu_push', "SELECT identity.mobile_push_finish($1,'rejected',now())", [attempt])
+    await rpc(worker, 'gugu_push', "SELECT identity.mobile_push_finish($1,'rejected',now())", [attempt])
     expect((await db.query('SELECT generation FROM identity.mobile_push_registrations WHERE id=$1', [next.registration_id])).rows[0].generation).toBe(next.generation)
   }))
   it('a confirmed invalid current generation is removed; an older APNs timestamp is retained', async () => fixture(async f => {
     await register(f); await send(f)
     let [attempt] = await reserve(); await prepare(attempt)
-    await rpc(db, 'gugu_push', "SELECT identity.mobile_push_finish($1,'rejected',now()-interval '1 day')", [attempt])
+    await rpc(worker, 'gugu_push', "SELECT identity.mobile_push_finish($1,'rejected',now()-interval '1 day')", [attempt])
     expect((await db.query('SELECT count(*) FROM identity.mobile_push_registrations WHERE owner_user_id=$1', [f.owner])).rows[0].count).toBe('1')
     await send(f); [attempt] = await reserve(); await prepare(attempt)
-    await rpc(db, 'gugu_push', "SELECT identity.mobile_push_finish($1,'rejected',now())", [attempt])
+    await rpc(worker, 'gugu_push', "SELECT identity.mobile_push_finish($1,'rejected',now())", [attempt])
     expect((await db.query('SELECT count(*) FROM identity.mobile_push_registrations WHERE owner_user_id=$1', [f.owner])).rows[0].count).toBe('0')
   }))
   it('uses unread incoming DM events once and emits identifiers without private content', async () => fixture(async f => {
@@ -144,7 +160,7 @@ describe('mobile push binding and existing notification sources', () => {
     expect(JSON.stringify(value)).not.toContain('PRIVATE_MESSAGE_CANARY')
     await db.query("SELECT chat.publish_user_revision($1,'message_created',jsonb_build_object('entity_id',$2::text,'chat_id',$3::text))", [f.owner, message, f.chat])
     expect(await reserve()).toEqual([])
-    expect((await rpc(db, 'gugu_push', 'SELECT identity.mobile_push_admit($1) AS yes', [attempts[0]]))[0].yes).toBe(false)
+    expect((await rpc(worker, 'gugu_push', 'SELECT identity.mobile_push_admit($1) AS yes', [attempts[0]]))[0].yes).toBe(false)
   }))
   it('rechecks reads, membership and mutes immediately before dispatch', async () => fixture(async f => {
     await register(f); const message = await send(f); const [attempt] = await reserve()
@@ -178,11 +194,11 @@ describe('mobile push binding and existing notification sources', () => {
   }))
   it('concurrent workers reserve one event and only one admission succeeds', async () => fixture(async f => {
     await register(f); await send(f)
-    const other = new pg.Client({ connectionString: url }); await other.connect()
+    const other = new pg.Client({ connectionString: workerUrl }); await other.connect()
     try {
-      const reservations = (await Promise.all([reserve(db), reserve(other)])).flat()
+      const reservations = (await Promise.all([reserve(worker), reserve(other)])).flat()
       expect(reservations).toHaveLength(1)
-      const admissions = await Promise.all([db, other].map(client => rpc(client, 'gugu_push',
+      const admissions = await Promise.all([worker, other].map(client => rpc(client, 'gugu_push',
         'SELECT identity.mobile_push_admit($1) AS yes', [reservations[0]])))
       expect(admissions.flat().filter(x => x.yes)).toHaveLength(1)
     } finally { await other.end() }
