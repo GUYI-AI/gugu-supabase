@@ -179,17 +179,29 @@ describe('archiving the source conversation', () => {
     expect(Object.fromEntries(statuses.map((row) => [row.id, row.status]))).toEqual({ [topic]: 'active', [own]: 'archived', [paused]: 'paused' })
     expect((await db.query('SELECT 1 FROM chat.topic_source_archives WHERE topic_id=ANY($1::text[])', [[topic, own, paused]])).rows).toEqual([])
   })
-  it('does not restore a topic that was unarchived and archived again by hand while its source was archived', async () => {
+  it('refuses to bring a topic back while its source is archived, and restores it with the source', async () => {
     await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [source])
-    await db.query("UPDATE chat.chats SET status='active' WHERE id=$1", [topic])
-    await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [topic])
+    expect(await denied(() => db.query("UPDATE chat.chats SET status='active' WHERE id=$1", [topic]))).toContain('is archived')
     await db.query("UPDATE chat.chats SET status='active' WHERE id=$1", [source])
-    expect(await topicState()).toBe('archived')
+    expect(await topicState()).toBe('active')
   })
-  it('does not expose the cascade to API roles', async () => {
-    for (const role of ['anon', 'authenticated']) {
-      expect((await db.query("SELECT has_function_privilege($1,'chat.archive_topics_with_source()','execute') AS allowed", [role])).rows[0].allowed).toBe(false)
-      expect((await db.query("SELECT has_table_privilege($1,'chat.topic_source_archives','select') AS allowed", [role])).rows[0].allowed).toBe(false)
+  it('refuses create_topic under an archived source', async () => {
+    const { source_message_id: anchor } = (await db.query('SELECT source_message_id FROM chat.chats WHERE id=$1', [topic])).rows[0]
+    await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [source])
+    expect(await denied(async () => {
+      await asUser(owner)
+      await db.query('SELECT * FROM chat.create_topic($1,$2,$3)', [source, anchor, 'Late topic'])
+    })).toContain('is archived')
+    expect((await db.query("SELECT count(*)::int AS n FROM chat.chats WHERE source_chat_id=$1 AND status<>'archived'", [source])).rows[0].n).toBe(0)
+  })
+  it('does not expose the cascade or its marks to API roles, service_role included', async () => {
+    for (const role of ['anon', 'authenticated', 'service_role']) {
+      for (const fn of ['chat.archive_topics_with_source()', 'chat.refuse_topic_under_archived_source()']) {
+        expect((await db.query("SELECT has_function_privilege($1,$2,'execute') AS allowed", [role, fn])).rows[0].allowed).toBe(false)
+      }
+      for (const privilege of ['select', 'insert', 'update', 'delete']) {
+        expect((await db.query("SELECT has_table_privilege($1,'chat.topic_source_archives',$2) AS allowed", [role, privilege])).rows[0].allowed).toBe(false)
+      }
     }
   })
 })
