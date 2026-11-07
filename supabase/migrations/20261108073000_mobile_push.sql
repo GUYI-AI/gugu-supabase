@@ -29,6 +29,9 @@ CREATE TABLE identity.mobile_push_registrations (
   CHECK (device_id = 'phone-' || installation_id::text || '-' || owner_user_id),
   CHECK (token ~ '^([0-9a-f]{2})+$' AND octet_length(token) <= 4096)
 );
+CREATE INDEX mobile_push_owner_idx ON identity.mobile_push_registrations(owner_user_id);
+CREATE INDEX mobile_push_session_idx ON identity.mobile_push_registrations(session_id);
+CREATE INDEX mobile_push_scan_idx ON identity.mobile_push_registrations(environment,registered_at,id);
 CREATE TABLE identity.mobile_push_attempts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   registration_id uuid NOT NULL REFERENCES identity.mobile_push_registrations(id) ON DELETE CASCADE,
@@ -83,7 +86,7 @@ BEGIN
     prior.id := NULL;
   END IF;
   -- Knowing another registration's installation ID must not expose or move its token.
-  IF EXISTS (SELECT 1 FROM identity.mobile_push_registrations WHERE token = p_token
+  IF EXISTS (SELECT 1 FROM identity.mobile_push_registrations WHERE token_hash = sha256(decode(p_token,'hex'))
     AND environment = p_environment AND topic = p_topic AND installation_id <> p_installation_id) THEN
     RAISE EXCEPTION 'Push token already bound to an installation' USING ERRCODE = '42501';
   END IF;
@@ -136,7 +139,7 @@ BEGIN
     WHERE m.id = p_key->>'entity_id' AND m.chat_id = p_key->>'chat_id'
       AND m.sender_user_id IS DISTINCT FROM p_owner AND m.deleted_at IS NULL AND m.retracted_at IS NULL
       AND NOT (m.deleted_for_user_ids @> jsonb_build_array(p_owner))
-      AND NOT COALESCE(m.client_message_id ~ '^session-import-root:[0-9a-fA-F-]{36}$',false)
+      AND NOT COALESCE(m.client_message_id ~ '^session-import-root:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',false)
       AND member.notification_level <> 'none'
       AND m.seq > CASE WHEN m.thread_root_id IS NULL
         THEN GREATEST(member.last_read_seq, COALESCE(read_state.last_read_seq,0))
