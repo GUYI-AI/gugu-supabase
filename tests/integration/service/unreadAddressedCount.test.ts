@@ -133,6 +133,34 @@ describe('list_unread_locators.addressed_count', () => {
     expect(await counts(owner, topic)).toEqual({ unread: 1, addressed: 1 })
   }))
 
+  it('names the first unread addressed message, per stream, and moves on as it is read', () => fixture(async ({ owner, a, b, topic }) => {
+    const first = async () => (await as<{ first_addressed_message_id: string | null; first_addressed_seq: string | null }>(owner,
+      'SELECT first_addressed_message_id, first_addressed_seq::text FROM chat.list_unread_locators(NULL) WHERE chat_id = $1', [topic]))[0]
+    await say(topic, a, { to: [b] })
+    expect(await first()).toEqual({ first_addressed_message_id: null, first_addressed_seq: null })
+    const called = await say(topic, a, { to: [owner] })
+    await say(topic, b)
+    const again = await say(topic, b, { to: ['*'] })
+    const seq = async (id: string) => (await db.query<{ seq: string }>('SELECT seq::text FROM chat.messages WHERE id = $1', [id])).rows[0].seq
+    expect(await first()).toEqual({ first_addressed_message_id: called, first_addressed_seq: await seq(called) })
+    await db.query('UPDATE chat.chat_members SET last_read_seq = $1 WHERE chat_id = $2 AND user_id = $3', [await seq(called), topic, owner])
+    expect(await first()).toEqual({ first_addressed_message_id: again, first_addressed_seq: await seq(again) })
+  }))
+
+  it('a manual unread mark names no addressed message', () => fixture(async ({ owner, a, topic }) => {
+    await say(topic, a)
+    await db.query('UPDATE chat.chat_members SET is_marked_unread = true, last_read_seq = (SELECT max(seq) FROM chat.messages WHERE chat_id = $1) WHERE chat_id = $1 AND user_id = $2', [topic, owner])
+    const [row] = await as<{ addressed_count: string; first_addressed_message_id: string | null }>(owner,
+      'SELECT addressed_count::text, first_addressed_message_id FROM chat.list_unread_locators(NULL) WHERE chat_id = $1', [topic])
+    expect(row).toEqual({ addressed_count: '1', first_addressed_message_id: null })
+  }))
+
+  it('keeps execute on both functions for authenticated callers only', () => fixture(async () => {
+    const { rows } = await db.query<{ signature: string; anon: boolean; authenticated: boolean }>(`SELECT s AS signature, has_function_privilege('anon', s, 'EXECUTE') AS anon, has_function_privilege('authenticated', s, 'EXECUTE') AS authenticated
+      FROM unnest(ARRAY['chat.list_unread_locators(text)','chat.list_unread_locators_for_chats(text[])']) s`)
+    expect(rows.map(row => [row.anon, row.authenticated])).toEqual([[false, true], [false, true]])
+  }))
+
   it('the account snapshot carries the same addressed count', () => fixture(async ({ owner, a, b, topic }) => {
     await say(topic, a, { to: [b] })
     await say(topic, a, { to: [owner] })
