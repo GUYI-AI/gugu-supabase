@@ -164,26 +164,15 @@ describe('archiving the source conversation', () => {
     await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [source])
     expect(await topicState()).toBe('archived')
   })
-  it('restores the topics its archive took when the source is unarchived, and leaves topics archived on their own', async () => {
-    const anchor = randomUUID(), own = randomUUID(), paused = randomUUID()
-    await db.query(`INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES ($1,$2,$3,'Second')`, [anchor, source, creator])
-    for (const [id, status] of [[own, 'active'], [paused, 'paused']]) {
-      await db.query(`INSERT INTO chat.chats(id,kind,name,status,creator_user_id,source_chat_id,source_message_id) VALUES ($1,'topic','T',$2,$3,$4,$5)`,
-        [id, status, creator, source, anchor])
-      await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES ($1,$2,'owner')`, [id, creator])
-    }
-    await archive(owner, owner, own)
+  it('archives paused and stopped topics too, and refuses to make a topic live while its source is archived', async () => {
+    const anchor = (await db.query('SELECT source_message_id FROM chat.chats WHERE id=$1', [topic])).rows[0].source_message_id
+    const paused = randomUUID()
+    await db.query(`INSERT INTO chat.chats(id,kind,name,status,creator_user_id,source_chat_id,source_message_id) VALUES ($1,'topic','P','paused',$2,$3,$4)`,
+      [paused, creator, source, anchor])
     await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [source])
-    await db.query("UPDATE chat.chats SET status='active' WHERE id=$1", [source])
-    const statuses = (await db.query('SELECT id,status FROM chat.chats WHERE id=ANY($1::text[])', [[topic, own, paused]])).rows
-    expect(Object.fromEntries(statuses.map((row) => [row.id, row.status]))).toEqual({ [topic]: 'active', [own]: 'archived', [paused]: 'paused' })
-    expect((await db.query('SELECT 1 FROM chat.topic_source_archives WHERE topic_id=ANY($1::text[])', [[topic, own, paused]])).rows).toEqual([])
-  })
-  it('refuses to bring a topic back while its source is archived, and restores it with the source', async () => {
-    await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [source])
+    expect((await db.query('SELECT status FROM chat.chats WHERE id=$1', [paused])).rows[0].status).toBe('archived')
     expect(await denied(() => db.query("UPDATE chat.chats SET status='active' WHERE id=$1", [topic]))).toContain('is archived')
-    await db.query("UPDATE chat.chats SET status='active' WHERE id=$1", [source])
-    expect(await topicState()).toBe('active')
+    expect(await topicState()).toBe('archived')
   })
   it('refuses create_topic under an archived source', async () => {
     const { source_message_id: anchor } = (await db.query('SELECT source_message_id FROM chat.chats WHERE id=$1', [topic])).rows[0]
@@ -194,13 +183,10 @@ describe('archiving the source conversation', () => {
     })).toContain('is archived')
     expect((await db.query("SELECT count(*)::int AS n FROM chat.chats WHERE source_chat_id=$1 AND status<>'archived'", [source])).rows[0].n).toBe(0)
   })
-  it('does not expose the cascade or its marks to API roles, service_role included', async () => {
+  it('does not expose the cascade or the guard to API roles, service_role included', async () => {
     for (const role of ['anon', 'authenticated', 'service_role']) {
       for (const fn of ['chat.archive_topics_with_source()', 'chat.refuse_topic_under_archived_source()']) {
         expect((await db.query("SELECT has_function_privilege($1,$2,'execute') AS allowed", [role, fn])).rows[0].allowed).toBe(false)
-      }
-      for (const privilege of ['select', 'insert', 'update', 'delete']) {
-        expect((await db.query("SELECT has_table_privilege($1,'chat.topic_source_archives',$2) AS allowed", [role, privilege])).rows[0].allowed).toBe(false)
       }
     }
   })
