@@ -13,11 +13,28 @@ function id(body:Record<string,unknown>,name:string) {
 export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:string,body:Record<string,unknown>) {
   const actor=typeof body.as==='string'?body.as:user
   if(route==='file-download') return handleFileDownload(deps,user,body)
-  if(route==='file-request') return call(deps.userRpc,'file_temporary_request',{p_ref:fileRef(body.ref),p_as:actor,p_id:id(body,'request_id')})
+  if(route==='file-request') {
+    const state=await call(deps.userRpc,'file_temporary_request',{p_ref:fileRef(body.ref),p_as:actor,p_id:id(body,'request_id')}) as Record<string,unknown>
+    if(body.download_request_id===undefined) return state
+    // A reader that names its download gets the lease in this same call once the copy is ready: one round trip, not two.
+    const download=id(body,'download_request_id')
+    return {...state,download:state.status==='ready'&&state.transfer_status==='ready'?await handleFileDownload(deps,user,{ref:body.ref,as:body.as,request_id:download}):null}
+  }
   if(route==='file-pending') return {transfers:await call(deps.userRpc,'file_temporary_pending',{p_device:text(body,'device_id')})}
   if(route==='file-read-complete') {
-    await call(deps.userRpc,'file_temporary_read_complete',{p_download:id(body,'download_id'),p_as:actor})
-    return {acknowledged:true}
+    const download=id(body,'download_id')
+    if(body.expect===undefined) {
+      await call(deps.userRpc,'file_temporary_read_complete',{p_download:download,p_as:actor})
+      return {acknowledged:true}
+    }
+    // With `expect`, the version is re-resolved first and the read acknowledged only if it is still the one read: the
+    // order a reader keeps with a separate file-resolve, and `current` lets it make its own checks without that call.
+    const expect=body.expect as Record<string,unknown>
+    if(!expect||typeof expect!=='object'||typeof expect.sha256!=='string'||typeof expect.size_bytes!=='number') throw new Refusal(400,'invalid','expect needs sha256 and size_bytes')
+    const current=await call(deps.userRpc,'file_resolve_as',{p_ref:fileRef(body.ref),p_as:actor}) as Record<string,unknown>
+    const same=current.status==='ready'&&current.sha256===expect.sha256&&current.size_bytes===expect.size_bytes
+    if(same) await call(deps.userRpc,'file_temporary_read_complete',{p_download:download,p_as:actor})
+    return {acknowledged:same,current}
   }
   const transfer=id(body,'transfer_id'),bytes=body.ciphertext_bytes
   if(typeof bytes!=='number'||!Number.isSafeInteger(bytes)||bytes<1) throw new Refusal(400,'invalid','ciphertext_bytes must be a positive integer')
