@@ -53,6 +53,51 @@ export async function assertConnectionReconciliation(db,runTest) {
       for(const table of ['connection_attempts','connection_effect_evidence','connection_resolutions'])assert.equal((await db.query("SELECT has_table_privilege($1,$2,'SELECT,INSERT,UPDATE,DELETE') AS allowed",[role,'identity.'+table])).rows[0].allowed,false)
     }
   })
+  await test('resolution revisions and later commits strictly advance the shared source, including retries',async()=>{
+    await db.query('SAVEPOINT resolution_revision_order');
+    let previous=BigInt((await db.query('SELECT revision::text AS v FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].v);
+    for(let n=0;n<3;n++){
+      const operationId=randomUUID();
+      await rpc('connection_recreate_begin',"$1,'platform',NULL,NULL,NULL,$2,$3",[operationId,'resolution-order-'+n,previous.toString()]);
+      await age(operationId);
+      const settled=await resolve(operationId);assert.equal(settled.outcome,'failed');
+      const head=BigInt((await db.query('SELECT revision::text AS v FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].v);
+      assert.ok(head>previous,'each settlement must allocate a newer revision');
+      assert.deepEqual(await resolve(operationId),settled);
+      assert.equal(BigInt((await db.query('SELECT revision::text AS v FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].v),head,'retry must not invalidate twice');
+      previous=head;
+      if(n===0){const saved=await save('revision-after-one');assert.ok(BigInt(saved.revision)>previous);previous=BigInt(saved.revision)}
+    }
+    const saved=await save('revision-after-many');assert.ok(BigInt(saved.revision)>previous,'a later commit must not repeat or decrease the head');
+    await db.query('ROLLBACK TO resolution_revision_order; RELEASE resolution_revision_order');
+  })
+  await test('prepared unpublished authorization blocks tasks until its own fenced decision',async()=>{
+    await db.query('SAVEPOINT unpublished_task_barrier');
+    const operationId=randomUUID(),head=(await db.query('SELECT revision::text AS v FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].v;
+    await rpc('connection_recreate_begin',"$1,$2,NULL,NULL,$3,'github',$4",[operationId,scope,device,head]);
+    const context=await rpc('connection_attempt_prepare','$1,1,$2',[operationId,runtime]);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM identity.connection_operations WHERE operation_id=$1',[operationId])).rows[0].n,0);
+    const waiting=await rpc('connection_admit','$1,$2,NULL',[runtime,head]);assert.equal(waiting.admitted,false);assert.equal(waiting.operationId,operationId);
+    assert.equal(await resolve(operationId),null,'a prepared attempt without fence cannot settle');
+    await rpc('connection_record_native_fence','$1,$2,$3,$4,$5,$6',[owner,operationId,context.attemptId,device,context.credentialGeneration,'f'.repeat(64)]);
+    assert.equal((await resolve(operationId)).outcome,'failed');
+    const revision=(await db.query('SELECT revision::text AS v FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].v;
+    assert.equal((await rpc('connection_admit','$1,$2,NULL',[runtime,revision])).admitted,true);
+    await db.query('ROLLBACK TO unpublished_task_barrier; RELEASE unpublished_task_barrier');
+  })
+  await test('owner UUID cancellation is available without a platform service and preserves original identity',async()=>{
+    await db.query('SAVEPOINT community_cancel');
+    const operationId=randomUUID(),head=(await db.query('SELECT revision::text AS v FROM identity.connection_heads WHERE owner_user_id=$1',[owner])).rows[0].v;
+    await rpc('connection_recreate_begin',"$1,$2,NULL,NULL,$3,'github',$4",[operationId,scope,device,head]);
+    const original=(await db.query('SELECT deadline_at::text AS v FROM identity.connection_attempts WHERE operation_id=$1',[operationId])).rows[0].v;
+    await claims(other);assert.equal(await rpc('connection_authorization_cancel','$1',[operationId]),null);await claims(owner);
+    const result=await rpc('connection_authorization_cancel','$1',[operationId]);assert.equal(result.resolution.outcome,'cancelled');
+    assert.equal(result.effective.state,'cancelled');assert.equal(result.confirmation.cancelRequested,true);
+    assert.deepEqual(await rpc('connection_authorization_cancel','$1',[operationId]),result);
+    assert.equal((await db.query('SELECT deadline_at::text AS v FROM identity.connection_attempts WHERE operation_id=$1',[operationId])).rows[0].v,original);
+    await reject(()=>rpc('connection_attempt_prepare','$1,1,$2',[operationId,runtime]),'PT409');
+    await db.query('ROLLBACK TO community_cancel; RELEASE community_cancel');
+  })
   await test('trusted original evidence resolves UNKNOWN without rewriting its ACK or executing the effect',async()=>{
     const {operationId,admission,attempt,revision}=await unknown('confirmed')
     const receipt=async()=>(await db.query('SELECT receipt::text AS v FROM identity.connection_admissions WHERE admission_id=$1',[admission.admissionId])).rows[0].v

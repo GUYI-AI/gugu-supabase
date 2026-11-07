@@ -31,6 +31,7 @@ CREATE TABLE identity.connection_attempts (
     initial_head_revision bigint NOT NULL,
     started_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     deadline_at timestamptz NOT NULL DEFAULT statement_timestamp() + interval '10 minutes',
+    cancel_requested_at timestamptz,
     fenced_at timestamptz,
     fence_kind text CHECK (fence_kind IN ('platform-transaction','native-transaction','unprepared-intent')),
     fence_digest text CHECK (fence_digest IS NULL OR fence_digest ~ '^[0-9a-f]{64}$'),
@@ -62,10 +63,10 @@ CREATE TABLE identity.connection_resolutions (
     request_hash text NOT NULL,
     operation_revision bigint,
     admission_id uuid,
-    outcome text NOT NULL CHECK (outcome IN ('applied','failed')),
+    outcome text NOT NULL CHECK (outcome IN ('applied','failed','cancelled')),
     error_code text CHECK (error_code IS NULL OR error_code='CONNECTION_CONFIRMATION_FAILED'),
     resolved_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    CHECK ((outcome='applied' AND error_code IS NULL) OR (outcome='failed' AND error_code IS NOT NULL))
+    CHECK ((outcome IN ('applied','cancelled') AND error_code IS NULL) OR (outcome='failed' AND error_code IS NOT NULL))
 );
 ALTER TABLE identity.connection_attempts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE identity.connection_effect_evidence ENABLE ROW LEVEL SECURITY;
@@ -287,7 +288,7 @@ BEGIN
           AND d.request_hash=a.request_hash AND d.operation_revision=a.operation_revision
           AND d.status='applied' AND d.receipt->>'status'='applied');
     applied:=COALESCE(applied,false);
-    IF NOT applied AND e.operation_id IS NULL AND clock_timestamp()<a.deadline_at AND a.fenced_at IS NULL THEN RETURN NULL; END IF;
+    IF NOT applied AND e.operation_id IS NULL AND clock_timestamp()<a.deadline_at AND a.cancel_requested_at IS NULL AND a.fenced_at IS NULL THEN RETURN NULL; END IF;
     IF NOT applied AND a.fenced_at IS NULL THEN
         IF a.executor_kind<>'platform' AND NOT (a.recreation_id IS NOT NULL AND a.prepared_at IS NULL) THEN RETURN NULL; END IF;
         -- Platform custody writers take this same owner/attempt row lock and
@@ -300,17 +301,23 @@ BEGIN
     IF NOT applied AND a.fenced_at IS NULL THEN RETURN NULL; END IF;
     INSERT INTO identity.connection_resolutions(operation_id,attempt_id,owner_user_id,request_hash,operation_revision,admission_id,outcome,error_code)
       VALUES(p_operation_id,a.attempt_id,p_owner,COALESCE(e.public_request_hash,a.request_hash),a.operation_revision,a.admission_id,
-        CASE WHEN applied THEN 'applied' ELSE 'failed' END,
-        CASE WHEN applied THEN NULL ELSE 'CONNECTION_CONFIRMATION_FAILED' END) RETURNING * INTO r;
-    IF r.outcome='failed' AND a.recreation_id IS NOT NULL THEN
+        CASE WHEN applied THEN 'applied' WHEN a.cancel_requested_at IS NOT NULL THEN 'cancelled' ELSE 'failed' END,
+        CASE WHEN applied OR a.cancel_requested_at IS NOT NULL THEN NULL ELSE 'CONNECTION_CONFIRMATION_FAILED' END) RETURNING * INTO r;
+    IF r.outcome IN ('failed','cancelled') AND a.recreation_id IS NOT NULL THEN
         -- Closing the original ticket also fences its late metadata completion.
         -- Ordinary observations remain blocked by the failed-generation guard
         -- below; only a new explicit authorization can establish a new binding.
         UPDATE identity.connection_recreation_intents SET consumed_at=COALESCE(consumed_at,clock_timestamp())
           WHERE recreation_id=a.recreation_id AND operation_id=p_operation_id AND owner_user_id=p_owner;
     END IF;
-    UPDATE identity.connection_heads SET revision=revision+1,updated_at=clock_timestamp()
-      WHERE owner_user_id=p_owner RETURNING revision INTO head_revision;
+    -- Use the same globally ordered revision source as connection_commit. The
+    -- original UUID has already returned above on retries, before nextval.
+    head_revision:=nextval(pg_get_serial_sequence('identity.assistant_panel_changes','revision'));
+    IF head_revision <= (SELECT revision FROM identity.connection_heads WHERE owner_user_id=p_owner) THEN
+        RAISE EXCEPTION 'Connection revision source is behind the current head' USING ERRCODE='PT409';
+    END IF;
+    UPDATE identity.connection_heads SET revision=head_revision,updated_at=clock_timestamp()
+      WHERE owner_user_id=p_owner;
     PERFORM chat.send_user_event(jsonb_build_object('revision',head_revision::text,'scopeKey',a.scope_key,'resourceKey',a.resource_key),
         'connection_changed','gugu:user:' || p_owner || ':events',true);
     RETURN jsonb_build_object('outcome',r.outcome,'resolvedAt',r.resolved_at,'errorCode',r.error_code);
@@ -341,7 +348,7 @@ BEGIN
             AND e.owner_user_id=owner_id AND e.attempt_id=a.attempt_id AND e.credential_generation=a.credential_generation
             AND e.outcome='applied' AND a.request_hash=c.request_hash AND a.operation_revision=c.revision)) THEN 'applied'
         WHEN c.status='failed' AND c.terminal_at IS NOT NULL AND c.error_code IS DISTINCT FROM 'CONNECTION_OUTCOME_UNKNOWN' THEN 'failed' END);
-    v_state:=CASE v_outcome WHEN 'applied' THEN 'succeeded' WHEN 'failed' THEN 'failed' ELSE 'confirming' END;
+    v_state:=CASE v_outcome WHEN 'applied' THEN 'succeeded' WHEN 'failed' THEN 'failed' WHEN 'cancelled' THEN 'cancelled' ELSE 'confirming' END;
     RETURN jsonb_build_object('version',1,'operationId',p_operation_id,'scopeKey',COALESCE(c.scope_key,a.scope_key),
         'resourceKey',COALESCE(c.resource_key,a.resource_key),'deviceId',COALESCE(c.device_id,a.device_id),
         'revision',c.revision::text,'operation',COALESCE(c.operation,a.operation),
@@ -351,10 +358,58 @@ BEGIN
         'resolution',CASE WHEN r.operation_id IS NULL THEN NULL ELSE jsonb_build_object('outcome',r.outcome,'resolvedAt',r.resolved_at,'errorCode',r.error_code) END,
         'effective',jsonb_build_object('state',v_state,'connectionState',CASE WHEN v_state='succeeded' THEN
             CASE WHEN COALESCE(c.operation,a.operation)='remove' THEN 'disconnected' ELSE 'connected' END
-            WHEN v_state='failed' THEN 'failed' ELSE 'confirming' END,'blocksNewOperations',v_state='confirming'),
-        'confirmation',jsonb_build_object('state',CASE WHEN v_state<>'confirming' THEN 'resolved' ELSE 'pending' END,'deadlineAt',a.deadline_at));
+            WHEN v_state='failed' THEN 'failed' WHEN v_state='cancelled' THEN 'disconnected' ELSE 'confirming' END,'blocksNewOperations',v_state='confirming'),
+        'confirmation',jsonb_build_object('state',CASE WHEN v_state<>'confirming' THEN 'resolved' ELSE 'pending' END,'deadlineAt',a.deadline_at,'cancelRequested',a.cancel_requested_at IS NOT NULL));
 END;
 $$;
+-- Shared cancellation authority for native/self-hosted and platform adapters.
+-- The internal owner argument is only supplied by trusted wrappers; the public
+-- community wrapper derives it from the authenticated JWT. Both start closed.
+CREATE FUNCTION identity.connection_cancel_authorization(p_owner text,p_operation_id uuid) RETURNS jsonb
+LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+DECLARE a identity.connection_attempts%ROWTYPE; original_claims text; original_sub text; result jsonb;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM identity.users WHERE id=p_owner AND type='human' AND removed_at IS NULL) THEN RETURN NULL; END IF;
+    -- Same order as authorization commit and reconciliation: owner then attempt.
+    PERFORM 1 FROM identity.connection_heads WHERE owner_user_id=p_owner FOR UPDATE;
+    SELECT * INTO a FROM identity.connection_attempts WHERE owner_user_id=p_owner AND operation_id=p_operation_id
+        AND operation='save' AND recreation_id IS NOT NULL FOR UPDATE;
+    IF NOT FOUND THEN RETURN NULL; END IF;
+    original_claims:=current_setting('request.jwt.claims',true);
+    original_sub:=current_setting('request.jwt.claim.sub',true);
+    PERFORM set_config('request.jwt.claim.sub',p_owner,true);
+    PERFORM set_config('request.jwt.claims',jsonb_build_object('sub',p_owner,'role','authenticated')::text,true);
+    result:=identity.connection_operation_status(p_operation_id);
+    -- A settled original result is immutable, including proven success before
+    -- a separate resolution has been needed. Repeated cancellation changes none.
+    IF result->'effective'->>'state'='confirming' THEN
+        UPDATE identity.connection_attempts SET cancel_requested_at=COALESCE(cancel_requested_at,clock_timestamp())
+          WHERE operation_id=p_operation_id;
+        -- The original deadline belongs to the persisted/signed native attempt
+        -- identity and must never change. The queue projects cancellation time
+        -- separately to prioritize verification/fencing.
+        -- This resolver checks original evidence/admission receipts first. Its
+        -- platform writer lock fences atomically; an unprepared ticket can be
+        -- fenced without a device. Prepared native work stays unresolved until
+        -- the signed worker supplies the original executor's real fence/proof
+        -- and projects any original successful publication before settlement.
+        IF a.executor_kind='platform' OR a.prepared_at IS NULL THEN
+            PERFORM identity.connection_resolve_attempt(p_owner,p_operation_id);
+        END IF;
+        result:=identity.connection_operation_status(p_operation_id);
+    END IF;
+    PERFORM set_config('request.jwt.claims',COALESCE(original_claims,''),true);
+    PERFORM set_config('request.jwt.claim.sub',COALESCE(original_sub,''),true);
+    RETURN result;
+END;
+$$;
+CREATE FUNCTION identity.connection_authorization_cancel(p_operation_id uuid) RETURNS jsonb
+LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    SELECT identity.connection_cancel_authorization(identity.connection_owner(),p_operation_id)
+$$;
+REVOKE ALL ON FUNCTION identity.connection_cancel_authorization(text,uuid),identity.connection_authorization_cancel(uuid)
+    FROM PUBLIC,anon,authenticated,service_role;
+
 REVOKE ALL ON FUNCTION identity.connection_attempt_begin(text,uuid,bigint,text),
     identity.connection_attempt_write_fence(text,uuid,uuid,bigint),
     identity.connection_record_effect(text,uuid,uuid,uuid,text,text,text,text,text,jsonb),
@@ -366,7 +421,7 @@ REVOKE ALL ON FUNCTION identity.connection_attempt_begin(text,uuid,bigint,text),
 CREATE OR REPLACE FUNCTION identity.connection_admit(p_runtime_instance_id text,p_expected_revision bigint,p_operation_id uuid DEFAULT NULL) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE owner_id text := identity.connection_owner(); device text; current_revision bigint; change identity.connection_operations%ROWTYPE;
-    result jsonb; epoch bigint;
+    result jsonb; epoch bigint; attempt identity.connection_attempts%ROWTYPE;
 BEGIN
     PERFORM identity.connection_owner_lock(owner_id);
     device := identity.connection_runtime(owner_id,p_runtime_instance_id);
@@ -389,6 +444,17 @@ BEGIN
       ORDER BY (error_code='CONNECTION_OUTCOME_UNKNOWN') DESC NULLS LAST,revision LIMIT 1;
     IF FOUND THEN RETURN jsonb_build_object('admitted',false,'revision',current_revision::text,'operationId',change.operation_id,
         'domain','integrations','resourceKey',change.resource_key,'errorCode',change.error_code); END IF;
+    -- A prepared authorization may already change custody before any item or
+    -- operation row is published. Absence from connection_operations is not
+    -- evidence that the task may use a stable connection inventory.
+    SELECT * INTO attempt FROM identity.connection_attempts a
+      WHERE a.owner_user_id=owner_id AND a.recreation_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM identity.connection_resolutions r WHERE r.operation_id=a.operation_id
+          AND r.owner_user_id=owner_id AND r.attempt_id=a.attempt_id)
+      ORDER BY a.attempt_order LIMIT 1;
+    IF FOUND THEN RETURN jsonb_build_object('admitted',false,'revision',current_revision::text,
+        'operationId',attempt.operation_id,'domain','integrations','resourceKey',attempt.resource_key,
+        'errorCode','CONNECTION_CONFIRMING'); END IF;
     RETURN jsonb_build_object('admitted',true,'revision',current_revision::text);
 END;
 $$;
@@ -486,7 +552,7 @@ BEGIN
             AND a.scope_key=p_scope_key AND e.attempt_id=a.attempt_id AND e.credential_generation=a.credential_generation
             AND e.provider_id=p_data->>'providerId' AND e.account_id=p_data->>'accountId' AND e.outcome='applied' AND e.public_request_hash=connection_commit_body.request_hash
             AND (a.fenced_at IS NULL OR e.recorded_at<=a.fenced_at)
-            AND NOT EXISTS (SELECT 1 FROM identity.connection_resolutions r WHERE r.operation_id=p_operation_id AND r.outcome='failed')) THEN
+            AND NOT EXISTS (SELECT 1 FROM identity.connection_resolutions r WHERE r.operation_id=p_operation_id AND r.outcome IN ('failed','cancelled'))) THEN
         RAISE EXCEPTION 'Connection authorization has no bound effect evidence' USING ERRCODE='PT409';
     END IF;
     IF target_key IS NULL THEN
@@ -520,13 +586,13 @@ BEGIN
         AND EXISTS (SELECT 1 FROM identity.connection_attempts a JOIN identity.connection_resolutions r USING(operation_id)
             WHERE a.owner_user_id=owner_id AND a.scope_key=p_scope_key AND a.provider_id=p_data->>'providerId'
                 AND (a.account_id IS NULL OR a.account_id=p_data->>'accountId') AND a.operation='save'
-                AND a.recreation_id IS NOT NULL AND r.outcome='failed'
+                AND a.recreation_id IS NOT NULL AND r.outcome IN ('failed','cancelled')
                 AND NOT EXISTS (SELECT 1 FROM identity.connection_attempts newer JOIN identity.connection_effect_evidence e USING(operation_id)
                     WHERE newer.owner_user_id=owner_id AND newer.scope_key=p_scope_key AND newer.provider_id=a.provider_id
                         AND newer.account_id=p_data->>'accountId' AND newer.recreation_id IS NOT NULL
                         AND newer.started_at>a.started_at AND e.outcome='applied'
                         AND NOT EXISTS (SELECT 1 FROM identity.connection_resolutions failed
-                            WHERE failed.operation_id=newer.operation_id AND failed.outcome='failed'))) THEN
+                            WHERE failed.operation_id=newer.operation_id AND failed.outcome IN ('failed','cancelled')))) THEN
         RAISE EXCEPTION 'Connection observation belongs to an unsettled credential generation' USING ERRCODE='PT409';
     END IF;
     owner_metadata_intent := p_operation='save' AND p_scope_key<>'platform' AND p_runtime_instance_id IS NULL
