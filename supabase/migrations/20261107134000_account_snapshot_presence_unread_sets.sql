@@ -1,6 +1,17 @@
 -- Reuse bounded presence batches and one owned-agent set in account snapshots.
 SET LOCAL lock_timeout = '5s';
 
+-- Bind the effective scalar predecessor, including its archival projection.
+-- An unrecognized extension must not be silently dropped by the batch reader.
+DO $presence_predecessor$
+BEGIN
+  IF (SELECT encode(sha256(convert_to(prosrc,'UTF8')),'hex') FROM pg_proc
+      WHERE oid='identity.build_agent_presence_payload(text)'::regprocedure)
+      IS DISTINCT FROM '239379677acbe3c8977355b9d3b8ed546cf5df9c7b458b49dc0c00ad1b46158a' THEN
+    RAISE EXCEPTION 'Unexpected scalar presence predecessor';
+  END IF;
+END $presence_predecessor$;
+
 CREATE OR REPLACE FUNCTION identity.get_agent_presence_batch(p_agent_user_ids text[]) RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO 'identity', 'public', 'pg_catalog'
@@ -61,6 +72,8 @@ BEGIN
         'presence', jsonb_build_object(
             'agent_user_id',        u.id,
             'account_status',       'active',
+            'session_archived_at',  u.session_archived_at,
+            'session_lifecycle_revision', u.session_lifecycle_revision,
             'runtime_status',       COALESCE(r.runtime_status, 'offline'),
             'desired_status',       COALESCE(u.desired_status, 'online'),
             'activity_status',      COALESCE(r.activity_status, 'idle'),
@@ -83,6 +96,7 @@ BEGIN
             'host_runtime_capability', (d.capabilities->>'host_runtime_capability')::int,
             'consecutive_deliver_failures', COALESCE(r.consecutive_deliver_failures, 0),
             'updated_at',           GREATEST(
+                                        COALESCE(u.updated_at, to_timestamp(0)),
                                         COALESCE(r.updated_at, to_timestamp(0)),
                                         COALESCE(d.updated_at, to_timestamp(0))
                                     )
@@ -141,33 +155,6 @@ BEGIN
 END;
 $$;
 
--- Support the canonical scalar projection and its deployed archival extension without
--- changing the scalar API; a new/unknown predecessor needs an explicit release.
-DO $presence_projection$
-DECLARE scalar_source text; source_sha text; definition text;
-  active_anchor constant text := $old$'account_status',       'active',$old$;
-  updated_anchor constant text := $old$                                        COALESCE(r.updated_at, to_timestamp(0)),$old$;
-BEGIN
-  SELECT prosrc INTO scalar_source FROM pg_proc
-    WHERE oid='identity.build_agent_presence_payload(text)'::regprocedure;
-  source_sha:=encode(sha256(convert_to(scalar_source,'UTF8')),'hex');
-  IF source_sha='239379677acbe3c8977355b9d3b8ed546cf5df9c7b458b49dc0c00ad1b46158a' THEN
-    SELECT pg_get_functiondef('identity.get_agent_presence_batch(text[])'::regprocedure) INTO definition;
-    IF length(definition)-length(replace(definition,active_anchor,''))<>length(active_anchor)
-      OR length(definition)-length(replace(definition,updated_anchor,''))<>length(updated_anchor) THEN
-      RAISE EXCEPTION 'Unexpected batch presence projection';
-    END IF;
-    definition:=replace(definition,active_anchor,active_anchor || E'\n'
-      || $new$            'session_archived_at',  u.session_archived_at,
-            'session_lifecycle_revision', u.session_lifecycle_revision,$new$);
-    definition:=replace(definition,updated_anchor,
-      $new$                                        COALESCE(u.updated_at, to_timestamp(0)),
-$new$ || updated_anchor);
-    EXECUTE definition;
-  ELSIF source_sha<>'2e9b8c4a2ac73ddb57c75295597647586374f0d9a28fffaad891cbe9d008c530' THEN
-    RAISE EXCEPTION 'Unexpected scalar presence predecessor';
-  END IF;
-END $presence_projection$;
 REVOKE ALL ON FUNCTION identity.get_agent_presence_batch(text[]) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION identity.get_agent_presence_batch(text[]) TO authenticated;
 
