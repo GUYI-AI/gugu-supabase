@@ -5,8 +5,9 @@ CREATE FUNCTION identity.connection_management_assert(p_access jsonb) RETURNS vo
 LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog AS $$
 BEGIN
     IF NOT (p_access->>'allowed')::boolean THEN
-        RAISE EXCEPTION 'CONNECTION_CLIENT_UPGRADE_REQUIRED' USING ERRCODE='PT426',
-          DETAIL=jsonb_build_object('feature','connection-management','minimumVersion',p_access->'minimumVersion',
+        RAISE EXCEPTION USING ERRCODE='PT426', MESSAGE=p_access->>'message',
+          DETAIL=jsonb_build_object('errorCode','CONNECTION_CLIENT_UPGRADE_REQUIRED',
+            'feature','connection-management','minimumVersion',p_access->'minimumVersion',
             'clientPlatform',p_access->'clientPlatform','policyRevision',p_access->>'policyRevision')::text;
     END IF;
 END;

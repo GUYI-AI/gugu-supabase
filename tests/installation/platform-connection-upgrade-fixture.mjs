@@ -63,9 +63,11 @@ export async function assertConnectionManagementGate(db,test) {
   })
   await test('blocked SQL has exact PT426 and public details; configuration changes are revision fenced and API closed',async()=>{
     await headers('0.3.1')
-    const error=await refused('SELECT identity.connection_management_require_access()','PT426')
-    assert.equal(error.message,'请升级到 1.2.3-beta.2 版本后再管理连接')
-    assert.deepEqual(JSON.parse(error.detail),{errorCode:'CONNECTION_CLIENT_UPGRADE_REQUIRED',feature:'connection-management',minimumVersion:'1.2.3-beta.2',clientPlatform:'desktop',policyRevision:'1'})
+    for(const guard of ['identity.connection_management_require_access()','identity.connection_management_require_read()']) {
+      const error=await refused('SELECT '+guard,'PT426')
+      assert.equal(error.message,'请升级到 1.2.3-beta.2 版本后再管理连接')
+      assert.deepEqual(JSON.parse(error.detail),{errorCode:'CONNECTION_CLIENT_UPGRADE_REQUIRED',feature:'connection-management',minimumVersion:'1.2.3-beta.2',clientPlatform:'desktop',policyRevision:'1'})
+    }
     await refused("SELECT identity.connection_management_set_policy(0,false,'{}')",'PT409')
     await refused("SELECT identity.connection_management_set_policy(1,true,'{}')",'22023')
     await refused("SELECT identity.connection_management_set_policy(1,true,'{\"desktop\":\"1.2.3-beta.01\"}')",'22023')
