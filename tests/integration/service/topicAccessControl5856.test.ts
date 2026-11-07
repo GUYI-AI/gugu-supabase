@@ -924,25 +924,28 @@ describe('#5856 话题的访问控制(对着真库跑)', () => {
       const f = await seedHiddenHistoryGroup('b1')
       const topic = await createTopic(f.owner, f, '旧名字')
       await asService()
-      const sourceLineEvents = async (): Promise<number> => {
+      const sourceLineRevisions = async (): Promise<number> => {
         const { rows } = await database.query<{ n: string }>(
-          `SELECT count(*)::text AS n FROM realtime.messages
-            WHERE topic = $1 AND event = 'chat_changed'
-              AND payload->>'topic_of_source_chat' = $2 AND payload->>'op' = 'update'`,
-          [`gugu:user:${f.carol}:events`, f.group],
+          `SELECT count(*)::text AS n FROM chat.account_revisions
+            WHERE user_id = $1 AND event = 'chat_changed'
+              AND resource_key->>'chat_id' = $2 AND resource_key->>'entity_id' = $3`,
+          [f.carol, f.group, topic],
         )
         return Number(rows[0]!.n)
       }
       // Carol 在来源线上、不在话题里 —— 她正是「看得见它存在」的那类人。
-      // 创建者入列也发一次成员摘要失效通知(#6010)。
-      expect(await sourceLineEvents()).toBe(1)
+      expect((await database.query(
+        'SELECT 1 FROM chat.chat_members WHERE chat_id = $1 AND user_id = $2', [topic, f.carol],
+      )).rows).toEqual([])
+      const beforeRename = await sourceLineRevisions()
+      expect(beforeRename).toBeGreaterThan(0)
 
       await database.query(`UPDATE chat.chats SET name = '新名字' WHERE id = $1`, [topic])
-      expect(await sourceLineEvents()).toBe(2)
+      expect(await sourceLineRevisions()).toBe(beforeRename + 1)
 
       // 反例:改的不是名字就不回传,❌ 不许每次写这张表都惊动整条来源线。
       await database.query(`UPDATE chat.chats SET last_message_at = now() WHERE id = $1`, [topic])
-      expect(await sourceLineEvents()).toBe(2)
+      expect(await sourceLineRevisions()).toBe(beforeRename + 1)
     })
   })
 
