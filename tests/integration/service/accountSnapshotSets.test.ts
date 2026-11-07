@@ -99,6 +99,30 @@ describe('account snapshot set projections', () => {
     expect((await as<{current: unknown}>(f.owner,statement,[[f.group]]))[0]!.current).toEqual([])
   }))
 
+  it('preserves the deployed archival projection and rejects an unrecognized scalar predecessor', () => fixture(async f => {
+    const migration=readFileSync(new URL('../../../supabase/migrations/20261107134000_account_snapshot_presence_unread_sets.sql',import.meta.url),'utf8')
+    const projection=/DO \$presence_projection\$[\s\S]*?END \$presence_projection\$;/.exec(migration)?.[0]
+    if (!projection) throw new Error('Missing presence compatibility block')
+    const scalar=(await db.query<{definition:string}>("SELECT pg_get_functiondef('identity.build_agent_presence_payload(text)'::regprocedure) AS definition")).rows[0]!.definition
+    const deployed=scalar.includes("'session_archived_at'") ? scalar : scalar
+      .replace("'account_status',       'active',", "'account_status',       'active',\n            'session_archived_at',  u.session_archived_at,\n            'session_lifecycle_revision', u.session_lifecycle_revision,")
+      .replace('                                        COALESCE(r.updated_at, to_timestamp(0)),','                                        COALESCE(u.updated_at, to_timestamp(0)),\n                                        COALESCE(r.updated_at, to_timestamp(0)),')
+    await db.query(deployed)
+    // Recreate the exact migration's initial batch definition before choosing its projection.
+    await db.query(migration.slice(0,migration.indexOf('-- Support the canonical scalar projection')))
+    await db.query(projection)
+    await db.query('GRANT EXECUTE ON FUNCTION identity.get_agent_presence_batch(text[]) TO authenticated')
+    const values=await as<{old:unknown;current:{results:Record<string,{presence:Row}>}}>(f.owner,
+      'SELECT identity.before_batch_224($1) AS old,identity.get_agent_presence_batch($1) AS current',[[f.own,f.shared,f.hidden]])
+    expect(values[0]!.current).toEqual(values[0]!.old)
+    expect(values[0]!.current.results[f.own]!.presence).toHaveProperty('session_archived_at')
+    expect(values[0]!.current.results[f.own]!.presence).toHaveProperty('session_lifecycle_revision')
+    await db.query('SAVEPOINT unknown_presence')
+    await db.query(deployed.replace('DECLARE','-- unknown predecessor\nDECLARE'))
+    await expect(db.query(projection)).rejects.toThrow(/Unexpected scalar presence predecessor/)
+    await db.query('ROLLBACK TO SAVEPOINT unknown_presence')
+  }))
+
   it('keeps the snapshot wrapper and invoker boundary while batching more than 200 owned agents', () => fixture(async f => {
     const ids=Array.from({length:201},() => randomUUID())
     await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) SELECT x,'agent','batch fixture',$2,$3 FROM unnest($1::text[]) x", [ids,f.owner,'d-'+f.owner])
