@@ -309,7 +309,7 @@ describe('files_record_version:文本文件按轮记一版(迁移 20261011011100
 })
 
 describe('注销账号的清理链认得历史', () => {
-  it('一个对象只被历史指着:上传者注销以后它不进删除队列,只清 owner;对照:真没人指着的进队列', async () => {
+  it('一个对象只被历史指着:上传者注销以后它不进回收队列,只清 owner;对照:真没人指着的进队列', async () => {
     const group = await newGroup(owner, [member])
     const file = await binary(group, member) // 第 1 版是 member 传的
     await replace(file.id, owner, owner, await object(group, owner), 2) // owner 换成第 2 版:member 那份只剩历史指着
@@ -320,11 +320,15 @@ describe('注销账号的清理链认得历史', () => {
     expect(await referenced(file.pointer)).toBe(true)
     expect(await referenced(stray)).toBe(false)
 
+    const queued = async () => (await database.query<{ name: string }>(
+      `SELECT b.object_name AS name FROM chat.file_blob_gc g JOIN chat.file_blobs b ON b.id = g.blob_id
+        WHERE b.bucket_id = 'workspace' AND b.object_name = ANY($1) ORDER BY 1`, [[file.pointer, stray]])).rows.map((r) => r.name)
+    const before = await queued()
+    expect(before).not.toContain(stray)
+
     // 注销 = 删 auth 账号,触发器跑 identity.erase_human_account
     await database.query('DELETE FROM auth.users WHERE id = $1::uuid', [member])
-    const queued = (await database.query<{ name: string }>(
-      `SELECT name FROM identity.storage_object_deletion_outbox WHERE bucket_id = 'workspace' AND name = ANY($1)`, [[file.pointer, stray]])).rows.map((r) => r.name)
-    expect(queued).toEqual([stray])
+    expect(await queued()).toEqual([...before, stray].sort())
     expect((await database.query('SELECT 1 FROM storage.objects WHERE name = $1', [file.pointer])).rowCount).toBe(1)
     const kept = await history(file.id)
     expect(kept.map((v) => v.pointer)).toContain(file.pointer)

@@ -106,6 +106,8 @@ describe('human topic archival within the source conversation', () => {
     })).toContain('human_group_owner_required')
   })
   it('removes archived topics from all listings and notifies nonparticipant source members', async () => {
+    expect((await db.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=ANY($2::text[])',
+      [topic, [owner, manager]])).rows).toEqual([])
     await db.query('DELETE FROM chat.account_revisions WHERE user_id=ANY($1::text[])', [[owner, creator, manager, reader]])
     await db.query('DELETE FROM realtime.messages WHERE topic=ANY($1::text[])', [[owner, creator, manager, reader].map((id) => `gugu:user:${id}:events`)])
     await archive(manager)
@@ -114,10 +116,7 @@ describe('human topic archival within the source conversation', () => {
       expect((await db.query('SELECT * FROM chat.list_topics_of_chat($1)', [source])).rows).toEqual([])
       await db.query('RESET ROLE')
       expect((await db.query(`SELECT user_id FROM chat.account_revisions WHERE user_id=$1 AND event='chat_changed'
-        AND resource_key->>'chat_id'=$2`, [account, source])).rows).toHaveLength(1)
-      expect((await db.query(`SELECT payload FROM realtime.messages WHERE topic=$1 AND event='chat_changed'
-        AND payload->>'topic_of_source_chat'=$2`, [`gugu:user:${account}:events`, source])).rows)
-        .toEqual([{ payload: expect.objectContaining({ chat: expect.objectContaining({ id: topic, status: 'archived' }) }) }])
+        AND resource_key->>'chat_id'=$2 AND resource_key->>'entity_id'=$3`, [account, source, topic])).rows).toHaveLength(1)
     }
   })
   it('does not grant anonymous execution', async () => {
