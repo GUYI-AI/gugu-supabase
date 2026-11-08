@@ -24,7 +24,8 @@ CREATE TABLE identity.mobile_push_registrations (
   topic text NOT NULL CHECK (topic = 'app.gugu.chat'),
   chat_enabled boolean NOT NULL,
   task_enabled boolean NOT NULL,
-  sound_enabled boolean NOT NULL,
+  chat_sound_enabled boolean NOT NULL,
+  task_sound_enabled boolean NOT NULL,
   cursor_revision bigint NOT NULL CHECK (cursor_revision >= 0),
   scan_order bigint NOT NULL DEFAULT 0,
   registered_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -67,7 +68,7 @@ REVOKE ALL ON identity.mobile_push_registrations, identity.mobile_push_attempts,
 
 CREATE FUNCTION identity.mobile_push_register(p_installation_id uuid, p_device_id text,
   p_token text, p_environment text, p_topic text, p_chat_enabled boolean,
-  p_task_enabled boolean, p_sound_enabled boolean) RETURNS jsonb
+  p_task_enabled boolean, p_chat_sound_enabled boolean, p_task_sound_enabled boolean) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE owner_id text := auth.uid()::text; session uuid; prior identity.mobile_push_registrations%ROWTYPE;
   result identity.mobile_push_registrations%ROWTYPE; head bigint;
@@ -86,7 +87,8 @@ BEGIN
     OR p_token IS NULL OR p_token !~ '^([0-9a-f]{2})+$' OR octet_length(p_token) > 4096
     OR p_environment IS NULL OR p_environment NOT IN ('sandbox','production')
     OR p_topic IS DISTINCT FROM 'app.gugu.chat'
-    OR p_chat_enabled IS NULL OR p_task_enabled IS NULL OR p_sound_enabled IS NULL THEN
+    OR p_chat_enabled IS NULL OR p_task_enabled IS NULL
+    OR p_chat_sound_enabled IS NULL OR p_task_sound_enabled IS NULL THEN
     RAISE EXCEPTION 'Invalid mobile push binding' USING ERRCODE = '22023';
   END IF;
   -- Serialize a native installation's account and token transitions.
@@ -111,16 +113,20 @@ BEGIN
     RAISE EXCEPTION 'Push token already bound to an installation' USING ERRCODE = '42501';
   END IF;
   INSERT INTO identity.mobile_push_registrations(owner_user_id, installation_id, device_id,
-    session_id, token, environment, topic, chat_enabled, task_enabled, sound_enabled, cursor_revision)
+    session_id, token, environment, topic, chat_enabled, task_enabled,
+    chat_sound_enabled, task_sound_enabled, cursor_revision)
   VALUES(owner_id, p_installation_id, p_device_id, session, p_token, p_environment, p_topic,
-    p_chat_enabled, p_task_enabled, p_sound_enabled, head)
+    p_chat_enabled, p_task_enabled, p_chat_sound_enabled, p_task_sound_enabled, head)
   ON CONFLICT (installation_id, topic) DO UPDATE SET
     generation = CASE WHEN (mobile_push_registrations.token, mobile_push_registrations.environment,
-        mobile_push_registrations.chat_enabled, mobile_push_registrations.task_enabled, mobile_push_registrations.sound_enabled)
-      IS DISTINCT FROM (excluded.token, excluded.environment, excluded.chat_enabled, excluded.task_enabled, excluded.sound_enabled)
+        mobile_push_registrations.chat_enabled, mobile_push_registrations.task_enabled,
+        mobile_push_registrations.chat_sound_enabled, mobile_push_registrations.task_sound_enabled)
+      IS DISTINCT FROM (excluded.token, excluded.environment, excluded.chat_enabled, excluded.task_enabled,
+        excluded.chat_sound_enabled, excluded.task_sound_enabled)
       THEN gen_random_uuid() ELSE mobile_push_registrations.generation END,
     token = excluded.token, environment = excluded.environment,
-    chat_enabled = excluded.chat_enabled, task_enabled = excluded.task_enabled, sound_enabled = excluded.sound_enabled,
+    chat_enabled = excluded.chat_enabled, task_enabled = excluded.task_enabled,
+    chat_sound_enabled = excluded.chat_sound_enabled, task_sound_enabled = excluded.task_sound_enabled,
     registered_at = clock_timestamp()
   RETURNING * INTO result;
   RETURN jsonb_build_object('registration_id', result.id, 'generation', result.generation);
@@ -311,7 +317,9 @@ BEGIN
   candidate := identity.mobile_push_candidate(endpoint.owner_user_id,attempt.event,attempt.resource_key,attempt.revision);
   IF candidate IS NULL THEN RETURN NULL; END IF;
   RETURN jsonb_build_object('token',endpoint.token,'environment',endpoint.environment,'topic',endpoint.topic,
-    'sound',endpoint.sound_enabled,'registeredAt',endpoint.registered_at,
+    'sound',CASE candidate->>'kind' WHEN 'chat_message' THEN endpoint.chat_sound_enabled
+      WHEN 'task_attention' THEN endpoint.task_sound_enabled ELSE false END,
+    'registeredAt',endpoint.registered_at,
     'gugu',candidate || jsonb_build_object('v',1,'notificationId',attempt.id,'ownerId',endpoint.owner_user_id,
       'installationId',endpoint.installation_id,'registrationId',endpoint.id,'generation',endpoint.generation,
       'revision',attempt.revision::text));
@@ -334,13 +342,13 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION identity.mobile_push_register(uuid,text,text,text,text,boolean,boolean,boolean),
+REVOKE ALL ON FUNCTION identity.mobile_push_register(uuid,text,text,text,text,boolean,boolean,boolean,boolean),
   identity.mobile_push_revoke(uuid,uuid,uuid), identity.mobile_push_candidate(text,text,jsonb,bigint),
   identity.mobile_push_close_installation(uuid,text,uuid),
   identity.mobile_push_reserve(text,integer), identity.mobile_push_admit(uuid), identity.mobile_push_prepare(uuid),
   identity.mobile_push_finish(uuid,text,timestamptz)
   FROM PUBLIC, anon, authenticated, service_role, gugu_files, gugu_push;
-GRANT EXECUTE ON FUNCTION identity.mobile_push_register(uuid,text,text,text,text,boolean,boolean,boolean),
+GRANT EXECUTE ON FUNCTION identity.mobile_push_register(uuid,text,text,text,text,boolean,boolean,boolean,boolean),
   identity.mobile_push_revoke(uuid,uuid,uuid), identity.mobile_push_close_installation(uuid,text,uuid) TO authenticated;
 GRANT EXECUTE ON FUNCTION identity.mobile_push_reserve(text,integer), identity.mobile_push_admit(uuid), identity.mobile_push_prepare(uuid),
   identity.mobile_push_finish(uuid,text,timestamptz) TO gugu_push;

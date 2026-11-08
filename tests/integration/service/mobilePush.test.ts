@@ -65,10 +65,11 @@ async function rpc(client: pg.Client, role: string, sql: string, values: unknown
     await client.query('COMMIT'); return result.rows
   } catch (error) { await client.query('ROLLBACK'); throw error }
 }
-async function register(f: Fixture, overrides: { owner?: string; session?: string; device?: string; token?: string; install?: string } = {}) {
+async function register(f: Fixture, overrides: { owner?: string; session?: string; device?: string; token?: string; install?: string; chatSound?: boolean; taskSound?: boolean } = {}) {
   const owner = overrides.owner ?? f.owner; const install = overrides.install ?? f.install
-  return (await rpc(db, 'authenticated', 'SELECT identity.mobile_push_register($1,$2,$3,$4,$5,true,true,true) AS value',
-    [install, overrides.device ?? `phone-${install}-${owner}`, overrides.token ?? 'ab'.repeat(32), 'production', 'app.gugu.chat'],
+  return (await rpc(db, 'authenticated', 'SELECT identity.mobile_push_register($1,$2,$3,$4,$5,true,true,$6,$7) AS value',
+    [install, overrides.device ?? `phone-${install}-${owner}`, overrides.token ?? 'ab'.repeat(32), 'production', 'app.gugu.chat',
+      overrides.chatSound ?? true, overrides.taskSound ?? true],
     { sub: owner, session_id: overrides.session ?? f.session, role: 'authenticated' }))[0].value as { registration_id: string; generation: string }
 }
 async function reserve(client = worker) {
@@ -116,6 +117,32 @@ describe('mobile push binding and existing notification sources', () => {
     await expect(register(f, { device: `phone-${f.install}-${f.other}` })).rejects.toMatchObject({ code: '22023' })
     await expect(register(f, { session: f.otherSession })).rejects.toMatchObject({ code: '42501' })
     await expect(register(f, { token: 'PRIVATE_TOKEN_CANARY' })).rejects.toThrow('Invalid mobile push binding')
+  }))
+  it.each([{ chatSound: false, taskSound: true }, { chatSound: true, taskSound: false }])(
+    'keeps chat sound $chatSound and task sound $taskSound independent at dispatch', async sounds => fixture(async f => {
+      await register(f, sounds)
+      await send(f)
+      await db.query("UPDATE identity.agent_runtime_states SET agent_status='needs_user',agent_status_detail='question' WHERE agent_user_id=$1", [f.agent])
+      const attempts = await reserve(); expect(attempts).toHaveLength(2)
+      const selected: Record<string, boolean> = {}
+      for (const id of attempts) { const value = await prepare(id); selected[value.gugu.kind] = value.sound }
+      expect(selected).toEqual({ chat_message: sounds.chatSound, task_attention: sounds.taskSound })
+    }))
+  it('rotates generation for either sound preference and preserves an identical pair', async () => fixture(async f => {
+    const first = await register(f, { chatSound: false, taskSound: true })
+    expect(await register(f, { chatSound: false, taskSound: true })).toEqual(first)
+    const chatChanged = await register(f, { chatSound: true, taskSound: true })
+    expect(chatChanged.generation).not.toBe(first.generation)
+    const taskChanged = await register(f, { chatSound: true, taskSound: false })
+    expect(taskChanged.generation).not.toBe(chatChanged.generation)
+    expect(taskChanged.registration_id).toBe(first.registration_id)
+  }))
+  it('requires both sound values instead of defaulting an unavailable preference', async () => fixture(async f => {
+    for (const sounds of [[null, true], [true, null]]) {
+      await expect(rpc(db, 'authenticated', 'SELECT identity.mobile_push_register($1,$2,$3,$4,$5,true,true,$6,$7)',
+        [f.install, `phone-${f.install}-${f.owner}`, 'ab'.repeat(32), 'production', 'app.gugu.chat', ...sounds],
+        { sub: f.owner, session_id: f.session, role: 'authenticated' })).rejects.toMatchObject({ code: '22023' })
+    }
   }))
   it('keeps token tables and service functions closed to API roles', async () => fixture(async f => {
     await register(f)
@@ -303,7 +330,7 @@ describe('mobile push binding and existing notification sources', () => {
       await db.query('BEGIN'); await db.query('SET LOCAL ROLE authenticated')
       await db.query("SELECT set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: f.owner, session_id: f.session, role: 'authenticated' })])
       await db.query('SELECT identity.mobile_push_close_installation($1,$2,$3)', [f.install, `phone-${f.install}-${f.owner}`, f.session])
-      const result = rpc(late, 'authenticated', 'SELECT identity.mobile_push_register($1,$2,$3,$4,$5,true,true,true)',
+      const result = rpc(late, 'authenticated', 'SELECT identity.mobile_push_register($1,$2,$3,$4,$5,true,true,true,true)',
         [f.install, `phone-${f.install}-${f.owner}`, 'ab'.repeat(32), 'production', 'app.gugu.chat'],
         { sub: f.owner, session_id: f.session, role: 'authenticated' }).then(() => 'accepted', error => error.code)
       await gate.wait(); await db.query('COMMIT')
@@ -317,7 +344,7 @@ describe('mobile push binding and existing notification sources', () => {
       const gate = await waitBlocked(observer, late, db)
       await db.query('BEGIN'); await db.query('SET LOCAL ROLE authenticated')
       await db.query("SELECT set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: f.owner, session_id: f.session, role: 'authenticated' })])
-      await db.query('SELECT identity.mobile_push_register($1,$2,$3,$4,$5,true,true,true)',
+      await db.query('SELECT identity.mobile_push_register($1,$2,$3,$4,$5,true,true,true,true)',
         [f.install, `phone-${f.install}-${f.owner}`, 'ab'.repeat(32), 'production', 'app.gugu.chat'])
       const result = rpc(late, 'authenticated', 'SELECT identity.mobile_push_close_installation($1,$2,$3) AS value',
         [f.install, `phone-${f.install}-${f.owner}`, f.session], { sub: f.owner, session_id: f.session, role: 'authenticated' })

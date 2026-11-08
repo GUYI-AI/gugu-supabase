@@ -23,7 +23,8 @@ mobile_push_register(
   p_topic text,
   p_chat_enabled boolean,
   p_task_enabled boolean,
-  p_sound_enabled boolean
+  p_chat_sound_enabled boolean,
+  p_task_sound_enabled boolean
 ) -> { registration_id: UUID, generation: UUID }
 
 mobile_push_revoke(
@@ -44,8 +45,8 @@ mobile_push_close_installation(
 }
 ```
 
-The owner and login session come from the verified JWT. Both must still exist
-and belong to a live human account. Installation identity is the existing
+The owner and login session come from the verified JWT. Registration requires
+both to exist and belong to a live human account. Installation identity is the existing
 native UUID, and the device ID is exactly
 `phone-${installationId}-${ownerId}`, with UUIDs in canonical lowercase form.
 Notification registration does not require enabling the phone Agent host or
@@ -60,7 +61,12 @@ characters. Tokens are sensitive and must never enter application logs.
 Register only after the user grants notification permission and a matching
 owner session is available. Re-register after token, preference or login
 changes. An identical registration is idempotent and preserves its generation;
-rotation/preferences change its generation. An installation changing login
+rotation/preferences change its generation. Chat sound and task sound are
+independent required booleans; the worker selects the matching one by notification
+kind. Mirror the actual local chat preference and this iPhone host's task
+preference. If task preferences are not available, keep registration unavailable
+rather than borrowing another device's values or defaulting to enabled.
+An installation changing login
 sessions receives a new registration ID and starts at the current account
 revision, rather than replaying old notifications. Another account cannot
 move an installation binding without presenting its current APNs token.
