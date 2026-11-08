@@ -38,6 +38,7 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     const deviceCheckRelease = releases.find((release) => release.version.endsWith('_remove_archived_device_agents'))
     const validationRelease = releases.find((release) => release.constraintValidation)
     assert.ok(deviceCheckRelease && validationRelease)
+    let widgetUpgrade
     const releaseQuery = async (sql) => {
       const connectionRelease = releases.find((release) => release.version.endsWith('_platform_connection_state'))
       if (connectionRelease && sql.includes(connectionRelease.sql)) {
@@ -95,6 +96,55 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
           await query('BEGIN;\n' + projectMetadataRelease.sql + '\nCOMMIT;')
           assert.deepEqual(await snapshot(), after)
           assert.deepEqual(await ledger(), installedLedger)
+        })
+        return result
+      }
+      if (sql.includes(releases.find(release => release.version.endsWith('_widget_identity'))?.sql)) {
+        const owner = randomUUID(), group = randomUUID(), valid = randomUUID(), bad = randomUUID(), old = randomUUID(), forged = randomUUID(), between = randomUUID()
+        await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Widget identity upgrade')", [owner])
+        await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'group','Widget identity upgrade',$2)", [group, owner])
+        await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner')", [group, owner])
+        const content = JSON.stringify({ v: 2, text: 'Legacy counter', app: 'counter', view: 'main', data: { p: 'x'.repeat(4088) } })
+        const forgedContent = JSON.stringify({ v: 2, text: 'Forged legacy identity', app: 'counter', view: 'main', wid: valid })
+        for (const [id, body] of [[valid, content], [bad, '{'], [old, '{"v":1,"title":"Legacy"}'], [forged, forgedContent]]) {
+          await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type) VALUES($1,$2,$3,$4,'widget')", [id, group, owner, body])
+        }
+        const result = await query(sql)
+        await t.test('the widget DDL release registers new sends only, leaving history to its own release', async () => {
+          assert.equal((await db.query('SELECT id FROM chat.widgets WHERE chat_id=$1', [group])).rowCount, 0)
+          // A legacy client's send between the two releases: the trigger registers it under its message id.
+          await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type) VALUES($1,$2,$3,$4,'widget')", [between, group, owner, content])
+          assert.deepEqual((await db.query('SELECT id FROM chat.widgets WHERE chat_id=$1', [group])).rows, [{ id: between }])
+          const guards = (await db.query("SELECT tgname, pg_get_triggerdef(oid) AS def FROM pg_trigger WHERE tgrelid='chat.messages'::regclass AND tgname LIKE 'widget_identity_guard%' ORDER BY tgname")).rows
+          assert.deepEqual(guards.map(row => row.tgname), ['widget_identity_guard_insert', 'widget_identity_guard_update'])
+          assert.ok(guards.every(row => row.def.includes("'widget'")), 'only widget rows reach the guard')
+        })
+        widgetUpgrade = { owner, group, valid, forged, between, content, forgedContent }
+        return result
+      }
+      const backfillRelease = releases.find(release => release.version.endsWith('_widget_identity_backfill'))
+      if (backfillRelease && sql.includes(backfillRelease.sql)) {
+        const { owner, group, valid, forged, between, content, forgedContent } = widgetUpgrade
+        const result = await query(sql)
+        await t.test('widget identities backfill valid v2 once without rewriting historical messages', async () => {
+          const rows = (await db.query('SELECT id,message_id,created_by FROM chat.widgets WHERE chat_id=$1', [group])).rows
+          assert.deepEqual(rows.sort((a,b) => a.id.localeCompare(b.id)),
+            [valid,forged,between].sort().map(id => ({ id, message_id: id, created_by: owner })))
+          assert.equal((await db.query('SELECT content FROM chat.messages WHERE id=$1', [valid])).rows[0].content, content)
+          assert.deepEqual((await db.query('SELECT id,message_id FROM chat.widgets WHERE message_id=$1', [forged])).rows,
+            [{ id: forged, message_id: forged }])
+          assert.equal((await db.query('SELECT content FROM chat.messages WHERE id=$1', [forged])).rows[0].content, forgedContent)
+          await db.query('BEGIN; SET LOCAL ROLE authenticated')
+          try {
+            await db.query("SELECT set_config('request.jwt.claim.sub',$1,true)", [owner])
+            assert.deepEqual((await db.query('SELECT id,widget_id FROM chat.message_history_as($1,$2) WHERE id=$3', [group, owner, forged])).rows,
+              [{ id: forged, widget_id: forged }])
+          } finally { await db.query('ROLLBACK') }
+          await query('BEGIN;\n' + backfillRelease.sql + '\nCOMMIT;')
+          assert.equal((await db.query('SELECT id FROM chat.widgets WHERE chat_id=$1', [group])).rowCount, 3)
+          for (const signature of ['chat.register_widget_message(chat.messages)', 'chat.widget_spec(text)']) {
+            assert.equal((await db.query("SELECT has_function_privilege('authenticated',$1,'EXECUTE') AS allowed", [signature])).rows[0].allowed, false)
+          }
         })
         return result
       }
