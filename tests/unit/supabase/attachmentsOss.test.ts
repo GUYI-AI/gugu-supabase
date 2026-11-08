@@ -59,6 +59,17 @@ describe('签名', () => {
     expect(THUMB_PROCESS.endsWith('/format,webp')).toBe(true)
   })
 
+  // The sources that came back 400 (ZoomSizeInvalid / WebpExceedRange) on devdb with `resize,w_560`: fitted into
+  // THUMB_PROCESS's box the way OSS's m_lfit does (keep aspect, fit inside, never enlarge), every side stays encodable.
+  it.each([[1170, 40000], [560, 16383], [8, 30001], [100, 31000], [100, 65000], [4032, 3024], [40000, 100]])(
+    'a %i × %i source fits the thumbnail box below OSS limits', (width, height) => {
+      const box = Object.fromEntries(THUMB_PROCESS.split('/')[1]!.split(',').slice(1).map(part => part.split('_') as [string, string]))
+      const scale = Math.min(Number(box.w) / width, Number(box.h) / height, 1)
+      const [w, h] = [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))]
+      expect(w).toBeLessThanOrEqual(560)
+      expect(Math.max(w, h)).toBeLessThan(16383)
+    })
+
   it('CDN 鉴权 A 对阿里云文档的样例;签名链接只签路径,缩略图在同一个签名后面加 x-oss-process,有效期 1800 s', () => {
     expect(cdnAuthKey('/video/standard/test.mp4', 'aliyuncdnexp1234', { ts: 1444435200, rand: '0', uid: '0' }))
       .toBe('1444435200-0-0-23bf85053008f5c0e791667a313e28ce')
