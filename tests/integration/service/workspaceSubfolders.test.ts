@@ -173,6 +173,32 @@ describe('within one transaction', () => {
       expect(await fails('SELECT * FROM chat.workspace_list_as($1,$2,p_folder => $3)', [group, owner, 'Docs/nope'])).toMatch(/workspace_folder_not_found/)
     })
 
+    it('读一个文件夹只读它这一层(20261107220000):每行与整棵读里的那一行一样,含路径;分页的 total 是这一层的;最深那一层的也是', async () => {
+      const group = await newGroup(owner, [member])
+      let parent: string | null = null
+      const chain: string[] = []
+      for (let depth = 1; depth <= 15; depth += 1) {
+        parent = (await put(group, owner, `d${depth}`, { kind: 'folder', parent })).id
+        chain.push(parent)
+      }
+      for (const name of ['a.md', 'b.md', 'c.md']) await put(group, member, name, { parent: chain[2] })
+      await put(group, owner, 'deep.md', { parent: chain[14] })
+      await put(group, owner, 'root.md')
+
+      const list = (folder: string | null, offset = 0, limit: number | null = null) => rpc<Record<string, unknown>>(owner,
+        'SELECT * FROM chat.workspace_list_as($1,$2,$3,$4,p_folder => $5)', [group, owner, offset, limit, folder])
+      const whole = await list(null)
+      const childrenOf = (id: string | null) => whole.filter((row) => row.parent_id === id).map((row) => ({ ...row, total: expect.anything() }))
+      expect(await list(chain[2]!)).toEqual(childrenOf(chain[2]!))
+      expect(await list('d1/d2/d3')).toEqual(childrenOf(chain[2]!))
+      expect(await list('')).toEqual(childrenOf(null))
+      const deep = await list(chain[14]!)
+      expect(deep.map((row) => row.path)).toEqual([`${chain.map((_, i) => `d${i + 1}`).join('/')}/deep.md`])
+      expect(deep).toEqual(childrenOf(chain[14]!))
+      const page = await list(chain[2]!, 1, 2)
+      expect(page.map((row) => [row.filename, row.total])).toEqual(childrenOf(chain[2]!).slice(1, 3).map((row) => [row.filename, '4']))
+    })
+
     it('父必须是同一个对话里的文件夹:别的对话的、不存在的、是文件的都拒;文件夹不能放进自己里面', async () => {
       const group = await newGroup(owner, [member])
       const elsewhere = await newGroup(owner, [member])

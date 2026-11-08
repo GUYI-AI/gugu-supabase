@@ -29,11 +29,16 @@ function isSvg(b: Uint8Array): boolean {
 /** 这种图片在 CDN 上有没有缩略图(x-oss-process):SVG 没有,客户端直接用原图。 */
 export const hasThumbnail = (contentType: string): boolean => contentType.startsWith('image/') && contentType !== SVG
 
-// OSS rejects image processing above 20 MiB (ImageTooLarge, 0040-00000001).
+// OSS rejects image processing above 20 MiB (ImageTooLarge, 0040-00000001), and decoding sources above its documented
+// 250 million px (MemLimitExceeded, 0040-00000012; devdb: 342M px decoded, 360M px refused) — small-byte images can exceed
+// that. Long or wide sources are THUMB_PROCESS's job, not a reason to skip. Unknown dimensions: only the bytes limit is known.
 export const OSS_IMAGE_PROCESS_MAX_BYTES = 20 * 1024 * 1024
-export const canSignThumbnail = (contentType: string, sizeBytes: unknown): boolean =>
+export const OSS_IMAGE_PROCESS_MAX_PIXELS = 250_000_000
+const withinPixels = (width: unknown, height: unknown): boolean =>
+  !Number.isSafeInteger(width) || !Number.isSafeInteger(height) || (width as number) * (height as number) <= OSS_IMAGE_PROCESS_MAX_PIXELS
+export const canSignThumbnail = (contentType: string, sizeBytes: unknown, width?: unknown, height?: unknown): boolean =>
   hasThumbnail(contentType) && typeof sizeBytes === 'number' && Number.isSafeInteger(sizeBytes)
-    && sizeBytes > 0 && sizeBytes <= OSS_IMAGE_PROCESS_MAX_BYTES
+    && sizeBytes > 0 && sizeBytes <= OSS_IMAGE_PROCESS_MAX_BYTES && withinPixels(width, height)
 
 function jpegSize(b: Uint8Array): Sniffed {
   let i = 2
