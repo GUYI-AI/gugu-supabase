@@ -36,6 +36,17 @@ CREATE TABLE identity.mobile_push_registrations (
 CREATE INDEX mobile_push_owner_idx ON identity.mobile_push_registrations(owner_user_id);
 CREATE INDEX mobile_push_session_idx ON identity.mobile_push_registrations(session_id);
 CREATE INDEX mobile_push_scan_idx ON identity.mobile_push_registrations(environment,scan_order,id);
+-- Irreversible for this login session and native installation. Auth deletion
+-- removes the fence too, after which the absent session still refuses register.
+CREATE TABLE identity.mobile_push_closures (
+  owner_user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  session_id uuid NOT NULL REFERENCES auth.sessions(id) ON DELETE CASCADE,
+  installation_id uuid NOT NULL,
+  fence_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  closed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY(owner_user_id,session_id,installation_id)
+);
+CREATE INDEX mobile_push_closures_session_idx ON identity.mobile_push_closures(session_id);
 CREATE TABLE identity.mobile_push_attempts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   registration_id uuid NOT NULL REFERENCES identity.mobile_push_registrations(id) ON DELETE CASCADE,
@@ -50,7 +61,8 @@ CREATE TABLE identity.mobile_push_attempts (
 );
 ALTER TABLE identity.mobile_push_registrations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE identity.mobile_push_attempts ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON identity.mobile_push_registrations, identity.mobile_push_attempts
+ALTER TABLE identity.mobile_push_closures ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON identity.mobile_push_registrations, identity.mobile_push_attempts, identity.mobile_push_closures
   FROM PUBLIC, anon, authenticated, service_role, gugu_files, gugu_push;
 
 CREATE FUNCTION identity.mobile_push_register(p_installation_id uuid, p_device_id text,
@@ -79,6 +91,10 @@ BEGIN
   END IF;
   -- Serialize a native installation's account and token transitions.
   PERFORM pg_advisory_xact_lock(hashtextextended('mobile-push:' || p_installation_id::text, 0));
+  IF EXISTS (SELECT 1 FROM identity.mobile_push_closures c WHERE c.owner_user_id = auth.uid()
+    AND c.session_id = session AND c.installation_id = p_installation_id) THEN
+    RAISE EXCEPTION 'Push installation is closed for this login session' USING ERRCODE = '42501';
+  END IF;
   SELECT * INTO prior FROM identity.mobile_push_registrations
     WHERE installation_id = p_installation_id AND topic = p_topic FOR UPDATE;
   IF prior.id IS NOT NULL AND prior.owner_user_id <> owner_id AND prior.token <> p_token THEN
@@ -122,6 +138,43 @@ BEGIN
     AND installation_id = p_installation_id AND owner_user_id = auth.uid()::text
     AND session_id = NULLIF(auth.jwt()->>'session_id','')::uuid AND generation = p_generation;
   RETURN FOUND;
+END;
+$$;
+
+-- No token or RAM registration receipt is needed. The verified JWT fixes the
+-- old owner/session; callers cannot target another session with a newer ticket.
+CREATE FUNCTION identity.mobile_push_close_installation(p_installation_id uuid,
+  p_device_id text, p_original_session_id uuid) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE owner_id uuid := auth.uid(); session uuid; fence uuid; scope jsonb;
+BEGIN
+  session := NULLIF(auth.jwt()->>'session_id','')::uuid;
+  IF owner_id IS NULL OR session IS NULL OR p_original_session_id IS DISTINCT FROM session THEN
+    RAISE EXCEPTION 'Original authenticated login session required' USING ERRCODE = '42501';
+  END IF;
+  IF p_installation_id IS NULL OR p_device_id IS DISTINCT FROM
+    'phone-' || p_installation_id::text || '-' || owner_id::text THEN
+    RAISE EXCEPTION 'Invalid mobile push binding' USING ERRCODE = '22023';
+  END IF;
+  scope := jsonb_build_object('v',1,'closed',true,'owner_id',owner_id,'session_id',session,
+    'installation_id',p_installation_id,'device_id',p_device_id);
+  -- Same lock order as register: session first, installation second.
+  PERFORM 1 FROM auth.sessions s WHERE s.id = session AND s.user_id = owner_id FOR KEY SHARE OF s;
+  IF NOT FOUND THEN
+    IF EXISTS (SELECT 1 FROM auth.sessions s WHERE s.id = session) THEN
+      RAISE EXCEPTION 'Login session ownership mismatch' USING ERRCODE = '42501';
+    END IF;
+    -- FK cascade plus register's session lock/check makes absence authoritative.
+    RETURN scope || jsonb_build_object('evidence','session_absent','fence_id',NULL);
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('mobile-push:' || p_installation_id::text, 0));
+  INSERT INTO identity.mobile_push_closures(owner_user_id,session_id,installation_id)
+    VALUES(owner_id,session,p_installation_id) ON CONFLICT DO NOTHING;
+  SELECT c.fence_id INTO fence FROM identity.mobile_push_closures c
+    WHERE c.owner_user_id = owner_id AND c.session_id = session AND c.installation_id = p_installation_id;
+  DELETE FROM identity.mobile_push_registrations r WHERE r.owner_user_id = owner_id::text
+    AND r.session_id = session AND r.installation_id = p_installation_id;
+  RETURN scope || jsonb_build_object('evidence','installation_fenced','fence_id',fence);
 END;
 $$;
 
@@ -283,10 +336,11 @@ $$;
 
 REVOKE ALL ON FUNCTION identity.mobile_push_register(uuid,text,text,text,text,boolean,boolean,boolean),
   identity.mobile_push_revoke(uuid,uuid,uuid), identity.mobile_push_candidate(text,text,jsonb,bigint),
+  identity.mobile_push_close_installation(uuid,text,uuid),
   identity.mobile_push_reserve(text,integer), identity.mobile_push_admit(uuid), identity.mobile_push_prepare(uuid),
   identity.mobile_push_finish(uuid,text,timestamptz)
   FROM PUBLIC, anon, authenticated, service_role, gugu_files, gugu_push;
 GRANT EXECUTE ON FUNCTION identity.mobile_push_register(uuid,text,text,text,text,boolean,boolean,boolean),
-  identity.mobile_push_revoke(uuid,uuid,uuid) TO authenticated;
+  identity.mobile_push_revoke(uuid,uuid,uuid), identity.mobile_push_close_installation(uuid,text,uuid) TO authenticated;
 GRANT EXECUTE ON FUNCTION identity.mobile_push_reserve(text,integer), identity.mobile_push_admit(uuid), identity.mobile_push_prepare(uuid),
   identity.mobile_push_finish(uuid,text,timestamptz) TO gugu_push;

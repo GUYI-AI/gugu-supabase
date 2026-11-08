@@ -31,6 +31,17 @@ mobile_push_revoke(
   p_registration_id uuid,
   p_generation uuid
 ) -> boolean
+
+mobile_push_close_installation(
+  p_installation_id uuid,
+  p_device_id text,
+  p_original_session_id uuid
+) -> {
+  v: 1, closed: true,
+  evidence: "installation_fenced" | "session_absent",
+  owner_id: UUID, session_id: UUID, installation_id: UUID, device_id: string,
+  fence_id: UUID | null
+}
 ```
 
 The owner and login session come from the verified JWT. Both must still exist
@@ -61,6 +72,37 @@ visible/pending rather than being reported as a successful revoke. Deleting
 the Auth session also deletes its token registrations. Guard all asynchronous
 registration callbacks by the current owner and installation epoch. Clearing
 local credentials alone while offline cannot revoke a server registration.
+
+For retiring an original login when RAM registration receipts are missing,
+use `mobile_push_close_installation` with the restricted native retirement
+credential. The original session ID must come from that credential's verified
+JWT, not JavaScript or a replacement session. The server also enforces exact
+JWT-session equality. No token or notification permission is needed.
+
+An active session produces a persistent fence for just that owner, session and
+installation, and deletes only its registrations. Register and close take the
+same session-row/installation lock order. Registers committed before close are
+deleted; delayed registers after close are refused, even when close found no
+registration row. Repeated close returns the same fence UUID. New owners, new
+Auth sessions and other installations are unaffected. This scope is closed
+permanently for that Auth session; there is no automatic reopening endpoint.
+Normal preference changes do not need this login-retirement operation.
+
+If the original Auth session row has physically disappeared, FK cascade and the
+register session check provide `session_absent`, with JSON `null` for the fence
+ID. A merely expired session is not called absent. `installation_fenced`
+requires a UUID fence ID. Both forms require `v:1`, `closed:true` and exact
+owner/session/installation/device matching before the native credential-write
+barrier may accept them as cleanup evidence. Neither claims that the client
+never registered. Network/unknown results remain unverified and may be retried
+with the same original scope; idempotency does not depend on a RAM operation ID.
+
+The existing exact three-argument revoke is unchanged. `false` alone is still
+not cleanup evidence. A separate, matching successful close is authoritative
+for its retired scope, including unknown registration receipts. SDK sign-out
+`error:null` is not proof that the Auth session row was physically deleted:
+the pinned SDK treats some authorization/not-found replies as successful local
+sign-out. This service does not change shared logout or mutate Auth sessions.
 
 The visible APNs payload has `aps.alert`, optional `aps.sound = "default"`, and:
 
