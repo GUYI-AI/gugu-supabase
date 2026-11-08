@@ -295,6 +295,27 @@ describe('within one transaction', () => {
       expect(await list(0, null, 'nothing')).toEqual([])
     })
 
+    it('一份内容有两个活副本时(20261108130000):副本的各列说的是同一个,id 小的那个', async () => {
+      const group = await newGroup(owner, [member])
+      const transferGroup = (await database.query<{ g: string }>('SELECT chat.file_transfer_group($1) AS g', [group])).rows[0]!.g
+      const account = async (user: string) => (await database.query<{ a: string }>('SELECT chat.file_transfer_account($1) AS a', [user])).rows[0]!.a
+      const blob = (await database.query<{ id: string }>(`INSERT INTO chat.file_blobs(bucket_id,object_name,size_bytes,content_type,created_by)
+        VALUES('workspace',$1,9,'application/pdf',$2) RETURNING id`, [randomUUID(), member])).rows[0]!.id
+      await database.query(`INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,size_bytes,blob_id,source_message_ids,created_by,version)
+        VALUES($1,'file','two-live.pdf','application/pdf',9,$2,'{}',$3,1)`, [group, blob, member])
+      await database.query('DELETE FROM chat.file_transfer_storage_refs r USING chat.file_transfer_storage o WHERE o.id=r.storage_id AND o.blob_id=$1', [blob])
+      // id 大的先写进去:没有排序时先读到的是它。
+      const live = async (id: string, by: string, expiresAt: string | null) => {
+        await database.query(`INSERT INTO chat.file_transfer_storage(id,blob_id,bucket_id,object_name,size_bytes) VALUES($1,$2,'workspace',$3,9)`, [id, blob, randomUUID()])
+        await database.query('INSERT INTO chat.file_transfer_storage_refs(storage_id,chat_id,account_id,expires_at) VALUES($1,$2,$3,$4)', [id, transferGroup, await account(by), expiresAt])
+      }
+      await live('ffffffff-ffff-4fff-8fff-ffffffffffff', owner, '2030-01-01T00:00:00.000Z')
+      await live('00000000-0000-4000-8000-000000000000', member, null)
+      const rows = await rpc<Record<string, unknown>>(owner,
+        `SELECT total::int AS total,storage_class,copy_account_id,is_mine,expires_at FROM chat.workspace_list_as($1,$2,p_folder => '')`, [group, owner])
+      expect(rows).toEqual([{ total: 1, storage_class: 'kept', copy_account_id: await account(member), is_mine: false, expires_at: null }])
+    })
+
     it('父必须是同一个对话里的文件夹:别的对话的、不存在的、是文件的都拒;文件夹不能放进自己里面', async () => {
       const group = await newGroup(owner, [member])
       const elsewhere = await newGroup(owner, [member])
