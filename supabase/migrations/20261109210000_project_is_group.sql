@@ -30,7 +30,7 @@ CREATE FUNCTION chat.is_project_owner(p_chat_id text, p_user_id text) RETURNS bo
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
     SELECT p_user_id IS NOT NULL AND (
         EXISTS (SELECT 1 FROM chat.chats c WHERE c.id = p_chat_id AND c.creator_user_id = p_user_id)
-        OR EXISTS (SELECT 1 FROM chat.chat_members m WHERE m.chat_id = p_chat_id AND m.user_id = p_user_id AND m.role = 'owner')
+        OR EXISTS (SELECT 1 FROM chat.active_members m WHERE m.chat_id = p_chat_id AND m.user_id = p_user_id AND m.role = 'owner')
         OR EXISTS (SELECT 1 FROM identity.device_projects dp WHERE dp.chat_id = p_chat_id AND dp.user_id::text = p_user_id));
 $$;
 REVOKE ALL ON FUNCTION chat.is_project_owner(text, text) FROM PUBLIC, anon, authenticated;
@@ -43,7 +43,7 @@ BEGIN
         UPDATE chat.chats c SET is_project = true
          WHERE c.id = NEW.chat_id AND c.kind = 'group' AND NOT c.is_project
            AND (c.creator_user_id = NEW.user_id::text OR EXISTS (
-                SELECT 1 FROM chat.chat_members m WHERE m.chat_id = c.id AND m.user_id = NEW.user_id::text AND m.role = 'owner'));
+                SELECT 1 FROM chat.active_members m WHERE m.chat_id = c.id AND m.user_id = NEW.user_id::text AND m.role = 'owner'));
     END IF;
     RETURN NULL;
 END;
@@ -219,7 +219,7 @@ BEGIN
         'groups',COALESCE((SELECT jsonb_agg(g ORDER BY (g->>'bytes')::bigint DESC) FROM (
             SELECT jsonb_build_object('chat_id',m.chat_id,'name',c.name,'project',c.is_project,
                 'bytes',sum(m.size_bytes),'count',count(*)) g
-            FROM mine m JOIN chat.chats c ON c.id=m.chat_id GROUP BY m.chat_id,c.name) gs),'[]'::jsonb),
+            FROM mine m JOIN chat.chats c ON c.id=m.chat_id GROUP BY m.chat_id,c.name,c.is_project) gs),'[]'::jsonb),
         'expiring',COALESCE((SELECT jsonb_agg(e ORDER BY e->>'expires_at') FROM (
             SELECT jsonb_build_object('chat_id',m.chat_id,'expires_at',m.expires_at,'bytes',m.size_bytes,'class',m.class,
                 'item_id',w.id,'file_name',w.filename) e
