@@ -114,6 +114,22 @@ describe('support help configuration and data-plane boundary', () => {
     expect(await info()).toMatchObject({ group: { availability: state } })
     expect(await join()).toMatchObject({ status: 'unavailable' })
   })
+  it('does not count a session-archived agent toward a full help group', async () => {
+    await enabled(); await db.query('RESET ROLE')
+    const agent = randomUUID()
+    const device = `support-help-${agent}`
+    await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Test device','isolated','linux')", [device, owner])
+    await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Test agent',$2,$3)", [agent, owner, device])
+    await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [group, agent])
+    await db.query('UPDATE chat.chats SET max_members=2 WHERE id=$1', [group])
+    await actor(visitor)
+    expect(await info()).toMatchObject({ group: { availability: 'full' } })
+    await db.query('RESET ROLE')
+    await db.query('UPDATE identity.users SET session_archived_at=now() WHERE id=$1', [agent])
+    await actor(visitor)
+    expect(await info()).toMatchObject({ group: { availability: 'available' } })
+    expect(await join()).toEqual({ status: 'joined', chat_id: group })
+  })
   it('cannot enable the release gate as an authenticated client or publish unverified assistants', async () => {
     await publish()
     await rejects("SELECT identity.set_support_help_release_gate($1,true,'fake','test','test')", [owner])

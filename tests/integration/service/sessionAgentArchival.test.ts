@@ -175,7 +175,7 @@ describe('reversible agent session archival', () => {
     expect(await denied(join)).toContain('Group member limit reached')
     await archive()
     const result = await join()
-    if (entry === 'join_public_group') expect(result).toMatchObject({ is_member: true, member_count: 5 })
+    if (entry === 'join_public_group') expect(result).toMatchObject({ is_member: true, member_count: 4 })
     else expect(result.outcome).toBe('joined')
     expect((await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1 AND user_id=ANY($2)', [group, [agent, joining]])).rows)
       .toHaveLength(2)
@@ -330,8 +330,12 @@ describe('reversible agent session archival', () => {
   })
 
   it('reports a terminal archived refusal to visible senders without leaking whisper facts', async () => {
-    await archive()
+    // Sent inside the archive interval before the host synchronizes it; the archival backfill refuses it.
     const message = await send([agent], { at: archivedAt, whisper: true })
+    await archive()
+    // A whisper sent after archival is accepted and refused for the agent alone.
+    const late = await send([agent], { whisper: true })
+    expect(await facts(late)).toEqual({ wake: false, blocked: true, command: false, receipt: false })
     await asUser()
     expect((await db.query('SELECT reason FROM chat.message_agent_delivery_blocks WHERE message_id=$1', [message])).rows).toEqual([{ reason: 'agent_archived' }])
     await db.query('RESET ROLE')
@@ -414,5 +418,108 @@ describe('reversible agent session archival', () => {
       await sender.end()
       await observer.end()
     }
+  })
+})
+
+describe('an archived agent has left its groups', () => {
+  async function members(chat = group, as = owner) {
+    await asUser(as)
+    const { rows } = await db.query('SELECT user_id FROM chat.list_member_ids($1) ORDER BY user_id', [chat])
+    const counted = (await db.query('SELECT count(*)::int AS n FROM chat.active_members WHERE chat_id=$1', [chat])).rows[0].n
+    await db.query('RESET ROLE')
+    return { ids: rows.map(({ user_id }) => user_id), counted }
+  }
+
+  async function roster(recipient: string, chat = group) {
+    const { rows } = await db.query(`SELECT tombstone FROM chat.account_revisions WHERE user_id=$1 AND event='chat_members_changed'
+      AND resource_key=jsonb_build_object('chat_id',$2::text,'user_id',$3::text,'kind','roster') ORDER BY revision DESC LIMIT 1`,
+    [recipient, chat, agent])
+    return rows[0]?.tombstone
+  }
+
+  it('is not listed or counted while archived and returns on restore; other members are unchanged', async () => {
+    const all = [owner, outsider, agent, peer].sort()
+    expect(await members()).toEqual({ ids: all, counted: 4 })
+    await archive()
+    expect(await members()).toEqual({ ids: all.filter((id) => id !== agent), counted: 3 })
+    expect(await members(group, outsider)).toEqual({ ids: all.filter((id) => id !== agent), counted: 3 })
+    expect((await db.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, agent])).rowCount).toBe(1)
+    await restore()
+    expect(await members()).toEqual({ ids: all, counted: 4 })
+    await db.query('SET CONSTRAINTS ALL IMMEDIATE')
+  })
+
+  it('lets a new agent take the freed seat of a full group and counts the archived agent again after restore', async () => {
+    await db.query('UPDATE chat.chats SET max_members=4 WHERE id=$1', [group])
+    const fresh = randomUUID()
+    await db.query(`INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Seat fixture',$2,$3)`, [fresh, owner, device])
+    expect((await db.query('SELECT chat.group_add_denial($1,$2,$3) AS denial', [group, fresh, owner])).rows[0].denial).toBe('member_limit_reached')
+    await archive()
+    await asUser()
+    expect((await db.query('SELECT chat.add_group_agent($1,$2,NULL,auth.uid()::text) AS receipt', [group, fresh])).rows[0].receipt.status).toBe('joined')
+    await db.query('RESET ROLE')
+    expect((await members()).counted).toBe(4)
+    await restore()
+    expect((await members()).counted).toBe(5)
+    const late = randomUUID()
+    await db.query(`INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Seat fixture',$2,$3)`, [late, owner, device])
+    expect((await db.query('SELECT chat.group_add_denial($1,$2,$3) AS denial', [group, late, owner])).rows[0].denial).toBe('member_limit_reached')
+    await db.query('SET CONSTRAINTS ALL IMMEDIATE')
+  })
+
+  it('tells remaining members the agent left, and that it returned on restore', async () => {
+    await archive()
+    // Only humans receive account revisions.
+    for (const recipient of [owner, outsider]) expect(await roster(recipient)).toBe(true)
+    expect((await db.query("SELECT 1 FROM chat.account_revisions WHERE user_id=$1 AND event='agent_changed' AND resource_key->>'agent_user_id'=$2", [outsider, agent])).rowCount).toBeGreaterThan(0)
+    await restore()
+    for (const recipient of [owner, outsider]) expect(await roster(recipient)).toBe(false)
+  })
+
+  it('accepts a member\'s @-mention of the archived agent under RLS without waking it or giving it a seat', async () => {
+    await db.query('UPDATE chat.chats SET max_members=4 WHERE id=$1', [group])
+    await archive()
+    await asUser()
+    const id = randomUUID()
+    const sent = (await db.query(`SELECT chat.send_message_with_overlays($1,$2,$3,$4,'Mention fixture','text',NULL,NULL,false,false) AS result`,
+      [id, group, owner, [agent]])).rows[0].result
+    await db.query('RESET ROLE')
+    expect(sent.message.id).toBe(id)
+    expect(sent.delivery_blocks).toEqual([{ message_id: id, agent_user_id: agent, reason: 'agent_archived' }])
+    expect(await facts(id)).toEqual({ wake: false, blocked: true, command: false, receipt: false })
+    expect((await members()).counted).toBe(3)
+    const fresh = randomUUID()
+    await db.query(`INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Seat fixture',$2,$3)`, [fresh, owner, device])
+    expect((await db.query('SELECT chat.group_add_denial($1,$2,$3) AS denial', [group, fresh, owner])).rows[0].denial).toBeNull()
+  })
+
+  it('keeps direct chats, sender history and topic invariants', async () => {
+    const authored = await send([], { sender: agent })
+    const dm = randomUUID()
+    await db.query(`INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'dm','Archive DM',$2)`, [dm, owner])
+    await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')`, [dm, owner, agent])
+    const topic = randomUUID()
+    await db.query(`INSERT INTO chat.chats(id,kind,name,creator_user_id,source_chat_id,source_message_id) VALUES($1,'topic','Archive topic',$2,$3,$4)`,
+      [topic, owner, group, authored])
+    await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member'),($1,$3,'member')`, [topic, owner, agent])
+    await db.query('SET CONSTRAINTS ALL IMMEDIATE')
+    await archive()
+    expect((await members(dm)).ids).toEqual([owner, agent].sort())
+    expect((await members(topic)).ids).toEqual([owner])
+    await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')`, [topic, peer])
+    await db.query('SET CONSTRAINTS ALL IMMEDIATE')
+    await asUser(outsider)
+    expect((await db.query('SELECT sender_user_id FROM chat.messages WHERE id=$1', [authored])).rows).toEqual([{ sender_user_id: agent }])
+    expect((await db.query('SELECT display_name FROM identity.users WHERE id=$1', [agent])).rows).toEqual([{ display_name: 'Claude 1' }])
+    await db.query('RESET ROLE')
+    // The installer has ADMIN, but not SET, on gugu_files; this grant rolls back with the test.
+    await db.query("DO $$ BEGIN EXECUTE format('GRANT gugu_files TO %I', current_user); END $$")
+    await db.query('SET LOCAL ROLE gugu_files')
+    expect((await db.query('SELECT user_id FROM chat.active_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[group, dm]])).rows.map(({ user_id }) => user_id).sort())
+      .toEqual([owner, outsider, peer, owner, agent].sort())
+    await db.query('RESET ROLE')
+    await restore()
+    expect((await members(topic)).ids).toEqual([owner, agent, peer].sort())
+    await db.query('SET CONSTRAINTS ALL IMMEDIATE')
   })
 })
