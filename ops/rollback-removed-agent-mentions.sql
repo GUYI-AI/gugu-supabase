@@ -1,5 +1,5 @@
 -- Roll back 20261109151500_removed_agent_mentions_refused: a message mentioning a removed
--- agent is rejected again by messages_insert_member. Messages, seats, identities and the
+-- agent is rejected again by messages_insert_member, and non-member recipients get its generic 42501. Messages, seats, identities and the
 -- installer ledger are not touched. The identity_removed refusal rows are deleted so the
 -- reason constraint can return to agent_archived only; they only ever marked removed
 -- agents, which are never woken or delivered to either way.
@@ -10,6 +10,9 @@ LOCK TABLE chat.messages IN SHARE ROW EXCLUSIVE MODE;
 
 DROP TRIGGER messages_c_record_removed_agent_refusals ON chat.messages;
 DROP FUNCTION chat.record_message_removed_agent_refusals();
+-- Non-member recipients fall back to the policy's generic 42501.
+DROP TRIGGER messages_a_recipient_membership ON chat.messages;
+DROP FUNCTION chat.reject_non_member_recipients();
 
 DO $policy$
 DECLARE

@@ -193,7 +193,8 @@ it('rolls removed-agent mentions back to rejection without changing messages, se
   expect(await constraint()).toBe("CHECK ((reason = 'agent_archived'::text))")
   expect((await db.query(`SELECT to_regprocedure('chat_private.is_removed_agent_recipient(text,text)') AS recipient,
     to_regprocedure('chat_private.is_removed_agent_seat(text,text)') AS seat,
-    to_regprocedure('chat.record_message_removed_agent_refusals()') AS refusals`)).rows[0]).toEqual({ recipient: null, seat: null, refusals: null })
+    to_regprocedure('chat.record_message_removed_agent_refusals()') AS refusals,
+    to_regprocedure('chat.reject_non_member_recipients()') AS rejecter`)).rows[0]).toEqual({ recipient: null, seat: null, refusals: null, rejecter: null })
   expect((await db.query('SELECT * FROM chat.messages WHERE chat_id=$1 ORDER BY id', [room])).rows).toEqual(messages)
   expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [room])).rows).toEqual(seats)
   expect((await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows).toEqual(ledger)

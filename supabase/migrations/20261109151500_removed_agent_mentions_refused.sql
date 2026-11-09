@@ -54,6 +54,43 @@ BEGIN
     EXECUTE format('ALTER POLICY messages_insert_member ON chat.messages WITH CHECK (%s)', replace(previous, prior_sql, replacement_sql));
 END $policy$;
 
+-- A recipient that never sat here is still rejected, now with an error a client can name:
+-- P0001, message and hint recipient_not_member, detail = the offending ids (as given, deduplicated).
+-- It applies the policy's own recipient rule, only for signed-in callers whose sender may speak
+-- in this chat; for anyone else RLS answers with its generic 42501, so a caller cannot use it to
+-- probe the membership of a chat it may not write to. The policy remains the backstop.
+-- It runs right after messages_a_lock_agent_devices (which must stay first) and only reads.
+CREATE FUNCTION chat.reject_non_member_recipients() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE outsiders text[];
+BEGIN
+  -- Whispers keep enforce_whisper_rule's own named refusal (23514, "... is not a member of ...").
+  IF auth.uid() IS NULL OR NEW.is_whisper OR COALESCE(cardinality(NEW.to_user_ids), 0) = 0 THEN RETURN NEW; END IF;
+  IF '*' = ANY(NEW.to_user_ids)
+     AND EXISTS (SELECT 1 FROM chat.chats c WHERE c.id = NEW.chat_id AND c.kind IN ('group', 'topic')) THEN
+    RETURN NEW;
+  END IF;
+  IF NOT (chat.can_act_as(NEW.sender_user_id, NEW.chat_id) OR chat.can_speak_in_topic(NEW.chat_id, NEW.sender_user_id)) THEN
+    RETURN NEW;
+  END IF;
+  SELECT array_agg(target ORDER BY first_seen) INTO outsiders FROM (
+    SELECT target, min(position) AS first_seen
+      FROM unnest(NEW.to_user_ids) WITH ORDINALITY AS t(target, position)
+     WHERE target <> '*'
+       AND NOT chat.is_addressable_in(NEW.chat_id, target)
+       AND NOT chat_private.is_removed_agent_recipient(NEW.chat_id, target)
+     GROUP BY target) offending;
+  IF outsiders IS NOT NULL THEN
+    RAISE EXCEPTION 'recipient_not_member' USING ERRCODE = 'P0001', HINT = 'recipient_not_member',
+      DETAIL = array_to_string(outsiders, ',');
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION chat.reject_non_member_recipients() FROM PUBLIC, anon, authenticated, service_role, gugu_files;
+CREATE TRIGGER messages_a_recipient_membership BEFORE INSERT ON chat.messages
+  FOR EACH ROW EXECUTE FUNCTION chat.reject_non_member_recipients();
+
 -- The refusal for each mentioned removed former member. A message that would wake nobody
 -- records nothing, the same rule as the archived refusal.
 CREATE FUNCTION chat.record_message_removed_agent_refusals() RETURNS trigger

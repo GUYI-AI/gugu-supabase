@@ -172,7 +172,7 @@ describe('project local metadata and exact references, kept by the device that s
   it('rolls back the local file and revision when message authorization, payload or idempotency rejects sending',async()=>{
     const send='SELECT chat.file_device_publish($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)'
     const message=randomUUID();await db.query(`SELECT * FROM chat.send_message_idempotent($1,$2,$3,'{}','existing','text',NULL,NULL,false,false)`,[message,group,owner])
-    expect((await fails(send,[...args(),{message_id:randomUUID(),to_user_ids:[outsider]}])).code).toBe('42501')
+    expect(await fails(send,[...args(),{message_id:randomUUID(),to_user_ids:[outsider]}])).toMatchObject({code:'P0001',hint:'recipient_not_member',detail:outsider})
     await service()
     expect((await db.query('SELECT id FROM chat.workspace_items WHERE id=$1',[item])).rows).toEqual([])
     expect((await db.query('SELECT item_id FROM chat.file_device_revisions WHERE item_id=$1',[item])).rows).toEqual([])

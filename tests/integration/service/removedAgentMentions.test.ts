@@ -20,11 +20,11 @@ async function send(chat: string, to: string[] | null, extra: { whisper?: boolea
   await admin()
   return id
 }
-async function refused(chat: string, to: string[], extra: { whisper?: boolean } = {}) {
+async function refused(chat: string, to: string[], extra: { whisper?: boolean, sender?: string } = {}) {
   await db.query('SAVEPOINT refusal')
   try { await send(chat, to, extra) } catch (error) {
     await db.query('ROLLBACK TO SAVEPOINT refusal'); await admin()
-    return error as Error & { code: string }
+    return error as Error & { code: string, hint?: string, detail?: string }
   }
   throw new Error('Expected the message to be rejected')
 }
@@ -102,13 +102,28 @@ describe('mentions of a removed former member (#2383)', () => {
     expect((await db.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [topic, agent])).rows).toEqual([])
   })
 
-  it('ids that never sat in this chat are still rejected, live or removed', async () => {
-    expect((await refused(group, [stranger])).code).toBe('42501')
+  it('ids that never sat in this chat are still rejected, live or removed, with a nameable error', async () => {
+    const notMember = (ids: string[]) => ({ code: 'P0001', message: 'recipient_not_member', hint: 'recipient_not_member', detail: ids.join(',') })
+    expect(await refused(group, [stranger])).toMatchObject(notMember([stranger]))
     await removeIdentity(stranger)
-    expect((await refused(group, [stranger])).code).toBe('42501')
-    expect((await refused(group, [peer, stranger])).code).toBe('42501')
-    expect((await refused(group, [randomUUID()])).code).toBe('42501')
-    expect((await refused(topic, [stranger])).code).toBe('42501')
+    const unknown = randomUUID()
+    expect(await refused(group, [stranger])).toMatchObject(notMember([stranger]))
+    // Only the offending ids, in the order given, once each; the removed former member is not one.
+    expect(await refused(group, [unknown, peer, agent, stranger, unknown])).toMatchObject(notMember([unknown, stranger]))
+    expect(await refused(topic, [stranger])).toMatchObject(notMember([stranger]))
+    // A whisper keeps the whisper rule's own named refusal.
+    expect(await refused(group, [stranger], { whisper: true })).toMatchObject({ code: '23514', message: expect.stringContaining('is not a member of') })
+  })
+
+  it('a sender without the right to speak here still gets the generic RLS refusal, never membership facts', async () => {
+    const intruder = randomUUID()
+    await db.query(`INSERT INTO auth.users(id,aud,role,email,created_at,updated_at)
+      VALUES($1,'authenticated','authenticated',$2,now(),now())`, [intruder, `${intruder}@removed-mention.invalid`])
+    for (const to of [[randomUUID()], [peer]]) {
+      const error = await refused(group, to, { sender: intruder })
+      expect(error.code).toBe('42501')
+      expect(error.hint).toBeUndefined()
+    }
   })
 
   it('a whisper to the removed agent is still rejected; @all records nothing for it', async () => {
@@ -128,13 +143,14 @@ describe('mentions of a removed former member (#2383)', () => {
     const rows = (await db.query(`SELECT r.rolname AS role,
         has_function_privilege(r.rolname,'chat_private.is_removed_agent_recipient(text,text)','EXECUTE') AS recipient,
         has_function_privilege(r.rolname,'chat_private.is_removed_agent_seat(text,text)','EXECUTE') AS seat,
-        has_function_privilege(r.rolname,'chat.record_message_removed_agent_refusals()','EXECUTE') AS refusals
+        has_function_privilege(r.rolname,'chat.record_message_removed_agent_refusals()','EXECUTE') AS refusals,
+        has_function_privilege(r.rolname,'chat.reject_non_member_recipients()','EXECUTE') AS rejecter
       FROM pg_roles r WHERE r.rolname IN ('anon','authenticated','service_role','gugu_files') ORDER BY 1`)).rows
     expect(rows).toEqual([
-      { role: 'anon', recipient: false, seat: false, refusals: false },
-      { role: 'authenticated', recipient: true, seat: false, refusals: false },
-      { role: 'gugu_files', recipient: false, seat: false, refusals: false },
-      { role: 'service_role', recipient: false, seat: false, refusals: false },
+      { role: 'anon', recipient: false, seat: false, refusals: false, rejecter: false },
+      { role: 'authenticated', recipient: true, seat: false, refusals: false, rejecter: false },
+      { role: 'gugu_files', recipient: false, seat: false, refusals: false, rejecter: false },
+      { role: 'service_role', recipient: false, seat: false, refusals: false, rejecter: false },
     ])
     await db.query('SAVEPOINT reason')
     await expect(db.query(`INSERT INTO chat.message_agent_delivery_blocks(message_id,agent_user_id,reason)
