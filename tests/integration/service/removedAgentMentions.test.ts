@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 import { Client } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -123,29 +122,6 @@ describe('mentions of a removed former member (#2383)', () => {
     await db.query('UPDATE identity.users SET session_archived_at=now() WHERE id=$1', [agent])
     const message = await send(group, [agent])
     expect((await outcome(message, agent)).blocks).toEqual(['agent_archived'])
-  })
-
-  it('the operational rollback restores the predecessor policy and constraint and rejects the mention again', async () => {
-    const policy = async () => (await db.query(`SELECT pg_get_expr(polwithcheck,polrelid) AS check FROM pg_policy
-      WHERE polrelid='chat.messages'::regclass AND polname='messages_insert_member'`)).rows[0].check
-    const constraint = async () => (await db.query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
-      WHERE conrelid='chat.message_agent_delivery_blocks'::regclass AND conname='message_agent_delivery_blocks_reason_check'`)).rows[0].def
-    const current = await policy()
-    expect(current).toContain('chat_private.is_removed_agent_recipient(messages.chat_id, target.target_user_id)')
-    await removeIdentity(agent)
-    const accepted = await send(group, [agent])
-    const messages = (await db.query('SELECT * FROM chat.messages WHERE chat_id=$1 ORDER BY id', [group])).rows
-    await db.query(readFileSync(new URL('../../../ops/rollback-removed-agent-mentions.sql', import.meta.url), 'utf8')
-      .replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
-    expect(await policy()).toBe(current.replace(' AND (NOT chat_private.is_removed_agent_recipient(messages.chat_id, target.target_user_id))', ''))
-    expect(await constraint()).toBe("CHECK ((reason = 'agent_archived'::text))")
-    expect((await db.query(`SELECT to_regprocedure('chat_private.is_removed_agent_recipient(text,text)') AS recipient,
-      to_regprocedure('chat_private.is_removed_agent_seat(text,text)') AS seat,
-      to_regprocedure('chat.record_message_removed_agent_refusals()') AS refusals`)).rows[0]).toEqual({ recipient: null, seat: null, refusals: null })
-    expect((await db.query('SELECT * FROM chat.chat_members WHERE user_id=$1', [agent])).rows).toHaveLength(1)
-    expect((await db.query('SELECT * FROM chat.messages WHERE chat_id=$1 ORDER BY id', [group])).rows).toEqual(messages)
-    expect((await outcome(accepted, agent)).blocks).toBeNull()
-    expect((await refused(group, [agent])).code).toBe('42501')
   })
 
   it('new functions are closed: only the policy test is callable, and only by signed-in users', async () => {

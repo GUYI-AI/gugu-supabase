@@ -1,4 +1,4 @@
--- Roll back 20261109150000_removed_agent_mentions_refused: a message mentioning a removed
+-- Roll back 20261109151500_removed_agent_mentions_refused: a message mentioning a removed
 -- agent is rejected again by messages_insert_member. Messages, seats, identities and the
 -- installer ledger are not touched. The identity_removed refusal rows are deleted so the
 -- reason constraint can return to agent_archived only; they only ever marked removed

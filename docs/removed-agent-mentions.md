@@ -4,7 +4,7 @@ Archiving an agent with "remove social identity" sets `identity.users.removed_at
 `chat.chat_members` (20261031031000), but every membership read uses live identities, so the agent is no longer a member and
 `chat.is_addressable_in` is false for it.
 
-Until 20261109150000, a group message that still mentioned such an agent (a draft written before archival, a cached member
+Until 20261109151500, a group message that still mentioned such an agent (a draft written before archival, a cached member
 list) failed the `messages_insert_member` policy, and nobody in the chat received it.
 
 ## Behavior now
