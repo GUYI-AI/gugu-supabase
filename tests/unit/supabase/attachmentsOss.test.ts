@@ -512,6 +512,13 @@ describe('提交', () => {
     expect(refusalFromDb({ message: 'something else' })).toMatchObject({ status: 500, code: 'failed' })
     expect(new Refusal(400, 'invalid', 'x')).toBeInstanceOf(Error)
   })
+
+  it('#2383 收件人从来不在群里:400 recipient_not_member,带上库给的 id 列表,不当成可重试的 500', () => {
+    const refusal = refusalFromDb({ message: 'recipient_not_member', hint: 'recipient_not_member', code: 'P0001', details: 'a,b' })
+    expect(refusal).toMatchObject({ status: 400, code: 'recipient_not_member', message: 'recipient_not_member', details: 'a,b' })
+    // Other refusals never carry the database's details through.
+    expect(refusalFromDb({ message: 'x', hint: 'attachment_source_gone', details: 'internal' }).details).toBeUndefined()
+  })
 })
 
 describe('代主人发给好友', () => {
