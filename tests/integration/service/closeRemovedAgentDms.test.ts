@@ -142,3 +142,15 @@ it.each(['delete-first', 'remove-first'])('commits %s personal deletion and remo
     await deleting.end(); await removing.end()
   }
 })
+
+// The client archives the session first (#236: the agent leaves its groups, keeps its DMs), then removes the identity.
+it('closes the DMs of an agent that was session-archived before removal', async () => {
+  await db.query('UPDATE identity.users SET session_archived_at=now() WHERE id=$1', [agent])
+  expect((await db.query('SELECT chat_id FROM chat.active_members WHERE user_id=$1 ORDER BY chat_id', [agent])).rows.map(r => r.chat_id))
+    .toEqual([ownerDm, friendDm].sort())
+  await archive()
+  expect((await db.query('SELECT chat_id FROM chat.chat_members WHERE chat_id=ANY($1) AND user_id<>$2 AND conversation_deleted_at IS NOT NULL ORDER BY chat_id',
+    [[ownerDm, friendDm, group], agent])).rows.map(r => r.chat_id)).toEqual([ownerDm, friendDm].sort())
+  expect(await listed(owner)).not.toContain(ownerDm)
+  expect(await listed(friend)).not.toContain(friendDm)
+})
