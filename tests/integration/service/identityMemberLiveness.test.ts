@@ -118,6 +118,10 @@ it('restores predecessor views on operational rollback without changing source r
   const identities = (await db.query('SELECT * FROM identity.users WHERE id=ANY($1) ORDER BY id', [[owner, peer, outsider, agent]])).rows
   const expected = await as('authenticated', owner, 'SELECT * FROM chat.active_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[room, secondRoom]])
   await db.query('SAVEPOINT operational_rollback')
+  // Later releases that depend on the cache roll back first, newest first.
+  for (const later of ['rollback-archived-agents-leave-groups.sql']) {
+    await db.query(readFileSync(new URL(`../../../ops/${later}`, import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
+  }
   const rollback = readFileSync(new URL('../../../ops/rollback-identity-member-liveness.sql', import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, '')
   await db.query(rollback)
   expect((await db.query("SELECT to_regclass('identity.member_liveness') AS cache,to_regprocedure('identity.sync_member_liveness()') AS sync")).rows).toEqual([{ cache: null, sync: null }])
@@ -129,6 +133,37 @@ it('restores predecessor views on operational rollback without changing source r
   expect((await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows).toEqual(ledger)
   await db.query('ROLLBACK TO SAVEPOINT operational_rollback')
   expect((await db.query("SELECT to_regclass('identity.member_liveness') IS NOT NULL AS restored")).rows[0].restored).toBe(true)
+})
+
+it('rolls archived-agent group membership back without changing seats, identities or ledger', async () => {
+  await db.query('UPDATE identity.users SET session_archived_at=now() WHERE id=$1', [agent])
+  const counted = async () => (await db.query('SELECT count(*)::int AS n FROM chat.active_members WHERE chat_id=$1', [room])).rows[0].n
+  expect(await counted()).toBe(2)
+  const returned = async () => (await db.query(`SELECT tombstone FROM chat.account_revisions WHERE user_id=$1 AND event='chat_members_changed'
+    AND resource_key=jsonb_build_object('chat_id',$2::text,'user_id',$3::text,'kind','roster') ORDER BY revision DESC LIMIT 1`, [owner, room, agent])).rows[0]?.tombstone
+  expect(await returned()).toBe(true)
+  const seats = (await db.query('SELECT * FROM chat.chat_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[room, secondRoom]])).rows
+  const identities = (await db.query('SELECT * FROM identity.users WHERE id=ANY($1) ORDER BY id', [[owner, peer, agent]])).rows
+  const ledger = (await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows
+  const access = (await db.query("SELECT relacl::text,reloptions FROM pg_class WHERE oid='chat.active_members'::regclass")).rows
+  await db.query('SAVEPOINT archived_seat_rollback')
+  await db.query(readFileSync(new URL('../../../ops/rollback-archived-agents-leave-groups.sql', import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
+  expect(await counted()).toBe(3)
+  // Cached member lists learn that the archived agent is a member again.
+  expect(await returned()).toBe(false)
+  expect((await db.query("SELECT to_regnamespace('chat_private') AS schema, pg_get_expr(polqual,polrelid) AS policy FROM pg_policy WHERE polname='members_select_peer'")).rows)
+    .toEqual([{ schema: null, policy: '(identity.user_is_live(user_id) AND chat.is_member(chat_id))' }])
+  expect((await db.query(`SELECT to_regclass('chat.live_identity_members') AS view,to_regprocedure('chat_private.is_direct_chat(text)') AS helper,
+    to_regprocedure('chat.publish_session_archival_roster()') AS roster,to_regprocedure('chat.is_retained_member(text,text)') AS retained,
+    (SELECT count(*)::int FROM pg_attribute WHERE attrelid='identity.member_liveness'::regclass AND attname='in_groups') AS columns,
+    (SELECT count(*)::int FROM pg_proc WHERE prosrc LIKE '%live_identity_members%') AS readers`)).rows)
+    .toEqual([{ view: null, helper: null, roster: null, retained: null, columns: 0, readers: 0 }])
+  expect((await db.query("SELECT relacl::text,reloptions FROM pg_class WHERE oid='chat.active_members'::regclass")).rows).toEqual(access)
+  expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[room, secondRoom]])).rows).toEqual(seats)
+  expect((await db.query('SELECT * FROM identity.users WHERE id=ANY($1) ORDER BY id', [[owner, peer, agent]])).rows).toEqual(identities)
+  expect((await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows).toEqual(ledger)
+  await db.query('ROLLBACK TO SAVEPOINT archived_seat_rollback')
+  expect(await counted()).toBe(2)
 })
 
 it('removes liveness function calls from invoker view bodies without a wall-clock assertion', async () => {
