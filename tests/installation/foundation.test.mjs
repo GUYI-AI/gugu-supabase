@@ -10,6 +10,8 @@ import { assertAllocatedProjectPublisher, assertNoChatFileHost } from './project
 import { installConnectionStateWithEvidence } from './platform-connection-state-fixture.mjs'
 import { assertOwnerConnectionRuntime } from './platform-connection-owner-fixture.mjs'
 import { assertConnectionAuthorityReader } from './platform-connection-authority-fixture.mjs'
+import { installConnectionEntryGateWithEvidence } from './platform-connection-upgrade-entry-fixture.mjs'
+import { assertConnectionManagementGate } from './platform-connection-upgrade-fixture.mjs'
 
 // Deliberately requires an empty, disposable Supabase PostgreSQL 17 instance.
 // Never resets schemas, migration history, or user data to make a test pass.
@@ -42,6 +44,18 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     assert.ok(deviceCheckRelease && validationRelease)
     let widgetUpgrade
     const releaseQuery = async (sql) => {
+      const entryGateRelease=releases.find(release=>release.version.endsWith('_connection_management_entrypoints'))
+      if(entryGateRelease && sql.includes(entryGateRelease.sql)){
+        return installConnectionEntryGateWithEvidence({db,query,sql,test:(name,action)=>t.test(name,action)})
+      }
+      const upgradeGateRelease = releases.find(release => release.version.endsWith('_connection_management_upgrade_gate'))
+      if (upgradeGateRelease && sql.includes(upgradeGateRelease.sql)) {
+        const result = await query(sql)
+        await query('BEGIN')
+        try { await assertConnectionManagementGate(db, (name, action) => t.test(name, action)) }
+        finally { await query('ROLLBACK') }
+        return result
+      }
       const authorityRelease = releases.find((release) => release.version.endsWith('_connection_authority_read'))
       if (authorityRelease && sql.includes(authorityRelease.sql)) {
         const result = await query(sql)

@@ -40,5 +40,5 @@ export async function connectionLegacyResponseFixture(db) {
     await db.query('DELETE FROM identity.users WHERE id=$1', [assistant])
     await db.query('DELETE FROM auth.users WHERE id=$1', [owner])
   }
-  return { capture, cleanup }
+  return { capture, cleanup, identities:{owner,assistant,device,instance} }
 }
