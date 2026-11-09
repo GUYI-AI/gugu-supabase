@@ -139,6 +139,9 @@ it('rolls archived-agent group membership back without changing seats, identitie
   await db.query('UPDATE identity.users SET session_archived_at=now() WHERE id=$1', [agent])
   const counted = async () => (await db.query('SELECT count(*)::int AS n FROM chat.active_members WHERE chat_id=$1', [room])).rows[0].n
   expect(await counted()).toBe(2)
+  const returned = async () => (await db.query(`SELECT tombstone FROM chat.account_revisions WHERE user_id=$1 AND event='chat_members_changed'
+    AND resource_key=jsonb_build_object('chat_id',$2::text,'user_id',$3::text,'kind','roster') ORDER BY revision DESC LIMIT 1`, [owner, room, agent])).rows[0]?.tombstone
+  expect(await returned()).toBe(true)
   const seats = (await db.query('SELECT * FROM chat.chat_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[room, secondRoom]])).rows
   const identities = (await db.query('SELECT * FROM identity.users WHERE id=ANY($1) ORDER BY id', [[owner, peer, agent]])).rows
   const ledger = (await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows
@@ -146,7 +149,11 @@ it('rolls archived-agent group membership back without changing seats, identitie
   await db.query('SAVEPOINT archived_seat_rollback')
   await db.query(readFileSync(new URL('../../../ops/rollback-archived-agents-leave-groups.sql', import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
   expect(await counted()).toBe(3)
-  expect((await db.query(`SELECT to_regclass('chat.live_identity_members') AS view,to_regprocedure('chat.is_direct_chat(text)') AS helper,
+  // Cached member lists learn that the archived agent is a member again.
+  expect(await returned()).toBe(false)
+  expect((await db.query("SELECT to_regnamespace('chat_private') AS schema, pg_get_expr(polqual,polrelid) AS policy FROM pg_policy WHERE polname='members_select_peer'")).rows)
+    .toEqual([{ schema: null, policy: '(identity.user_is_live(user_id) AND chat.is_member(chat_id))' }])
+  expect((await db.query(`SELECT to_regclass('chat.live_identity_members') AS view,to_regprocedure('chat_private.is_direct_chat(text)') AS helper,
     to_regprocedure('chat.publish_session_archival_roster()') AS roster,to_regprocedure('chat.is_retained_member(text,text)') AS retained,
     (SELECT count(*)::int FROM pg_attribute WHERE attrelid='identity.member_liveness'::regclass AND attname='in_groups') AS columns,
     (SELECT count(*)::int FROM pg_proc WHERE prosrc LIKE '%live_identity_members%') AS readers`)).rows)

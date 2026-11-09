@@ -430,6 +430,20 @@ describe('an archived agent has left its groups', () => {
     return { ids: rows.map(({ user_id }) => user_id), counted }
   }
 
+  async function seatRows(chat: string, as: string) {
+    await asUser(as)
+    const { rows } = await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [chat])
+    await db.query('RESET ROLE')
+    return rows.map(({ user_id }) => user_id)
+  }
+
+  async function directChat() {
+    const dm = randomUUID()
+    await db.query(`INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'dm','Archive DM',$2)`, [dm, owner])
+    await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')`, [dm, owner, agent])
+    return dm
+  }
+
   async function roster(recipient: string, chat = group) {
     const { rows } = await db.query(`SELECT tombstone FROM chat.account_revisions WHERE user_id=$1 AND event='chat_members_changed'
       AND resource_key=jsonb_build_object('chat_id',$2::text,'user_id',$3::text,'kind','roster') ORDER BY revision DESC LIMIT 1`,
@@ -438,14 +452,21 @@ describe('an archived agent has left its groups', () => {
   }
 
   it('is not listed or counted while archived and returns on restore; other members are unchanged', async () => {
+    const dm = await directChat()
     const all = [owner, outsider, agent, peer].sort()
     expect(await members()).toEqual({ ids: all, counted: 4 })
     await archive()
     expect(await members()).toEqual({ ids: all.filter((id) => id !== agent), counted: 3 })
     expect(await members(group, outsider)).toEqual({ ids: all.filter((id) => id !== agent), counted: 3 })
     expect((await db.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, agent])).rowCount).toBe(1)
+    // A direct table read by a peer follows the same rule as the view.
+    expect(await seatRows(group, outsider)).toEqual(all.filter((id) => id !== agent))
+    // Counterexample: the DM with the archived agent keeps both members.
+    expect(await members(dm)).toEqual({ ids: [owner, agent].sort(), counted: 2 })
+    expect(await seatRows(dm, owner)).toEqual([owner, agent].sort())
     await restore()
     expect(await members()).toEqual({ ids: all, counted: 4 })
+    expect(await seatRows(group, outsider)).toEqual(all)
     await db.query('SET CONSTRAINTS ALL IMMEDIATE')
   })
 
@@ -459,6 +480,7 @@ describe('an archived agent has left its groups', () => {
     expect((await db.query('SELECT chat.add_group_agent($1,$2,NULL,auth.uid()::text) AS receipt', [group, fresh])).rows[0].receipt.status).toBe('joined')
     await db.query('RESET ROLE')
     expect((await members()).counted).toBe(4)
+    expect((await db.query('SELECT chat.group_add_denial($1,$2,$3) AS denial', [group, agent, owner])).rows[0].denial).toBe('agent_archived')
     await restore()
     expect((await members()).counted).toBe(5)
     const late = randomUUID()
@@ -469,8 +491,10 @@ describe('an archived agent has left its groups', () => {
 
   it('tells remaining members the agent left, and that it returned on restore', async () => {
     await archive()
-    // Only humans receive account revisions.
+    // Account revisions are recorded only for human recipients (chat.is_user_event_recipient);
+    // the agents in the group, including the archived one, are skipped by publish_user_revision.
     for (const recipient of [owner, outsider]) expect(await roster(recipient)).toBe(true)
+    for (const recipient of [peer, agent]) expect(await roster(recipient)).toBeUndefined()
     expect((await db.query("SELECT 1 FROM chat.account_revisions WHERE user_id=$1 AND event='agent_changed' AND resource_key->>'agent_user_id'=$2", [outsider, agent])).rowCount).toBeGreaterThan(0)
     await restore()
     for (const recipient of [owner, outsider]) expect(await roster(recipient)).toBe(false)
@@ -491,6 +515,81 @@ describe('an archived agent has left its groups', () => {
     const fresh = randomUUID()
     await db.query(`INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Seat fixture',$2,$3)`, [fresh, owner, device])
     expect((await db.query('SELECT chat.group_add_denial($1,$2,$3) AS denial', [group, fresh, owner])).rows[0].denial).toBeNull()
+  })
+
+  it('refuses to add or remove an archived agent instead of reporting a change that did not happen', async () => {
+    await archive()
+    await asUser()
+    expect(await denied(() => db.query('SELECT chat.add_group_agent($1,$2,NULL,auth.uid()::text)', [group, agent]))).toContain('agent_archived')
+    await asUser()
+    expect(await denied(() => db.query('SELECT chat.remove_group_member_as($1,$2,auth.uid()::text)', [group, agent]))).toContain('agent_archived')
+    expect((await db.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, agent])).rowCount).toBe(1)
+    // Members that really are absent still get the idempotent answer.
+    await asUser()
+    const absent = (await db.query('SELECT chat.remove_group_member_as($1,$2,auth.uid()::text) AS receipt', [group, randomUUID()])).rows[0].receipt
+    await db.query('RESET ROLE')
+    expect(absent.status).toBe('already_absent')
+    await restore()
+    await asUser()
+    expect((await db.query('SELECT chat.add_group_agent($1,$2,NULL,auth.uid()::text) AS receipt', [group, agent])).rows[0].receipt.status).toBe('already_member')
+    await db.query('RESET ROLE')
+  })
+
+  it('records nothing for an archived active listener on ordinary traffic or @all, only when it is addressed', async () => {
+    await db.query("UPDATE chat.chat_members SET listen_mode='active' WHERE chat_id=$1 AND user_id=$2", [group, agent])
+    await archive()
+    const nobody = { wake: false, blocked: false, command: false, receipt: false }
+    expect(await facts(await send(null as unknown as string[]))).toEqual(nobody)
+    expect(await facts(await send(['*']))).toEqual(nobody)
+    expect(await facts(await send([peer]))).toEqual(nobody)
+    expect(await facts(await send([agent]))).toEqual({ ...nobody, blocked: true })
+    const old = await send([], { sender: agent, at: archivedAt })
+    const reply = randomUUID()
+    await db.query(`INSERT INTO chat.messages(id,chat_id,sender_user_id,content,reply_to_message_id) VALUES($1,$2,$3,'Reply to archived',$4)`, [reply, group, outsider, old])
+    expect(await facts(reply)).toEqual({ ...nobody, blocked: true })
+    // The peer is still woken by its own routes.
+    expect((await facts(await send(['*']), peer)).wake).toBe(true)
+  })
+
+  it('keeps a DM with the archived agent private while refusing delivery', async () => {
+    const dm = await directChat()
+    await archive()
+    await asUser()
+    const id = randomUUID()
+    const sent = (await db.query(`SELECT chat.send_message_with_overlays($1,$2,$3,$4,'DM after archive','text',NULL,NULL,false,false) AS result`,
+      [id, dm, owner, [agent]])).rows[0].result
+    await db.query('RESET ROLE')
+    expect(sent.delivery_blocks).toEqual([{ message_id: id, agent_user_id: agent, reason: 'agent_archived' }])
+    expect(await facts(id)).toEqual({ wake: false, blocked: true, command: false, receipt: false })
+    await asUser(outsider)
+    for (const sql of ['SELECT id FROM chat.messages WHERE id=$1', 'SELECT 1 FROM chat.message_agent_delivery_blocks WHERE message_id=$1']) {
+      expect((await db.query(sql, [id])).rows).toEqual([])
+    }
+    expect((await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1', [dm])).rows).toEqual([])
+    expect((await db.query('SELECT user_id FROM chat.active_members WHERE chat_id=$1', [dm])).rows).toEqual([])
+    await db.query('RESET ROLE')
+    expect((await db.query("SELECT 1 FROM chat.account_revisions WHERE user_id=$1 AND event='delivery_changed' AND resource_key->>'entity_id'=$2", [outsider, id])).rowCount).toBe(0)
+  })
+
+  it('keeps the new helpers closed to the Data API and the internal seat view ungranted', async () => {
+    const roles = ['anon', 'authenticated', 'service_role', 'gugu_files']
+    const execute = async (fn: string) => Object.fromEntries(await Promise.all(roles.map(async (role) =>
+      [role, (await db.query('SELECT has_function_privilege($1,$2::regprocedure,\'EXECUTE\') AS ok', [role, fn])).rows[0].ok])))
+    // Invoker helpers of the view and the member-row policy, in a schema the Data API does not expose.
+    for (const fn of ['chat_private.is_direct_chat(text)', 'chat_private.member_seat_visible(text,text)']) {
+      expect(await execute(fn)).toEqual({ anon: false, authenticated: true, service_role: true, gugu_files: true })
+    }
+    for (const fn of ['chat.is_retained_member(text,text)', 'chat.publish_session_archival_roster()']) {
+      expect(await execute(fn)).toEqual({ anon: false, authenticated: false, service_role: false, gugu_files: false })
+    }
+    for (const role of roles) {
+      expect((await db.query("SELECT has_table_privilege($1,'chat.live_identity_members','SELECT,INSERT,UPDATE,DELETE') AS ok", [role])).rows[0].ok).toBe(false)
+    }
+    expect((await db.query("SELECT has_schema_privilege('anon','chat_private','USAGE') AS ok")).rows[0].ok).toBe(false)
+    expect((await db.query("SELECT to_regprocedure('chat.is_direct_chat(text)') AS old")).rows[0].old).toBeNull()
+    const exposed = (await db.query(`SELECT string_agg(cfg, ',') AS cfg FROM pg_db_role_setting s JOIN pg_roles r ON r.oid=s.setrole,
+      unnest(s.setconfig) cfg WHERE r.rolname='authenticator' AND cfg LIKE 'pgrst.db_schemas=%'`)).rows[0].cfg ?? ''
+    expect(exposed).not.toContain('chat_private')
   })
 
   it('keeps direct chats, sender history and topic invariants', async () => {
