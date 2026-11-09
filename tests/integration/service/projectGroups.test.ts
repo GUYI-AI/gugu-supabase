@@ -117,6 +117,33 @@ describe('publishing records the project group', () => {
     expect(await recorded(theirs)).toBe(false)
   }))
 
+  it("in one publish, a row naming someone else's group is kept without it; the other rows are written as sent", () => inRollback(async () => {
+    const mine = randomUUID()
+    const theirs = randomUUID()
+    await createGroup(mine, colleague, 'mine')
+    await createGroup(theirs, owner)
+    await publish(colleague, 'a', [{ local: 'own', chat: mine }, { local: 'foreign', chat: theirs }, { local: 'plain', chat: null }])
+    const rows = (await database.query<{ local_project_id: string; chat_id: string | null }>(
+      'SELECT local_project_id, chat_id FROM identity.device_projects WHERE device_id=$1 ORDER BY local_project_id', [`dev-a-${colleague}`])).rows
+    expect(rows).toEqual([
+      { local_project_id: 'foreign', chat_id: null },
+      { local_project_id: 'own', chat_id: mine },
+      { local_project_id: 'plain', chat_id: null },
+    ])
+    expect(await recorded(mine)).toBe(true)
+    expect(await recorded(theirs)).toBe(false)
+  }))
+
+  it("a former member who knows the group id learns nothing about the owner's project by binding it", () => inRollback(async () => {
+    const work = randomUUID()
+    await createGroup(work, owner)
+    await publish(owner, 'a', [{ local: 'p1', chat: work }])
+    // The colleague was in the group once and kept its id.
+    await publish(colleague, 'a', [{ local: 'stolen', chat: work }])
+    expect(await listAs(colleague)).toEqual([])
+    expect((await database.query('SELECT chat_id FROM identity.device_projects WHERE local_project_id=$1', ['stolen'])).rows).toEqual([{ chat_id: null }])
+  }))
+
   it('an id reserved before its group exists is a project group once the group is created', () => inRollback(async () => {
     const reserved = randomUUID()
     await publish(owner, 'a', [{ local: 'p1', chat: reserved }])

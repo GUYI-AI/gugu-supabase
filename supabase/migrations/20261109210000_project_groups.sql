@@ -6,13 +6,16 @@
 --
 -- chat.project_groups now records it, one row per project group (the id may name a group that does not exist yet: the
 -- client reserves a project group's id before creating it):
---   · publish_device_projects marks every group its projects are bound to, if the publishing account owns the group or no
---     group has that id yet. Clients that predate this release publish the same way, so they are covered;
+--   · publish_device_projects records every group its projects are bound to. It binds only a group the publishing account
+--     created or owns, or an id no group has yet; a row naming someone else's group is kept without the group (the
+--     publish still succeeds, so a client holding such a binding keeps syncing its other projects). Clients that predate
+--     this release publish the same way, so they are covered;
 --   · nothing unmarks it when a device stops listing the project. A project with no folder on any machine is still a
 --     project; deleting a project is archiving or dissolving its group (a dissolved group's row no longer joins a chat).
 -- Name and archive state stay the group's own (chat.chats.name / status); nothing is copied.
 -- The readers that derived "is a project group" from device rows read chat.is_project_group instead: group_add_denial,
--- group_info_as, file_storage_overview_as, support_help.valid_configuration.
+-- group_info_as, file_storage_overview_as, support_help.valid_configuration. The project's owner is the group's creator
+-- or owner only (chat.is_project_owner); a device row naming the group no longer counts.
 -- identity.list_my_projects() returns the caller's projects with the folders each of the caller's devices holds.
 --
 -- Locks: this release takes no lock on an existing table stronger than ACCESS SHARE (the backfill reads
@@ -29,26 +32,38 @@ ALTER TABLE chat.project_groups ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE chat.project_groups FROM PUBLIC, anon, authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE chat.project_groups TO service_role;
 
--- Backfill exactly today's derivation: every id a device row binds a project to.
-INSERT INTO chat.project_groups (chat_id)
-SELECT DISTINCT dp.chat_id FROM identity.device_projects dp WHERE NULLIF(dp.chat_id, '') IS NOT NULL;
-
 CREATE FUNCTION chat.is_project_group(p_chat_id text) RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
     SELECT EXISTS (SELECT 1 FROM chat.project_groups g WHERE g.chat_id = p_chat_id);
 $$;
 REVOKE ALL ON FUNCTION chat.is_project_group(text) FROM PUBLIC, anon, authenticated;
 
--- The project's owner: the group's creator or owner, or an account whose device binds a project to it (the owner
--- condition group_add_denial applied before this release).
+-- The project's owner: the group's creator or owner. Only those. A device row naming the group proves nothing: any
+-- account that knows a group id can publish one (before this release group_add_denial also counted that as owner).
 CREATE FUNCTION chat.is_project_owner(p_chat_id text, p_user_id text) RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
     SELECT p_user_id IS NOT NULL AND (
         EXISTS (SELECT 1 FROM chat.chats c WHERE c.id = p_chat_id AND c.creator_user_id = p_user_id)
-        OR EXISTS (SELECT 1 FROM chat.active_members m WHERE m.chat_id = p_chat_id AND m.user_id = p_user_id AND m.role = 'owner')
-        OR EXISTS (SELECT 1 FROM identity.device_projects dp WHERE dp.chat_id = p_chat_id AND dp.user_id::text = p_user_id));
+        OR EXISTS (SELECT 1 FROM chat.active_members m WHERE m.chat_id = p_chat_id AND m.user_id = p_user_id AND m.role = 'owner'));
 $$;
 REVOKE ALL ON FUNCTION chat.is_project_owner(text, text) FROM PUBLIC, anon, authenticated;
+
+-- May this account bind a project to this id: a group it created or owns, or an id no group has yet (reserved before
+-- the group exists). Someone else's group: no (the id alone would otherwise make that group a project group).
+CREATE FUNCTION chat.may_bind_project_group(p_chat_id text, p_user_id text) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+    SELECT NULLIF(p_chat_id, '') IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM chat.chats c WHERE c.id = p_chat_id) OR chat.is_project_owner(p_chat_id, p_user_id));
+$$;
+REVOKE ALL ON FUNCTION chat.may_bind_project_group(text, text) FROM PUBLIC, anon, authenticated;
+
+-- Backfill: every id a device row binds a project to, when the binding account created or owns that group, or no group
+-- has that id yet (reserved). A group bound only by other accounts is not recorded: a record is never removed, and a
+-- wrong one would keep the real owner from inviting anyone (ops/count-project-groups.sql counts those separately).
+INSERT INTO chat.project_groups (chat_id)
+SELECT DISTINCT dp.chat_id FROM identity.device_projects dp
+ WHERE NULLIF(dp.chat_id, '') IS NOT NULL
+   AND chat.may_bind_project_group(dp.chat_id, dp.user_id::text);
 
 -- The caller's projects: project groups the caller owns, newest activity first, each with the folders the caller's
 -- devices hold for it (none is a valid answer). Name and status are the group's.
@@ -338,7 +353,10 @@ BEGIN
     INSERT INTO identity.device_projects AS d
            (device_id, user_id, local_project_id, name, root_path, created_at, chat_id, group_representative, folders)
     SELECT p_device_id, v_me, p.value ->> 'local_project_id', p.value ->> 'name', p.value ->> 'root_path',
-           (p.value ->> 'created_at')::timestamp with time zone, p.value ->> 'chat_id',
+           (p.value ->> 'created_at')::timestamp with time zone,
+           -- Someone else's group is not this account's to bind: the row is kept, without the group (20261109210000).
+           -- ❌ refusing the whole publish: a client that already holds such a binding would never sync any project again.
+           CASE WHEN chat.may_bind_project_group(p.value ->> 'chat_id', v_me::text) THEN p.value ->> 'chat_id' END,
            COALESCE((p.value -> 'group_representative')::boolean, false),
            (SELECT COALESCE(jsonb_agg(jsonb_build_object(
                        'workspace_id', f.value ->> 'workspace_id',
@@ -363,15 +381,11 @@ BEGIN
     GET DIAGNOSTICS v_rows = ROW_COUNT;
     v_changed := v_changed OR v_rows > 0;
 
-    -- A project bound to a group is that group's project: mark it (20261109210000). Only a group this account owns,
-    -- or an id no group has yet (reserved before the group exists). Marking never changes what this returns.
+    -- A project bound to a group is that group's project: record it (20261109210000). Only ids this account may bind
+    -- (the same test that kept or dropped the row's group above).
     INSERT INTO chat.project_groups (chat_id)
     SELECT DISTINCT p.value ->> 'chat_id' FROM jsonb_array_elements(p_projects) p
-     WHERE NULLIF(p.value ->> 'chat_id', '') IS NOT NULL
-       AND (NOT EXISTS (SELECT 1 FROM chat.chats c WHERE c.id = p.value ->> 'chat_id')
-            OR EXISTS (SELECT 1 FROM chat.chats c WHERE c.id = p.value ->> 'chat_id' AND c.creator_user_id = v_me::text)
-            OR EXISTS (SELECT 1 FROM chat.active_members m
-                        WHERE m.chat_id = p.value ->> 'chat_id' AND m.user_id = v_me::text AND m.role = 'owner'))
+     WHERE chat.may_bind_project_group(p.value ->> 'chat_id', v_me::text)
     ON CONFLICT (chat_id) DO NOTHING;
 
     IF v_changed THEN

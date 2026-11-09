@@ -305,6 +305,7 @@ GRANT EXECUTE ON FUNCTION chat.file_storage_overview_as() TO authenticated;
 GRANT EXECUTE ON FUNCTION identity.publish_device_projects(text, jsonb, jsonb) TO authenticated, service_role;
 
 DROP FUNCTION identity.list_my_projects();
+DROP FUNCTION chat.may_bind_project_group(text, text);
 DROP FUNCTION chat.is_project_owner(text, text);
 DROP FUNCTION chat.is_project_group(text);
 DROP TABLE chat.project_groups;
