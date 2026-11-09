@@ -74,6 +74,21 @@ beforeEach(async () => {
 afterEach(async () => { await db.query('ROLLBACK') })
 
 describe('historical readers keep bytes through archive and the one collector', () => {
+  it('all members can temporarily hide a conversation without making its bytes collectable', async () => {
+    const { blob, message, item } = await send(group, member)
+    for (const person of [owner, member]) {
+      await user(person)
+      await db.query('SELECT chat.hide_my_conversation($1,$2)', [group, randomUUID()])
+      await service()
+    }
+    expect(await gone(group)).toBe(false)
+    await queue(blob)
+    expect(await collected(blob)).toEqual([])
+    expect(await jobs(blob)).toEqual([])
+    await readable({ message_id: message })
+    await readable({ item_id: item, version: 1 })
+  })
+
   it('an archived group retains message and folder downloads even after a mistaken job becomes due', async () => {
     const { blob, message, item } = await send(group, member)
     expect(await collected(blob)).toEqual([])

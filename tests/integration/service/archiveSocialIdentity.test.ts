@@ -132,8 +132,10 @@ describe('archive terminates identity without touching seats or history', () => 
       WHERE n.nspname IN ('chat','identity','file_private','public') AND l.lanname IN ('sql','plpgsql') AND p.prokind='f'`)).rows
     // Personal deletion verifies the owner's retained historical DM seats without removing their access;
     // byte release finds a just-removed identity's own DM seats, which are no longer live.
+    // Privacy erasure must prelock all physical seats, including removed identities, before publishing peer heads.
     const physical = new Set(['chat.chats_membership_invariants','chat.chats_status_invariants','chat.historical_dm_peer','chat.delete_my_dm_conversation',
-      'chat.conversation_release_on_change'])
+      'chat.conversation_release_on_change', 'chat.restore_conversation_list_rows', 'chat.hide_my_conversation',
+      'chat.publish_native_conversation_message', 'chat.list_conversation_memberships', 'identity.erase_human_account'])
     expect(functions.filter(r => !physical.has(r.name) && /\b(?:FROM|JOIN|USING)\s+chat\.chat_members\b/i.test(
       r.prosrc.replace(/\bDELETE\s+FROM\s+chat\.chat_members\b/gi, 'DELETE TARGET'))).map(r => r.name)).toEqual([])
     expect(functions.find(r => r.name === 'chat.chats_membership_invariants')?.prosrc).toContain('FROM chat.active_members m')
