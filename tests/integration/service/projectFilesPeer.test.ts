@@ -108,6 +108,18 @@ describe('project chat files kept by the device that sent each version',()=>{
     await user(member)
     expect((await fails('SELECT chat.file_temporary_request($1,$2,$3)',[{item_id:item,version:1},member,randomUUID()])).hint).toBe('file_transfer_denied')
   })
+  it('gives a reader an image version\'s pixel size from its record, carried by a rename',async()=>{
+    await user(owner)
+    await db.query('SELECT chat.file_device_publish(p_item=>$1,p_chat=>$2,p_device=>$3,p_path=>$4,p_sha=>$5,p_size=>$6,p_filename=>$7,p_type=>$8,p_project=>$9,p_width=>$10,p_height=>$11)',
+      [item,group,bound,'data/wide.png',sha,123,'wide.png','image/png','root',1600,400])
+    expect(await resolve({item_id:item},member)).toMatchObject({status:'ready',source:'local',width:1600,height:400})
+    await user(owner)
+    expect((await db.query('SELECT * FROM chat.workspace_move_as($1,$2,$3,$4,$5)',[item,owner,null,'renamed.png',1])).rows[0]).toMatchObject({version:2})
+    expect(await resolve({item_id:item},member)).toMatchObject({version:2,width:1600,height:400})
+    // A version whose publisher names no size has none.
+    expect(await publish(owner,bound,'root',{hash:next,expected:2})).toMatchObject({version:3})
+    expect(await resolve({item_id:item},member)).toMatchObject({version:3,width:null,height:null})
+  })
   it('lets a released client publish from its own bound device without naming a project',async()=>{
     await user(owner)
     expect((await db.query("SELECT chat.file_project_policy_as($1,$2,'root',false,true,'7d') AS r",[group,bound])).rows[0].r)
