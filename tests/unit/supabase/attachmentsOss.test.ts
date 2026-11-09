@@ -126,6 +126,19 @@ describe('字节是什么(看文件头)', () => {
     // JPEG:SOI、一个 APP0、SOF0(高 480、宽 640)
     const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8, 0x01, 0xe0, 0x02, 0x80, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     expect(sniff(jpeg)).toEqual({ contentType: 'image/jpeg', image: true, width: 640, height: 480 })
+    // A camera JPEG names its orientation in EXIF (APP1, IFD0 tag 0x0112); 5–8 are shown turned a quarter, so the size is
+    // the shown one. Both TIFF byte orders.
+    const exif = (orientation: number, le: boolean) => {
+      const u16 = (v: number) => (le ? [v & 0xff, v >> 8] : [v >> 8, v & 0xff])
+      const tiff = [...(le ? [0x49, 0x49, 0x2a, 0] : [0x4d, 0x4d, 0, 0x2a]), ...(le ? [8, 0, 0, 0] : [0, 0, 0, 8]),
+        ...u16(1), ...u16(0x0112), ...u16(3), ...(le ? [1, 0, 0, 0] : [0, 0, 0, 1]), ...u16(orientation), 0, 0, 0, 0, 0, 0]
+      const payload = [...new TextEncoder().encode('Exif'), 0, 0, ...tiff]
+      return new Uint8Array([0xff, 0xd8, 0xff, 0xe1, ...u16be(payload.length + 2), ...payload, ...jpeg.subarray(2)])
+    }
+    const u16be = (v: number) => [v >> 8, v & 0xff]
+    for (const le of [true, false]) for (let o = 1; o <= 8; o++) {
+      expect(sniff(exif(o, le))).toEqual({ contentType: 'image/jpeg', image: true, ...(o >= 5 ? { width: 480, height: 640 } : { width: 640, height: 480 }) })
+    }
     const gif = new Uint8Array([...new TextEncoder().encode('GIF89a'), 0x20, 0x00, 0x10, 0x00, 0, 0])
     expect(sniff(gif)).toEqual({ contentType: 'image/gif', image: true, width: 32, height: 16 })
     const webp = new Uint8Array(30)
