@@ -119,7 +119,7 @@ it('restores predecessor views on operational rollback without changing source r
   const expected = await as('authenticated', owner, 'SELECT * FROM chat.active_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[room, secondRoom]])
   await db.query('SAVEPOINT operational_rollback')
   // Later releases that depend on the cache roll back first, newest first.
-  for (const later of ['rollback-archived-agents-leave-groups.sql']) {
+  for (const later of ['rollback-removed-agent-mentions.sql', 'rollback-archived-agents-leave-groups.sql']) {
     await db.query(readFileSync(new URL(`../../../ops/${later}`, import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
   }
   const rollback = readFileSync(new URL('../../../ops/rollback-identity-member-liveness.sql', import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, '')
@@ -147,7 +147,10 @@ it('rolls archived-agent group membership back without changing seats, identitie
   const ledger = (await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows
   const access = (await db.query("SELECT relacl::text,reloptions FROM pg_class WHERE oid='chat.active_members'::regclass")).rows
   await db.query('SAVEPOINT archived_seat_rollback')
-  await db.query(readFileSync(new URL('../../../ops/rollback-archived-agents-leave-groups.sql', import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
+  // The later release that lives in chat_private rolls back first.
+  for (const file of ['rollback-removed-agent-mentions.sql', 'rollback-archived-agents-leave-groups.sql']) {
+    await db.query(readFileSync(new URL(`../../../ops/${file}`, import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
+  }
   expect(await counted()).toBe(3)
   // Cached member lists learn that the archived agent is a member again.
   expect(await returned()).toBe(false)
@@ -164,6 +167,43 @@ it('rolls archived-agent group membership back without changing seats, identitie
   expect((await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows).toEqual(ledger)
   await db.query('ROLLBACK TO SAVEPOINT archived_seat_rollback')
   expect(await counted()).toBe(2)
+})
+
+// #2383's rollback lives here, beside the rollbacks that chain it: each takes table locks on
+// chat.messages, and tests in one file run serially.
+it('rolls removed-agent mentions back to rejection without changing messages, seats or ledger', async () => {
+  const policy = async () => (await db.query(`SELECT pg_get_expr(polwithcheck,polrelid) AS check FROM pg_policy
+    WHERE polrelid='chat.messages'::regclass AND polname='messages_insert_member'`)).rows[0].check
+  const constraint = async () => (await db.query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+    WHERE conrelid='chat.message_agent_delivery_blocks'::regclass AND conname='message_agent_delivery_blocks_reason_check'`)).rows[0].def
+  const mention = (id: string) => as('authenticated', owner,
+    "INSERT INTO chat.messages(id,chat_id,sender_user_id,content,to_user_ids) VALUES($1,$2,$3,'hello',$4)", [id, room, owner, [agent]])
+  const current = await policy()
+  expect(current).toContain('chat_private.is_removed_agent_recipient(messages.chat_id, target.target_user_id)')
+  await as('authenticated', owner, 'SELECT identity.archive_user($1,true)', [agent])
+  const accepted = randomUUID()
+  await mention(accepted)
+  expect((await db.query('SELECT reason FROM chat.message_agent_delivery_blocks WHERE message_id=$1', [accepted])).rows).toEqual([{ reason: 'identity_removed' }])
+  const messages = (await db.query('SELECT * FROM chat.messages WHERE chat_id=$1 ORDER BY id', [room])).rows
+  const seats = (await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [room])).rows
+  const ledger = (await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows
+  await db.query('SAVEPOINT removed_mention_rollback')
+  await db.query(readFileSync(new URL('../../../ops/rollback-removed-agent-mentions.sql', import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
+  expect(await policy()).toBe(current.replace(' AND (NOT chat_private.is_removed_agent_recipient(messages.chat_id, target.target_user_id))', ''))
+  expect(await constraint()).toBe("CHECK ((reason = 'agent_archived'::text))")
+  expect((await db.query(`SELECT to_regprocedure('chat_private.is_removed_agent_recipient(text,text)') AS recipient,
+    to_regprocedure('chat_private.is_removed_agent_seat(text,text)') AS seat,
+    to_regprocedure('chat.record_message_removed_agent_refusals()') AS refusals,
+    to_regprocedure('chat.reject_non_member_recipients()') AS rejecter`)).rows[0]).toEqual({ recipient: null, seat: null, refusals: null, rejecter: null })
+  expect((await db.query('SELECT * FROM chat.messages WHERE chat_id=$1 ORDER BY id', [room])).rows).toEqual(messages)
+  expect((await db.query('SELECT * FROM chat.chat_members WHERE chat_id=$1 ORDER BY user_id', [room])).rows).toEqual(seats)
+  expect((await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows).toEqual(ledger)
+  expect((await db.query('SELECT * FROM chat.message_agent_delivery_blocks WHERE message_id=$1', [accepted])).rows).toEqual([])
+  await db.query('SAVEPOINT rejected_again')
+  await expect(mention(randomUUID())).rejects.toMatchObject({ code: '42501' })
+  await db.query('ROLLBACK TO SAVEPOINT rejected_again')
+  await db.query('ROLLBACK TO SAVEPOINT removed_mention_rollback')
+  expect(await policy()).toBe(current)
 })
 
 it('removes liveness function calls from invoker view bodies without a wall-clock assertion', async () => {
