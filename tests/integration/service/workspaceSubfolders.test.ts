@@ -253,8 +253,10 @@ describe('within one transaction', () => {
       const onDevice = await file('e-device.pdf', 2)
       await database.query('DELETE FROM chat.file_transfer_storage_refs r USING chat.file_transfer_storage o WHERE o.id=r.storage_id AND o.blob_id=$1', [onDevice.blob])
       const device = `dev-${owner}`
-      await database.query(`INSERT INTO chat.file_device_revisions(item_id,version,host_device_id,host_project_id,relative_path,sha256,size_bytes,file_name,content_type)
-        VALUES($1,1,$2,'project','e-device.pdf',$3,9,'e-device.pdf','application/pdf')`, [onDevice.item, device, 'ab'.repeat(32)])
+      // Its next version stays on a device.
+      await database.query(`INSERT INTO chat.workspace_item_versions(item_id,n,host_device_id,host_project_id,relative_path,sha256,size_bytes,file_name,content_type)
+        VALUES($1,2,$2,'project','e-device.pdf',$3,9,'e-device.pdf','application/pdf')`, [onDevice.item, device, 'ab'.repeat(32)])
+      await database.query('UPDATE chat.workspace_items SET version=2,blob_id=NULL WHERE id=$1', [onDevice.item])
       const twoCopies = await file('f-two-copies.pdf', 1)
       for (const reclaimedAt of [null, expiredAt]) {
         const extra = (await database.query<{ id: string }>(`INSERT INTO chat.file_transfer_storage(blob_id,bucket_id,object_name,size_bytes)
