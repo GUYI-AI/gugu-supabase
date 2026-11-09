@@ -35,8 +35,11 @@ Notes:
   mentions would first need a membership history. Leaving publishes a roster tombstone for the remaining members, so such
   a mention mostly comes from a stale draft or cache.
 
-## Clients
+## Clients and rollout order
 
-Clients that accept only `agent_archived` (for example `apps/desktop/electron/mcp/message-delivery-blocks.mjs` before its update)
-treat `identity_removed` as an invalid refusal. Ship the client change for the new reason together with, or before, this
-migration reaching an environment.
+Clients that accept only `agent_archived` treat `identity_removed` as an invalid refusal. For example, `apps/desktop/electron/mcp/message-delivery-blocks.mjs` before GUYI-AI/gugu#2388 throws on it.
+
+The message has already been accepted at that point. An agent using such a client concludes that the send failed and sends again, and the group gets a duplicate message, which is worse than the old outright rejection. Therefore:
+
+- **Staging:** deploy this migration only after GUYI-AI/gugu#2388 is merged into gugu `dev`.
+- **Production:** deploy it only after a release containing #2388 has shipped.
