@@ -119,7 +119,7 @@ it('restores predecessor views on operational rollback without changing source r
   const expected = await as('authenticated', owner, 'SELECT * FROM chat.active_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[room, secondRoom]])
   await db.query('SAVEPOINT operational_rollback')
   // Later releases that depend on the cache roll back first, newest first.
-  for (const later of ['rollback-archived-agents-leave-groups.sql']) {
+  for (const later of ['rollback-removed-agent-mentions.sql', 'rollback-archived-agents-leave-groups.sql']) {
     await db.query(readFileSync(new URL(`../../../ops/${later}`, import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
   }
   const rollback = readFileSync(new URL('../../../ops/rollback-identity-member-liveness.sql', import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, '')
@@ -147,7 +147,10 @@ it('rolls archived-agent group membership back without changing seats, identitie
   const ledger = (await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows
   const access = (await db.query("SELECT relacl::text,reloptions FROM pg_class WHERE oid='chat.active_members'::regclass")).rows
   await db.query('SAVEPOINT archived_seat_rollback')
-  await db.query(readFileSync(new URL('../../../ops/rollback-archived-agents-leave-groups.sql', import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
+  // The later release that lives in chat_private rolls back first.
+  for (const file of ['rollback-removed-agent-mentions.sql', 'rollback-archived-agents-leave-groups.sql']) {
+    await db.query(readFileSync(new URL(`../../../ops/${file}`, import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
+  }
   expect(await counted()).toBe(3)
   // Cached member lists learn that the archived agent is a member again.
   expect(await returned()).toBe(false)
