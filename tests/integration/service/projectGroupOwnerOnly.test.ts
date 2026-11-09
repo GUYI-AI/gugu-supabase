@@ -178,11 +178,13 @@ describe('member-visible project classification uses the existing group-info doo
     expect((await database.query<{ allowed: boolean }>("SELECT has_function_privilege('anon','chat.group_info_as(text,text)','EXECUTE') AS allowed")).rows[0]!.allowed).toBe(false)
   }))
 
-  it('observes binding removal without changing the existing admission decision', () => inRollback(true, async () => {
+  // 20261109210000: the group records that it is a project; a project with no folder on any machine is still one.
+  it('stays a project group, still owner-only, after the last folder binding is removed', () => inRollback(true, async () => {
     expect((await groupInfo()).is_project_group).toBe(true)
     expect(await denial(colleague)).toBe('project_group_owner_only')
     await database.query('DELETE FROM identity.device_projects WHERE chat_id=$1', [group])
-    expect((await groupInfo()).is_project_group).toBe(false)
-    expect(await denial(colleague)).toBeNull()
+    expect((await groupInfo()).is_project_group).toBe(true)
+    expect(await denial(colleague)).toBe('project_group_owner_only')
+    expect(await denial(ownAgent)).toBeNull()
   }))
 })
