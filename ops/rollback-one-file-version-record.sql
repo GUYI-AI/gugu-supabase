@@ -1,4 +1,4 @@
--- Roll back 20261109130000_one_file_version_record: device versions return to chat.file_device_revisions, image sizes
+-- Roll back 20261109150000_one_file_version_record: device versions return to chat.file_device_revisions, image sizes
 -- to chat.file_blobs, and every changed function to its previous definition. Version rows the release added (current
 -- versions, versions a move superseded) stay: they are true versions in the old shape too. Image sizes that only a
 -- device reported (no blob has those bytes) are lost. Run on the release's own schema only.

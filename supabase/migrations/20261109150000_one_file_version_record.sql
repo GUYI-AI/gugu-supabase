@@ -37,7 +37,8 @@ CREATE INDEX workspace_item_versions_host_device_idx ON chat.workspace_item_vers
 ALTER TABLE chat.workspace_item_versions DROP CONSTRAINT workspace_item_versions_one_body;
 ALTER TABLE chat.workspace_item_versions DROP CONSTRAINT workspace_item_versions_item_id_device_version_fkey;
 
--- Backfill in batches of files. Device versions: a replaced one already has its row (blob and text empty); the current
+-- Backfill in batches of files: a batch bounds one statement's size; the locks above are held until commit either way.
+-- Device versions: a replaced one already has its row (blob and text empty); the current
 -- one and one a move superseded have none. Managed files: the current version has a row only if a replacement wrote it.
 CREATE TEMP TABLE unify_files ON COMMIT DROP AS
     SELECT w.id, row_number() OVER (ORDER BY w.id) AS k FROM chat.workspace_items w WHERE w.kind = 'file';
