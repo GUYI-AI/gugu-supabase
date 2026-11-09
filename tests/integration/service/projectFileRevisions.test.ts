@@ -649,4 +649,18 @@ describe('temporary generations reuse managed budgets and private key issuance',
     for(const [column,ok] of [['content_type',true],['blob_id',true],['relative_path',false],['host_device_id',false],['sha256',false],['file_name',false]] as const)
       expect((await db.query("SELECT has_column_privilege('authenticated','chat.workspace_item_versions',$1,'SELECT') AS ok",[column])).rows[0].ok).toBe(ok)
   })
+  it('records a moved version without a maker that is gone: updated_by may name a removed user, made_by may not',async()=>{
+    const ghost=randomUUID(),local=randomUUID()
+    await db.query('SELECT chat.file_device_publish($1,$2,$3,$4,$5,$6,$7,$8,NULL,NULL)',[local,group,device,'pics/g.png','9a'.repeat(32),5,'g.png','image/png'])
+    await service()
+    const blob=(await db.query("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by) VALUES('oss',$1,$2,9,'image/png',$3) RETURNING id",['9b/'+'9b'.repeat(32),'9b'.repeat(32),owner])).rows[0].id
+    const managed=(await db.query("INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,size_bytes,blob_id,created_by) VALUES($1,'file','g2.png','image/png',9,$2,$3) RETURNING id",[group,blob,owner])).rows[0].id
+    // updated_by has no foreign key: older rows can name a user that no longer exists.
+    await db.query('SET LOCAL session_replication_role = replica')
+    await db.query('UPDATE chat.workspace_items SET updated_by=$2 WHERE id=ANY($1::uuid[])',[[local,managed],ghost])
+    await db.query('SET LOCAL session_replication_role = origin')
+    await db.query("UPDATE chat.workspace_items SET filename=filename||'.moved',version=version+1 WHERE id=ANY($1::uuid[])",[[local,managed]])
+    expect((await db.query('SELECT v.item_id=$2::uuid AS managed,v.made_by FROM chat.workspace_item_versions v WHERE v.item_id=ANY($1::uuid[]) AND v.n=2 ORDER BY 1',[[local,managed],managed])).rows)
+      .toEqual([{managed:false,made_by:null},{managed:true,made_by:owner}])
+  })
 })
