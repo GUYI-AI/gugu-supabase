@@ -1,5 +1,6 @@
--- Read-only: how 20261109210000_project_is_group classifies groups. Run before the release: `derived` is the number of
--- groups it will mark. After it: `SELECT count(*) FROM chat.chats WHERE is_project` must equal that number. Read-only.
+-- Read-only: how 20261109210000_project_groups classifies groups. Before the release, `derived` is the number of
+-- groups it will mark and `reserved_without_group` the reserved ids it records too. After it,
+-- `SELECT count(*) FROM chat.project_groups g JOIN chat.chats c ON c.id=g.chat_id AND c.kind='group'` must equal `derived`.
 BEGIN READ ONLY;
 SET LOCAL statement_timeout = '30s';
 SELECT 'derived' AS source, count(*) FROM chat.chats c

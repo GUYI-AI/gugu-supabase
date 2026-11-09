@@ -61,6 +61,8 @@ async function seed(bound: boolean): Promise<void> {
        VALUES ($1,$2,'p1','proj','/proj',now(),$3)`,
       [`dev-${owner}`, owner, group],
     )
+    // What publish_device_projects records for a bound project (20261109210000_project_groups).
+    await database.query('INSERT INTO chat.project_groups (chat_id) VALUES ($1)', [group])
   }
 }
 
@@ -178,7 +180,7 @@ describe('member-visible project classification uses the existing group-info doo
     expect((await database.query<{ allowed: boolean }>("SELECT has_function_privilege('anon','chat.group_info_as(text,text)','EXECUTE') AS allowed")).rows[0]!.allowed).toBe(false)
   }))
 
-  // 20261109210000: the group records that it is a project; a project with no folder on any machine is still one.
+  // 20261109210000_project_groups: the account records the project group; a project with no folder on any machine is still one.
   it('stays a project group, still owner-only, after the last folder binding is removed', () => inRollback(true, async () => {
     expect((await groupInfo()).is_project_group).toBe(true)
     expect(await denial(colleague)).toBe('project_group_owner_only')

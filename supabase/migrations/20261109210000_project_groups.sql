@@ -1,31 +1,46 @@
--- A project is its project group, and the group itself records that it is one (project/device decoupling).
+-- A project is its project group, and the account records which groups are projects (project/device decoupling).
 --
 -- Whether a group was a project group was derived: some device had published a project bound to it
 -- (identity.device_projects.chat_id). So a project existed only while at least one machine listed a folder for it, and
--- every reader re-derived the fact from device rows. The account had no list of its projects of its own; each client
--- assembled one from the per-device copies.
+-- every reader re-derived the fact from device rows. The account had no list of its projects of its own.
 --
--- chat.chats.is_project is now that fact, kept on the group:
---   · set when a device row points at the group and the publishing account owns the group (trigger on
---     identity.device_projects, so every writer is covered, including clients that predate this column);
---   · set when a group is created with an id a device row already points at (the id was reserved before the group
---     existed);
---   · never cleared by publishing. A project with no folders on any machine is still a project; deleting a project
---     is archiving or dissolving its group.
+-- chat.project_groups now records it, one row per project group (the id may name a group that does not exist yet: the
+-- client reserves a project group's id before creating it):
+--   · publish_device_projects marks every group its projects are bound to, if the publishing account owns the group or no
+--     group has that id yet. Clients that predate this release publish the same way, so they are covered;
+--   · nothing unmarks it when a device stops listing the project. A project with no folder on any machine is still a
+--     project; deleting a project is archiving or dissolving its group (a dissolved group's row no longer joins a chat).
 -- Name and archive state stay the group's own (chat.chats.name / status); nothing is copied.
--- Every reader that derived "is a project group" from device rows reads the column instead: group_add_denial,
+-- The readers that derived "is a project group" from device rows read chat.is_project_group instead: group_add_denial,
 -- group_info_as, file_storage_overview_as, support_help.valid_configuration.
 -- identity.list_my_projects() returns the caller's projects with the folders each of the caller's devices holds.
+--
+-- Locks: this release takes no lock on an existing table stronger than ACCESS SHARE (the backfill reads
+-- identity.device_projects). It adds no column, trigger or foreign key to chat.chats, identity.device_projects or
+-- identity.gugu_devices; replacing functions locks no table. So it cannot form a lock cycle with a concurrent transaction
+-- that writes chat or device rows and then reads other tables while an installer holds those.
 SET LOCAL lock_timeout = '5s';
 
-ALTER TABLE chat.chats ADD COLUMN is_project boolean NOT NULL DEFAULT false;
+CREATE TABLE chat.project_groups (
+    chat_id text PRIMARY KEY,
+    marked_at timestamp with time zone NOT NULL DEFAULT now()
+);
+ALTER TABLE chat.project_groups ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE chat.project_groups FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE chat.project_groups TO service_role;
 
--- Backfill exactly today's derivation (no owner condition), so no group changes classification.
-UPDATE chat.chats c SET is_project = true
- WHERE c.kind = 'group' AND EXISTS (SELECT 1 FROM identity.device_projects dp WHERE dp.chat_id = c.id);
+-- Backfill exactly today's derivation: every id a device row binds a project to.
+INSERT INTO chat.project_groups (chat_id)
+SELECT DISTINCT dp.chat_id FROM identity.device_projects dp WHERE NULLIF(dp.chat_id, '') IS NOT NULL;
+
+CREATE FUNCTION chat.is_project_group(p_chat_id text) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+    SELECT EXISTS (SELECT 1 FROM chat.project_groups g WHERE g.chat_id = p_chat_id);
+$$;
+REVOKE ALL ON FUNCTION chat.is_project_group(text) FROM PUBLIC, anon, authenticated;
 
 -- The project's owner: the group's creator or owner, or an account whose device binds a project to it (the owner
--- condition group_add_denial applied before this column existed).
+-- condition group_add_denial applied before this release).
 CREATE FUNCTION chat.is_project_owner(p_chat_id text, p_user_id text) RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
     SELECT p_user_id IS NOT NULL AND (
@@ -35,40 +50,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
 $$;
 REVOKE ALL ON FUNCTION chat.is_project_owner(text, text) FROM PUBLIC, anon, authenticated;
 
--- A device row bound to a group the publishing account owns marks the group as a project.
-CREATE FUNCTION identity.mark_project_group() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
-BEGIN
-    IF NEW.chat_id IS NOT NULL THEN
-        UPDATE chat.chats c SET is_project = true
-         WHERE c.id = NEW.chat_id AND c.kind = 'group' AND NOT c.is_project
-           AND (c.creator_user_id = NEW.user_id::text OR EXISTS (
-                SELECT 1 FROM chat.active_members m WHERE m.chat_id = c.id AND m.user_id = NEW.user_id::text AND m.role = 'owner'));
-    END IF;
-    RETURN NULL;
-END;
-$$;
-CREATE TRIGGER device_projects_mark_project_group
-    AFTER INSERT OR UPDATE OF chat_id ON identity.device_projects
-    FOR EACH ROW EXECUTE FUNCTION identity.mark_project_group();
-
--- A group created under an id its creator's device already bound a project to (reserved before it existed).
-CREATE FUNCTION chat.mark_reserved_project_group() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
-BEGIN
-    IF NEW.kind = 'group' AND NOT NEW.is_project AND NEW.creator_user_id IS NOT NULL AND EXISTS (
-        SELECT 1 FROM identity.device_projects dp WHERE dp.chat_id = NEW.id AND dp.user_id::text = NEW.creator_user_id) THEN
-        NEW.is_project := true;
-    END IF;
-    RETURN NEW;
-END;
-$$;
-CREATE TRIGGER chats_mark_reserved_project_group
-    BEFORE INSERT ON chat.chats
-    FOR EACH ROW EXECUTE FUNCTION chat.mark_reserved_project_group();
-
--- The caller's projects: groups marked as projects that the caller owns, newest activity first, each with the folders
--- the caller's devices hold for it (none is a valid answer). Name and status are the group's.
+-- The caller's projects: project groups the caller owns, newest activity first, each with the folders the caller's
+-- devices hold for it (none is a valid answer). Name and status are the group's.
 CREATE FUNCTION identity.list_my_projects() RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = '' AS $$
 DECLARE me text := auth.uid()::text;
@@ -85,16 +68,16 @@ BEGIN
                     'removal_requested_at', dp.removal_requested_at) ORDER BY dp.created_at)
                 FROM identity.device_projects dp WHERE dp.chat_id = c.id AND dp.user_id::text = me), '[]'::jsonb)
         ) ORDER BY COALESCE(c.last_message_at, c.created_at) DESC)
-        FROM chat.chats c
-        WHERE c.kind = 'group' AND c.is_project AND chat.is_project_owner(c.id, me)
+        FROM chat.project_groups g JOIN chat.chats c ON c.id = g.chat_id
+        WHERE c.kind = 'group' AND chat.is_project_owner(c.id, me)
     ), '[]'::jsonb);
 END;
 $$;
 REVOKE ALL ON FUNCTION identity.list_my_projects() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION identity.list_my_projects() TO authenticated;
 
--- The four readers below are their effective definitions on the parent release (pg_get_functiondef), with only the
--- project-group test changed.
+-- The readers below are their effective definitions on the parent release (pg_get_functiondef), with only the
+-- project-group test changed (publish_device_projects: one statement added).
 CREATE OR REPLACE FUNCTION chat.group_add_denial(p_chat_id text, p_user_id text, p_actor_user_id text, p_take_seat boolean DEFAULT true, p_owner_consented boolean DEFAULT false)
  RETURNS text
  LANGUAGE plpgsql
@@ -115,9 +98,9 @@ BEGIN
     IF chat.is_cloud_agent_user(p_user_id) THEN RETURN 'cloud_agent'; END IF;
     IF chat.is_chat_member(p_chat_id, p_user_id) THEN RETURN NULL; END IF;
     IF EXISTS (SELECT 1 FROM identity.users u WHERE u.id = p_user_id AND u.session_archived_at IS NOT NULL) THEN RETURN 'agent_archived'; END IF;
-    -- 项目群只有项目的主人和主人的 agent(gugu-dev#181)。是不是项目群读群自己记着的 is_project(20261109210000),
+    -- 项目群只有项目的主人和主人的 agent(gugu-dev#181)。是不是项目群读 chat.project_groups(20261109210000),
     -- ❌ 从群名、群人数之类去猜。已经在群里的人不动(上一行)。
-    IF v_chat.kind = 'group' AND v_chat.is_project
+    IF v_chat.kind = 'group' AND chat.is_project_group(p_chat_id)
        AND NOT chat.is_project_owner(p_chat_id, p_user_id)
        AND NOT (v_target.owner_user_id IS NOT NULL AND chat.is_project_owner(p_chat_id, v_target.owner_user_id)) THEN
         RETURN 'project_group_owner_only';
@@ -171,7 +154,7 @@ BEGIN
     ) THEN RAISE EXCEPTION 'group_not_visible' USING ERRCODE = '42501'; END IF;
     SELECT * INTO v_authority FROM chat.management_authority(p_chat_id, v_actor);
     RETURN jsonb_build_object(
-        'is_project_group', v_group.kind = 'group' AND v_group.is_project,
+        'is_project_group', v_group.kind = 'group' AND chat.is_project_group(p_chat_id),
         'id', v_group.id, 'public_id', v_group.public_id, 'creator_user_id', v_group.creator_user_id,
         'name', v_group.name, 'status', v_group.status, 'group_prompt', v_group.group_prompt,
         'default_agent_type', v_group.default_agent_type, 'join_token', v_group.join_token,
@@ -217,9 +200,9 @@ BEGIN
             FROM (VALUES('image'),('temporary'),('kept')) c(class)
             LEFT JOIN (SELECT class,sum(size_bytes) bytes,count(*) n FROM mine GROUP BY class) s ON s.class=c.class),
         'groups',COALESCE((SELECT jsonb_agg(g ORDER BY (g->>'bytes')::bigint DESC) FROM (
-            SELECT jsonb_build_object('chat_id',m.chat_id,'name',c.name,'project',c.is_project,
+            SELECT jsonb_build_object('chat_id',m.chat_id,'name',c.name,'project',chat.is_project_group(m.chat_id),
                 'bytes',sum(m.size_bytes),'count',count(*)) g
-            FROM mine m JOIN chat.chats c ON c.id=m.chat_id GROUP BY m.chat_id,c.name,c.is_project) gs),'[]'::jsonb),
+            FROM mine m JOIN chat.chats c ON c.id=m.chat_id GROUP BY m.chat_id,c.name) gs),'[]'::jsonb),
         'expiring',COALESCE((SELECT jsonb_agg(e ORDER BY e->>'expires_at') FROM (
             SELECT jsonb_build_object('chat_id',m.chat_id,'expires_at',m.expires_at,'bytes',m.size_bytes,'class',m.class,
                 'item_id',w.id,'file_name',w.filename) e
@@ -248,7 +231,7 @@ BEGIN
   SELECT * INTO c FROM support_help.configuration WHERE id=p_id;
   IF NOT FOUND OR c.version=0 THEN RETURN false; END IF;
   IF NOT EXISTS(SELECT 1 FROM chat.chats g WHERE g.id=c.help_group_id AND g.kind='group' AND g.source_chat_id IS NULL)
-    OR EXISTS(SELECT 1 FROM chat.chats g WHERE g.id=c.help_group_id AND g.is_project)
+    OR chat.is_project_group(c.help_group_id)
     OR NOT support_help.live_human(c.duty_human_user_id)
     OR NOT EXISTS(SELECT 1 FROM chat.active_members m WHERE m.user_id=c.duty_human_user_id AND m.chat_id=c.help_group_id)
     THEN RETURN false; END IF;
@@ -261,9 +244,145 @@ BEGIN
   RETURN true;
 END; $function$;
 
+CREATE OR REPLACE FUNCTION identity.publish_device_projects(p_device_id text, p_projects jsonb, p_applied_removals jsonb DEFAULT '{}'::jsonb)
+ RETURNS boolean
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO ''
+AS $function$
+DECLARE
+    v_me uuid := auth.uid();
+    v_changed boolean := false;
+    v_rows integer;
+    v_project jsonb;
+    v_folder jsonb;
+BEGIN
+    IF v_me IS NULL THEN
+        RAISE EXCEPTION 'Not authenticated';
+    END IF;
+    IF NULLIF(p_device_id, '') IS NULL THEN
+        RAISE EXCEPTION 'Device is required';
+    END IF;
+    -- The row lock serializes two publishes from the same device. NO KEY keeps it from blocking the
+    -- FOR KEY SHARE that inserts into tables referencing the device take.
+    PERFORM 1 FROM identity.gugu_devices WHERE device_id = p_device_id AND user_id = v_me FOR NO KEY UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Device is not owned by current user';
+    END IF;
+
+    IF p_projects IS NULL OR jsonb_typeof(p_projects) <> 'array' THEN
+        RAISE EXCEPTION 'Projects must be an array';
+    END IF;
+    IF jsonb_array_length(p_projects) > 1000 THEN
+        RAISE EXCEPTION 'A device publishes at most 1000 projects';
+    END IF;
+    IF p_applied_removals IS NULL OR jsonb_typeof(p_applied_removals) <> 'object'
+       OR (SELECT count(*) FROM jsonb_object_keys(p_applied_removals)) > 1000
+       OR EXISTS (SELECT 1 FROM jsonb_each(p_applied_removals) e WHERE jsonb_typeof(e.value) <> 'string') THEN
+        RAISE EXCEPTION 'Applied removals must be a project to command map';
+    END IF;
+    FOR v_project IN SELECT value FROM jsonb_array_elements(p_projects) LOOP
+        IF jsonb_typeof(v_project) <> 'object'
+           OR jsonb_typeof(v_project -> 'local_project_id') IS DISTINCT FROM 'string' OR v_project ->> 'local_project_id' = ''
+           OR jsonb_typeof(v_project -> 'name') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(v_project -> 'root_path') IS DISTINCT FROM 'string' OR v_project ->> 'root_path' = ''
+           OR (v_project ? 'chat_id' AND jsonb_typeof(v_project -> 'chat_id') NOT IN ('string', 'null'))
+           OR (v_project ? 'group_representative' AND jsonb_typeof(v_project -> 'group_representative') <> 'boolean')
+           OR jsonb_typeof(v_project -> 'folders') IS DISTINCT FROM 'array'
+           OR jsonb_typeof(v_project -> 'created_at') IS DISTINCT FROM 'string' THEN
+            RAISE EXCEPTION 'Invalid project %', left(v_project::text, 200);
+        END IF;
+        BEGIN
+            PERFORM (v_project ->> 'created_at')::timestamp with time zone;
+        EXCEPTION WHEN invalid_datetime_format OR datetime_field_overflow THEN
+            RAISE EXCEPTION 'Invalid project %', left(v_project::text, 200);
+        END;
+        IF jsonb_array_length(v_project -> 'folders') > 1000 THEN
+            RAISE EXCEPTION 'A project publishes at most 1000 folders';
+        END IF;
+        FOR v_folder IN SELECT value FROM jsonb_array_elements(v_project -> 'folders') LOOP
+            IF jsonb_typeof(v_folder) <> 'object'
+               OR jsonb_typeof(v_folder -> 'workspace_id') IS DISTINCT FROM 'string' OR v_folder ->> 'workspace_id' = ''
+               OR (v_folder ->> 'kind') IS DISTINCT FROM 'root' AND (v_folder ->> 'kind') IS DISTINCT FROM 'attached'
+               OR jsonb_typeof(v_folder -> 'path') IS DISTINCT FROM 'string' OR v_folder ->> 'path' = ''
+               OR (v_folder ? 'attached_at' AND jsonb_typeof(v_folder -> 'attached_at') NOT IN ('string', 'null')) THEN
+                RAISE EXCEPTION 'Invalid folder %', left(v_folder::text, 200);
+            END IF;
+        END LOOP;
+    END LOOP;
+    IF (SELECT count(DISTINCT value ->> 'local_project_id') FROM jsonb_array_elements(p_projects))
+       <> jsonb_array_length(p_projects) THEN
+        RAISE EXCEPTION 'Each project is published once';
+    END IF;
+
+    UPDATE identity.device_projects d SET removal_requested_at = NULL, removal_command_id = NULL, updated_at = now()
+    FROM identity.gugu_device_commands c
+    WHERE d.device_id = p_device_id AND d.user_id = v_me AND d.removal_requested_at IS NOT NULL
+      AND c.id = d.removal_command_id AND c.user_id = v_me AND c.status = 'done'
+      AND c.type = 'project.set_removed' AND c.payload->>'removed' = 'true'
+      AND p_applied_removals->>d.local_project_id = c.id::text
+      AND EXISTS (SELECT 1 FROM jsonb_array_elements(p_projects) p WHERE p.value->>'local_project_id' = d.local_project_id);
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    v_changed := v_rows > 0;
+
+    DELETE FROM identity.device_projects d
+     WHERE d.device_id = p_device_id
+       AND d.removal_requested_at IS NULL AND d.removal_command_id IS NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM jsonb_array_elements(p_projects) p WHERE p.value ->> 'local_project_id' = d.local_project_id
+       );
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    v_changed := v_changed OR v_rows > 0;
+
+    -- Folders are stored with exactly the four keys, so a row compares equal when nothing a reader sees changed.
+    INSERT INTO identity.device_projects AS d
+           (device_id, user_id, local_project_id, name, root_path, created_at, chat_id, group_representative, folders)
+    SELECT p_device_id, v_me, p.value ->> 'local_project_id', p.value ->> 'name', p.value ->> 'root_path',
+           (p.value ->> 'created_at')::timestamp with time zone, p.value ->> 'chat_id',
+           COALESCE((p.value -> 'group_representative')::boolean, false),
+           (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                       'workspace_id', f.value ->> 'workspace_id',
+                       'kind', f.value ->> 'kind',
+                       'path', f.value ->> 'path',
+                       'attached_at', f.value -> 'attached_at'
+                   ) ORDER BY f.ordinality), '[]'::jsonb)
+              FROM jsonb_array_elements(p.value -> 'folders') WITH ORDINALITY f)
+      FROM jsonb_array_elements(p_projects) p
+    ON CONFLICT (device_id, local_project_id) DO UPDATE
+       SET name = EXCLUDED.name,
+           root_path = EXCLUDED.root_path,
+           created_at = EXCLUDED.created_at,
+           chat_id = EXCLUDED.chat_id,
+           group_representative = EXCLUDED.group_representative,
+           folders = EXCLUDED.folders,
+           updated_at = now()
+     WHERE d.removal_requested_at IS NULL AND d.removal_command_id IS NULL
+       AND (d.name, d.root_path, d.created_at, d.chat_id, d.group_representative, d.folders) IS DISTINCT FROM
+           (EXCLUDED.name, EXCLUDED.root_path, EXCLUDED.created_at, EXCLUDED.chat_id, EXCLUDED.group_representative,
+            EXCLUDED.folders);
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    v_changed := v_changed OR v_rows > 0;
+
+    -- A project bound to a group is that group's project: mark it (20261109210000). Only a group this account owns,
+    -- or an id no group has yet (reserved before the group exists). Marking never changes what this returns.
+    INSERT INTO chat.project_groups (chat_id)
+    SELECT DISTINCT p.value ->> 'chat_id' FROM jsonb_array_elements(p_projects) p
+     WHERE NULLIF(p.value ->> 'chat_id', '') IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM chat.chats c WHERE c.id = p.value ->> 'chat_id')
+            OR EXISTS (SELECT 1 FROM chat.chats c WHERE c.id = p.value ->> 'chat_id' AND c.creator_user_id = v_me::text)
+            OR EXISTS (SELECT 1 FROM chat.active_members m
+                        WHERE m.chat_id = p.value ->> 'chat_id' AND m.user_id = v_me::text AND m.role = 'owner'))
+    ON CONFLICT (chat_id) DO NOTHING;
+
+    IF v_changed THEN
+        PERFORM chat.publish_user_revision(v_me::text, 'device_changed', jsonb_build_object('device_id', p_device_id, 'kind', 'projects'), false);
+    END IF;
+    RETURN v_changed;
+END;
+$function$;
+
 -- The installation event trigger closes replaced functions; restate the grants each one had.
 GRANT EXECUTE ON FUNCTION chat.group_add_denial(text, text, text, boolean, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION chat.group_info_as(text, text) TO authenticated;
 GRANT EXECUTE ON FUNCTION chat.file_storage_overview_as() TO authenticated;
-REVOKE ALL ON FUNCTION identity.mark_project_group() FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION chat.mark_reserved_project_group() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION identity.publish_device_projects(text, jsonb, jsonb) TO authenticated, service_role;
