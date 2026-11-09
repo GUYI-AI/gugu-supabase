@@ -54,15 +54,17 @@ BEGIN
         INSERT INTO chat.workspace_item_versions(item_id, n, content_type, size_bytes, made_by, made_at,
             file_name, sha256, host_device_id, host_project_id, relative_path)
         SELECT d.item_id, d.version, d.content_type, d.size_bytes,
-               CASE WHEN w.version = d.version THEN COALESCE(w.updated_by, w.created_by) ELSE w.created_by END,
+               CASE WHEN w.version = d.version THEN COALESCE(last_writer.id, w.created_by) ELSE w.created_by END,
                CASE WHEN w.version = d.version THEN w.updated_at ELSE w.created_at END,
                d.file_name, d.sha256, d.host_device_id, d.host_project_id, d.relative_path
           FROM chat.file_device_revisions d JOIN unify_files f ON f.id = d.item_id AND f.k > lo AND f.k <= lo + batch
           JOIN chat.workspace_items w ON w.id = d.item_id
+          LEFT JOIN identity.users last_writer ON last_writer.id = w.updated_by
         ON CONFLICT (item_id, n) DO NOTHING;
         INSERT INTO chat.workspace_item_versions(item_id, n, blob_id, content_type, size_bytes, made_by, made_at)
-        SELECT w.id, w.version, w.blob_id, w.content_type, w.size_bytes, COALESCE(w.updated_by, w.created_by), w.updated_at
+        SELECT w.id, w.version, w.blob_id, w.content_type, w.size_bytes, COALESCE(last_writer.id, w.created_by), w.updated_at
           FROM chat.workspace_items w JOIN unify_files f ON f.id = w.id AND f.k > lo AND f.k <= lo + batch
+          LEFT JOIN identity.users last_writer ON last_writer.id = w.updated_by
          WHERE w.blob_id IS NOT NULL
         ON CONFLICT (item_id, n) DO NOTHING;
         lo := lo + batch;
@@ -103,13 +105,15 @@ GRANT SELECT (item_id, n, inline_text, content_type, size_bytes, made_by, made_a
 CREATE FUNCTION chat.file_current_version() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE d chat.workspace_item_versions%ROWTYPE;
+    -- updated_by has no foreign key and can name a user that is gone; made_by has one (created_by too, set null).
+    writer text := (SELECT u.id FROM identity.users u WHERE u.id = NEW.updated_by);
 BEGIN
     IF TG_OP = 'UPDATE' AND EXISTS(SELECT 1 FROM chat.workspace_item_versions WHERE item_id = NEW.id AND n = NEW.version) THEN
         RETURN NEW;
     END IF;
     IF NEW.blob_id IS NOT NULL THEN
         INSERT INTO chat.workspace_item_versions(item_id, n, blob_id, content_type, size_bytes, made_by, made_at)
-        VALUES (NEW.id, NEW.version, NEW.blob_id, NEW.content_type, NEW.size_bytes, COALESCE(NEW.updated_by, NEW.created_by), now())
+        VALUES (NEW.id, NEW.version, NEW.blob_id, NEW.content_type, NEW.size_bytes, COALESCE(writer, NEW.created_by), now())
         ON CONFLICT (item_id, n) DO NOTHING;
     ELSIF TG_OP = 'UPDATE' AND OLD.blob_id IS NULL AND NEW.chat_id = OLD.chat_id
           AND NEW.size_bytes IS NOT DISTINCT FROM OLD.size_bytes AND NEW.content_type IS NOT DISTINCT FROM OLD.content_type THEN
@@ -117,7 +121,7 @@ BEGIN
         IF FOUND THEN
             INSERT INTO chat.workspace_item_versions(item_id, n, content_type, size_bytes, made_by, made_at,
                 file_name, sha256, host_device_id, host_project_id, relative_path)
-            VALUES (NEW.id, NEW.version, d.content_type, d.size_bytes, NEW.updated_by, now(),
+            VALUES (NEW.id, NEW.version, d.content_type, d.size_bytes, writer, now(),
                 NEW.filename, d.sha256, d.host_device_id, d.host_project_id, d.relative_path);
         END IF;
     END IF;
