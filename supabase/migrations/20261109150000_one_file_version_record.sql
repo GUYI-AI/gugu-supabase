@@ -1,7 +1,7 @@
 -- One record per file version. A version (item_id, n) is one row of chat.workspace_item_versions wherever its bytes are:
 -- a managed blob (blob_id), inline text, or a file kept on a device (host_device_id, host_project_id, relative_path, with
 -- the sha256 and file name the device published). chat.file_device_revisions, which kept device versions in a second table
--- under the same key, is folded in and dropped. Every file version has its row from the moment it exists, the current one
+-- under the same key, is folded in and retired (renamed, no grants; a later release drops it). Every file version has its row from the moment it exists, the current one
 -- included; before this a version got a row only once a newer one replaced it.
 -- An image's pixel size belongs to its bytes: chat.file_contents keeps it by sha256, for a blob and a device copy alike, so a
 -- forwarded, shared or whispered copy of the same bytes has it too. file_blobs.width/height move there and are dropped. The
@@ -28,7 +28,9 @@ SELECT sha256, width, height FROM chat.file_blobs WHERE sha256 IS NOT NULL AND w
 ALTER TABLE chat.workspace_item_versions
     ADD COLUMN file_name text CHECK (file_name <> ''),
     ADD COLUMN sha256 text CHECK (sha256 ~ '^[0-9a-f]{64}$'),
-    ADD COLUMN host_device_id text REFERENCES identity.gugu_devices(device_id) ON DELETE SET NULL,
+    -- No foreign key: readers treat a device that is gone as gone (file_resolve_as), publishing checks the device under
+    -- FOR KEY SHARE, and a reference would make this release lock identity.gugu_devices.
+    ADD COLUMN host_device_id text,
     ADD COLUMN host_project_id text,
     ADD COLUMN relative_path text CHECK (length(relative_path) BETWEEN 1 AND 4096
         AND relative_path !~ '(^/|//|/$|:|\\|[[:cntrl:]]|(^|/)\.\.?(/|$))');
@@ -389,7 +391,10 @@ BEGIN
     END LOOP;
 END $upgrade$;
 
-DROP TABLE chat.file_device_revisions;
+-- Retired, not dropped: dropping it removes its foreign key to identity.gugu_devices, which takes ACCESS EXCLUSIVE on
+-- that table for the rest of the install and can deadlock with a device write. Nothing reads or writes it any more.
+ALTER TABLE chat.file_device_revisions RENAME TO file_device_revisions_retired;
+REVOKE ALL ON chat.file_device_revisions_retired FROM PUBLIC, anon, authenticated, service_role;
 ALTER TABLE chat.file_blobs DROP COLUMN width, DROP COLUMN height;
 
 REVOKE ALL ON FUNCTION chat.file_current_version(), chat.file_device_version_integrity(),

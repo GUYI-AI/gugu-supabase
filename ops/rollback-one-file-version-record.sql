@@ -10,6 +10,8 @@ DROP TRIGGER file_current_version ON chat.workspace_items;
 DROP TRIGGER file_current_version_created ON chat.workspace_items;
 DROP FUNCTION chat.file_current_version();
 
+-- The release retired the old table; its rows stopped at the release. It still holds the old index and key names.
+DROP TABLE IF EXISTS chat.file_device_revisions_retired;
 CREATE TABLE chat.file_device_revisions (
     item_id uuid NOT NULL REFERENCES chat.workspace_items(id) ON DELETE CASCADE,
     version integer NOT NULL CHECK (version > 0),
