@@ -139,6 +139,10 @@ describe('字节是什么(看文件头)', () => {
     for (const le of [true, false]) for (let o = 1; o <= 8; o++) {
       expect(sniff(exif(o, le))).toEqual({ contentType: 'image/jpeg', image: true, ...(o >= 5 ? { width: 480, height: 640 } : { width: 640, height: 480 }) })
     }
+    // A real JPEG (Pillow) of 37×11 pixels with EXIF orientation 6 followed by an XMP packet, also APP1: only the EXIF one
+    // names the orientation. Cut right after its frame header.
+    const exifThenXmp = Uint8Array.from(atob('/9j/4AAQSkZJRgABAQAAAQABAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAYAAAAAAAD/4QDsaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wLwA8eDp4bXBtZXRhIHhtbG5zOng9ImFkb2JlOm5zOm1ldGEvIj48cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPjxyZGY6RGVzY3JpcHRpb24geG1sbnM6dGlmZj0iaHR0cDovL25zLmFkb2JlLmNvbS90aWZmLzEuMC8iIHRpZmY6T3JpZW50YXRpb249IjYiLz48L3JkZjpSREY+PC94OnhtcG1ldGE+/9sAQwAIBgYHBgUIBwcHCQkICgwUDQwLCwwZEhMPFB0aHx4dGhwcICQuJyAiLCMcHCg3KSwwMTQ0NB8nOT04MjwuMzQy/9sAQwEJCQkMCwwYDQ0YMiEcITIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy/8AAEQgACwAlAwEiAAIRAQMRAQ=='), (c) => c.charCodeAt(0))
+    expect(sniff(exifThenXmp)).toEqual({ contentType: 'image/jpeg', image: true, width: 11, height: 37 })
     const gif = new Uint8Array([...new TextEncoder().encode('GIF89a'), 0x20, 0x00, 0x10, 0x00, 0, 0])
     expect(sniff(gif)).toEqual({ contentType: 'image/gif', image: true, width: 32, height: 16 })
     const webp = new Uint8Array(30)

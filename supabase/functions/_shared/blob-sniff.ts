@@ -40,9 +40,12 @@ export const canSignThumbnail = (contentType: string, sizeBytes: unknown, width?
   hasThumbnail(contentType) && typeof sizeBytes === 'number' && Number.isSafeInteger(sizeBytes)
     && sizeBytes > 0 && sizeBytes <= OSS_IMAGE_PROCESS_MAX_BYTES && withinPixels(width, height)
 
-/** EXIF orientation (tag 0x0112 in IFD0) of an APP1 segment whose payload starts at `at`; 1 when absent or unreadable. */
-function exifOrientation(b: Uint8Array, at: number, end: number): number {
-  if (end > b.length || ascii(b, at, at + 6) !== 'Exif\0\0') return 1
+/**
+ * EXIF orientation (tag 0x0112 in IFD0) of an APP1 segment whose payload starts at `at`: null when the segment is not EXIF
+ * (an XMP packet is APP1 too, often right after the EXIF one), 1 when the EXIF names none or cannot be read.
+ */
+function exifOrientation(b: Uint8Array, at: number, end: number): number | null {
+  if (end > b.length || ascii(b, at, at + 6) !== 'Exif\0\0') return null
   const t = at + 6, le = ascii(b, t, t + 2) === 'II'
   const u16 = (i: number) => (i + 2 <= end ? (le ? u16le(b, i) : u16be(b, i)) : -1)
   const ifd = t + (le ? u32le(b, t + 4) : u32be(b, t + 4))
@@ -66,7 +69,10 @@ function jpegSize(b: Uint8Array): Sniffed {
     }
     const length = u16be(b, i + 2)
     // SOF0–SOF15,除了 DHT(C4)、JPG(C8)、DAC(CC)
-    if (marker === 0xe1) { const o = exifOrientation(b, i + 4, i + 2 + length); turned = o >= 5 && o <= 8 }
+    if (marker === 0xe1) {
+      const o = exifOrientation(b, i + 4, i + 2 + length)
+      if (o !== null) turned = o >= 5 && o <= 8
+    }
     if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
       const width = u16be(b, i + 7), height = u16be(b, i + 5)
       return turned ? image('image/jpeg', height, width) : image('image/jpeg', width, height)
