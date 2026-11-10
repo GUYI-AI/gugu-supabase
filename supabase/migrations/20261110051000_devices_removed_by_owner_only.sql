@@ -8,9 +8,9 @@
 --     project folders (identity.device_projects cascades), so a laptop off for a holiday lost its folders on every
 --     other device and its file versions resolved as missing; a server host was dropped without remove_device's
 --     tombstone. Routing it through remove_device would not help: removing a device removes its folders too.
--- The function is dropped. A device is removed when its owner removes it (remove_device); the device list shows when
--- each was last seen. Clients that still call the function get an error, which they already log as a warning and retry
--- later; the client drops the call separately.
+-- The function deletes nothing any more. A device is removed when its owner removes it (remove_device); the device list
+-- shows when each was last seen. Released clients call it on every device tick, so it stays, with the same signature
+-- and grant, answering 0: drop it once the oldest supported client no longer calls it.
 --
 -- Every client registers a machine id (desktop hardware id, server installation id, phone install id). The rows that
 -- have none predate machine ids; each gets 'legacy:' || device_id, which no client sends, so a current client on that
@@ -22,7 +22,7 @@
 -- them.
 --
 -- Locks: no column, constraint or trigger is added to identity.gugu_devices (a SET NOT NULL would take ACCESS EXCLUSIVE
--- and scan the table); replacing and dropping functions locks no table; the fill takes ROW EXCLUSIVE on
+-- and scan the table); replacing functions locks no table; the fill takes ROW EXCLUSIVE on
 -- identity.gugu_devices, as a heartbeat does. Rollback: ops/rollback-devices-removed-by-owner-only.sql.
 SET LOCAL lock_timeout = '5s';
 
@@ -69,6 +69,17 @@ END;
 $function$;
 REVOKE ALL ON FUNCTION identity.gugu_devices_enforce_machine_limit() FROM PUBLIC, anon, authenticated, service_role;
 
-DROP FUNCTION identity.cleanup_legacy_gugu_devices(text, text);
+-- Released clients (cleanupLegacyDeviceRows) still call this every device tick; drop it once the oldest supported
+-- client no longer does. It deletes nothing: devices are removed only by remove_device.
+CREATE OR REPLACE FUNCTION identity.cleanup_legacy_gugu_devices(p_keep_device_id text, p_hostname text)
+ RETURNS integer
+ LANGUAGE sql
+ STABLE
+ SET search_path TO ''
+AS $function$
+    SELECT 0;
+$function$;
+REVOKE ALL ON FUNCTION identity.cleanup_legacy_gugu_devices(text, text) FROM PUBLIC, anon, service_role;
+GRANT EXECUTE ON FUNCTION identity.cleanup_legacy_gugu_devices(text, text) TO authenticated;
 
 NOTIFY pgrst, 'reload schema';

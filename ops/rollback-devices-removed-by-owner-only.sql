@@ -1,4 +1,4 @@
--- Roll back 20261110051000_devices_removed_by_owner_only: identity.cleanup_legacy_gugu_devices returns (the hostname
+-- Roll back 20261110051000_devices_removed_by_owner_only: identity.cleanup_legacy_gugu_devices deletes again (the hostname
 -- delete of machine-less rows and the 30-day stale reclaim), an API write may again omit machine_id, and the rows that
 -- release filled with 'legacy:' || device_id get their NULL back. The bodies below are the definitions it replaced.
 BEGIN;

@@ -3,12 +3,12 @@ import { readFileSync } from 'node:fs'
 import { Client } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
 
-// 20261110051000: a device row is deleted only by its owner's remove_device, and every API-written device names its
+// 20261110051000: a device row is deleted only by its owner's remove_device, and every API-registered device names its
 // machine. Before, cleanup_legacy_gugu_devices (called by each client at startup) deleted a laptop unseen for 30 days
 // together with its project folders, and deleted machine-less rows by hostname on every run.
 let db: Client
 let owner: string, laptop: string, here: string
-// The release's one-time fill (the release itself drops a function, so it cannot run twice).
+// The release's one-time fill, run again on this fixture.
 const fill = /^UPDATE identity\.gugu_devices\n[\s\S]*?;$/m.exec(readFileSync(new URL('../../../supabase/migrations/20261110051000_devices_removed_by_owner_only.sql', import.meta.url), 'utf8'))![0]
 
 async function asOwner<Row = Record<string, unknown>>(sql: string, values: unknown[] = []): Promise<Row[]> {
@@ -45,13 +45,10 @@ it('no API call deletes a device unseen for 30 days or its project folders; only
   await device(laptop, `machine-${laptop}`, "now() - interval '31 days'")
   await db.query(`INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at)
     VALUES($1,$2,'p1','Holiday project','/home/me/p1',now())`, [laptop, owner])
-  // The client's startup call, as it is made today.
-  await db.query('SAVEPOINT startup')
-  await asOwner('SELECT identity.cleanup_legacy_gugu_devices($1,$2)', [here, 'same-host'])
-    .then(() => db.query('RELEASE SAVEPOINT startup'), () => db.query('ROLLBACK TO SAVEPOINT startup'))
+  // The released clients' startup call: it still answers, and deletes nothing.
+  expect(await asOwner<{ n: number }>('SELECT identity.cleanup_legacy_gugu_devices($1,$2) AS n', [here, 'same-host'])).toEqual([{ n: 0 }])
   expect(await devices()).toEqual([here, laptop].sort())
   expect((await db.query('SELECT local_project_id FROM identity.device_projects WHERE device_id=$1', [laptop])).rows).toHaveLength(1)
-  expect((await db.query("SELECT to_regprocedure('identity.cleanup_legacy_gugu_devices(text,text)') AS fn")).rows[0].fn).toBeNull()
   await asOwner('SELECT identity.remove_device($1)', [laptop])
   expect(await devices()).toEqual([here])
 })
