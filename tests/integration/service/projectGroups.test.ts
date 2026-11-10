@@ -182,6 +182,21 @@ describe('identity.list_my_projects', () => {
     ])
   }))
 
+  // 20261110030000: an id reserved before its group exists is a project too; it is listed by its device row's name.
+  it('lists a reserved project whose group does not exist yet, by the name on my device row', () => inRollback(async () => {
+    const reserved = randomUUID()
+    await publish(owner, 'a', [{ local: 'early', chat: reserved, path: '/early' }])
+    const listed = await listAs(owner)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]).toMatchObject({ chat_id: reserved, name: 'local-name', status: 'active' })
+    expect(listed[0]!.bindings.map((b) => [b.device_id, b.local_project_id])).toEqual([[`dev-a-${owner}`, 'early']])
+    // Not someone else's: another account sees nothing of it.
+    expect(await listAs(colleague)).toEqual([])
+    // Once the group exists it is listed once, by the group's own name.
+    await createGroup(reserved, owner, 'grown up')
+    expect((await listAs(owner)).map((p) => [p.chat_id, p.name])).toEqual([[reserved, 'grown up']])
+  }))
+
   it('shows nothing of my projects to another account, even a member of the group', () => inRollback(async () => {
     const work = randomUUID()
     await createGroup(work, owner)
