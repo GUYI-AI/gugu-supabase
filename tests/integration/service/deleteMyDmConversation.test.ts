@@ -47,7 +47,8 @@ it('durably deletes only the owner list record and preserves membership, identit
   const history = (await as(owner, () => db.query('SELECT * FROM chat.messages_view WHERE chat_id=$1',[dm]))).rows
   const identities = (await db.query('SELECT * FROM identity.users WHERE id=ANY($1)',[[owner,agent]])).rows
   const files = (await as(owner, () => db.query('SELECT * FROM chat.workspace_items WHERE id=$1',[file]))).rows
-  const versions = (await as(owner, () => db.query('SELECT * FROM chat.workspace_item_versions WHERE item_id=$1',[file]))).rows
+  const VERSIONS = 'SELECT item_id,n,inline_text,content_type,size_bytes,made_by,made_at,blob_id FROM chat.workspace_item_versions WHERE item_id=$1'
+  const versions = (await as(owner, () => db.query(VERSIONS,[file]))).rows
   expect(await listed()).toContain(dm)
   const receipt = await remove()
   expect(receipt).toMatchObject({ chat_id:dm,already:false,deleted_at:expect.any(String) })
@@ -59,7 +60,7 @@ it('durably deletes only the owner list record and preserves membership, identit
   expect((await as(owner, () => db.query('SELECT * FROM chat.messages_view WHERE chat_id=$1',[dm]))).rows).toEqual(history)
   expect((await db.query('SELECT * FROM identity.users WHERE id=ANY($1)',[[owner,agent]])).rows).toEqual(identities)
   expect((await as(owner, () => db.query('SELECT * FROM chat.workspace_items WHERE id=$1',[file]))).rows).toEqual(files)
-  expect((await as(owner, () => db.query('SELECT * FROM chat.workspace_item_versions WHERE item_id=$1',[file]))).rows).toEqual(versions)
+  expect((await as(owner, () => db.query(VERSIONS,[file]))).rows).toEqual(versions)
   expect((await db.query('SELECT status FROM chat.chats WHERE id=$1',[dm])).rows[0].status).toBe('active')
 })
 

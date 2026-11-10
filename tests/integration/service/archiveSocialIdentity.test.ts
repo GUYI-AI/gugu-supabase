@@ -50,11 +50,12 @@ beforeEach(async () => {
 })
 afterEach(async () => { if (db) { await admin(); await db.query('ROLLBACK') } })
 
-describe('archive terminates identity without touching seats or history', () => {
+describe('archive terminates identity without touching its seats or history', () => {
   it('one update removes N=3 rosters/mentions/counts/send permission, zero member DML, retry is idempotent', async () => {
     const seats = (await db.query('SELECT * FROM chat.chat_members WHERE user_id=$1 ORDER BY chat_id', [agent])).rows
     const history = (await db.query('SELECT * FROM chat.messages WHERE chat_id=$1 ORDER BY id', [dm])).rows
-    const heads = (await db.query('SELECT * FROM chat.account_revision_heads WHERE user_id=ANY($1) ORDER BY user_id', [[owner, peer]])).rows
+    // Only the owner shares the agent's DM, whose list record removal closes; the peer's head stays.
+    const heads = (await db.query('SELECT * FROM chat.account_revision_heads WHERE user_id=$1', [peer])).rows
     // This suite is serial: transactional trigger DDL and counters roll back.
     await db.query('CREATE TEMP TABLE archive_write_log(kind text) ON COMMIT DROP')
     await db.query(`CREATE FUNCTION pg_temp.archive_watch() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -76,7 +77,8 @@ describe('archive terminates identity without touching seats or history', () => 
     expect((await db.query('SELECT kind,count(*)::int AS n FROM archive_write_log GROUP BY kind')).rows).toEqual([{ kind: 'identity', n: 1 }])
     expect((await db.query('SELECT * FROM chat.chat_members WHERE user_id=$1 ORDER BY chat_id', [agent])).rows).toEqual(seats)
     expect((await db.query('SELECT * FROM chat.messages WHERE chat_id=$1 ORDER BY id', [dm])).rows).toEqual(history)
-    expect((await db.query('SELECT * FROM chat.account_revision_heads WHERE user_id=ANY($1) ORDER BY user_id', [[owner, peer]])).rows).toEqual(heads)
+    expect((await db.query('SELECT * FROM chat.account_revision_heads WHERE user_id=$1', [peer])).rows).toEqual(heads)
+    expect((await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1 AND conversation_deleted_at IS NOT NULL', [dm])).rows).toEqual([{ user_id: owner }])
     const events = (await db.query(`SELECT event,topic,private,payload FROM realtime.messages
       WHERE topic='gugu:identity:lifecycle' AND payload->>'id'=$1`, [agent])).rows
     expect(events).toEqual([{ event: 'identity_removed', topic: 'gugu:identity:lifecycle', private: true, payload: { id: agent, removed_at: first.removed_at } }])

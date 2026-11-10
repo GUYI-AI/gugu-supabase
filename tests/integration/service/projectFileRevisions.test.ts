@@ -111,10 +111,12 @@ describe('project local metadata and exact references, kept by the device that s
     expect(await resolve({item_id:item,version:3})).toEqual({status:'gone'})
     expect((await db.query('SELECT updated_by FROM chat.workspace_items WHERE id=$1',[item])).rows[0].updated_by).toBe(owner)
     await service()
-    expect((await db.query('SELECT n,device_version,blob_id,inline_text FROM chat.workspace_item_versions WHERE item_id=$1',[item])).rows)
-      .toEqual([{n:1,device_version:1,blob_id:null,inline_text:null}])
+    // Both versions are one record each, kept by the device that published them.
+    expect((await db.query('SELECT n,blob_id,inline_text,host_device_id,relative_path,sha256 FROM chat.workspace_item_versions WHERE item_id=$1 ORDER BY n',[item])).rows)
+      .toEqual([{n:1,blob_id:null,inline_text:null,host_device_id:device,relative_path:'data/file.bin',sha256:sha},
+        {n:2,blob_id:null,inline_text:null,host_device_id:device,relative_path:'data/new.bin',sha256:'cd'.repeat(32)}])
     expect((await fails("INSERT INTO chat.workspace_item_versions(item_id,n,content_type) VALUES($1,99,$2)",[item,type])).code).toBe('23514')
-    expect((await fails("INSERT INTO chat.workspace_item_versions(item_id,n,device_version,content_type) VALUES($1,99,98,$2)",[item,type])).code).toBe('23514')
+    expect((await fails("INSERT INTO chat.workspace_item_versions(item_id,n,host_project_id,content_type) VALUES($1,99,'root',$2)",[item,type])).code).toBe('23514')
   })
   it('publishes a composer attachment and its exact message pointer in one transaction through the existing RPC',async()=>{
     const message=randomUUID(),request={message_id:message,to_user_ids:[member],caption:'  shared caption  '}
@@ -141,7 +143,7 @@ describe('project local metadata and exact references, kept by the device that s
     expect(result.message.content).toContain('[附件] '+expected+' (')
     await service()
     expect((await db.query(`SELECT w.filename,d.file_name,w.source_message_ids FROM chat.workspace_items w
-      JOIN chat.file_device_revisions d ON d.item_id=w.id AND d.version=w.version WHERE w.id=$1`,[next])).rows)
+      JOIN chat.workspace_item_versions d ON d.item_id=w.id AND d.n=w.version WHERE w.id=$1`,[next])).rows)
       .toEqual([{filename:expected,file_name:expected,source_message_ids:[message]}])
     expect(await resolve({item_id:next})).toMatchObject({status:'ready',file_name:expected,version:1})
   })
@@ -172,16 +174,16 @@ describe('project local metadata and exact references, kept by the device that s
   it('rolls back the local file and revision when message authorization, payload or idempotency rejects sending',async()=>{
     const send='SELECT chat.file_device_publish($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)'
     const message=randomUUID();await db.query(`SELECT * FROM chat.send_message_idempotent($1,$2,$3,'{}','existing','text',NULL,NULL,false,false)`,[message,group,owner])
-    expect((await fails(send,[...args(),{message_id:randomUUID(),to_user_ids:[outsider]}])).code).toBe('42501')
+    expect(await fails(send,[...args(),{message_id:randomUUID(),to_user_ids:[outsider]}])).toMatchObject({code:'P0001',hint:'recipient_not_member',detail:outsider})
     await service()
     expect((await db.query('SELECT id FROM chat.workspace_items WHERE id=$1',[item])).rows).toEqual([])
-    expect((await db.query('SELECT item_id FROM chat.file_device_revisions WHERE item_id=$1',[item])).rows).toEqual([])
+    expect((await db.query('SELECT item_id FROM chat.workspace_item_versions WHERE item_id=$1',[item])).rows).toEqual([])
     await user()
     for(const request of [{message_id:message},{message_id:randomUUID(),is_whisper:true},[],{message_id:randomUUID(),to_user_ids:'invalid'}]) {
       expect((await fails(send,[...args(),request])).message).toBeTruthy()
       await service()
       expect((await db.query('SELECT id FROM chat.workspace_items WHERE id=$1',[item])).rows).toEqual([])
-      expect((await db.query('SELECT item_id FROM chat.file_device_revisions WHERE item_id=$1',[item])).rows).toEqual([])
+      expect((await db.query('SELECT item_id FROM chat.workspace_item_versions WHERE item_id=$1',[item])).rows).toEqual([])
       await user()
     }
   })
@@ -222,7 +224,7 @@ describe('project local metadata and exact references, kept by the device that s
   const MOVE='SELECT * FROM chat.workspace_move_as($1,$2,$3,$4,$5)'
   const revisions=async()=>{
     await service()
-    return (await db.query('SELECT version,relative_path,sha256,size_bytes::int,file_name FROM chat.file_device_revisions WHERE item_id=$1 ORDER BY version',[item])).rows
+    return (await db.query('SELECT n AS version,relative_path,sha256,size_bytes::int,file_name FROM chat.workspace_item_versions WHERE item_id=$1 AND host_project_id IS NOT NULL ORDER BY n',[item])).rows
   }
   it('lets any member rename a local file under the ordinary folder rules; the version stays with its device',async()=>{
     await publish();await user(member)
@@ -315,7 +317,7 @@ describe('project local metadata and exact references, kept by the device that s
     await service();await db.query('DELETE FROM identity.device_projects WHERE device_id=$1',[device])
     expect(await resolve()).toEqual({status:'gone'})
     await service()
-    expect((await db.query('SELECT item_id FROM chat.file_device_revisions WHERE item_id=$1',[item])).rows).toHaveLength(1)
+    expect((await db.query('SELECT item_id FROM chat.workspace_item_versions WHERE item_id=$1',[item])).rows).toHaveLength(1)
   })
   it('reads a device\'s files again when one publication of its projects left the project out and it is back',async()=>{
     await publish();await service()
@@ -349,18 +351,18 @@ describe('project local metadata and exact references, kept by the device that s
   })
   it('has no direct API table access or public helper grants; intended metadata APIs remain authenticated',async()=>{
     await service()
-    for(const role of ['anon','authenticated']) for(const table of ['file_device_revisions','file_temporary_transfers']) {
+    for(const role of ['anon','authenticated']) for(const table of ['file_contents','file_temporary_transfers']) {
       for(const permission of ['SELECT','INSERT','UPDATE','DELETE']) expect((await db.query('SELECT has_table_privilege($1,$2,$3) AS ok',[role,'chat.'+table,permission])).rows[0].ok).toBe(false)
     }
     for(const signature of ['file_project_policy_as(text,text,text,boolean,boolean,text)','file_project_policy_for(text,text)',
-      'file_device_publish(uuid,text,text,text,text,bigint,text,text,integer,uuid,jsonb,text)','file_resolve_as(jsonb,text)']) {
+      'file_device_publish(uuid,text,text,text,text,bigint,text,text,integer,uuid,jsonb,text,integer,integer)','file_resolve_as(jsonb,text)']) {
       expect((await db.query("SELECT has_function_privilege('authenticated',$1,'EXECUTE') AS ok",['chat.'+signature])).rows[0].ok).toBe(true)
       expect((await db.query("SELECT has_function_privilege('anon',$1,'EXECUTE') AS ok",['chat.'+signature])).rows[0].ok).toBe(false)
     }
     expect((await db.query("SELECT has_function_privilege('authenticated','chat.file_device_version_integrity()','EXECUTE') AS ok")).rows[0].ok).toBe(false)
-    expect((await db.query("SELECT has_function_privilege('authenticated','chat.file_device_carry_revision()','EXECUTE') AS ok")).rows[0].ok).toBe(false)
-    expect((await db.query("SELECT prosecdef FROM pg_proc WHERE oid='chat.file_device_publish(uuid,text,text,text,text,bigint,text,text,integer,uuid,jsonb,text)'::regprocedure")).rows[0].prosecdef).toBe(false)
-    const inner='file_private.publish_revision(uuid,text,text,text,text,text,bigint,text,text,integer,uuid)'
+    expect((await db.query("SELECT has_function_privilege('authenticated','chat.file_current_version()','EXECUTE') AS ok")).rows[0].ok).toBe(false)
+    expect((await db.query("SELECT prosecdef FROM pg_proc WHERE oid='chat.file_device_publish(uuid,text,text,text,text,bigint,text,text,integer,uuid,jsonb,text,integer,integer)'::regprocedure")).rows[0].prosecdef).toBe(false)
+    const inner='file_private.publish_revision(uuid,text,text,text,text,text,bigint,text,text,integer,uuid,integer,integer)'
     expect((await db.query("SELECT prosecdef FROM pg_proc WHERE oid=$1::regprocedure",[inner])).rows[0].prosecdef).toBe(true)
     expect((await db.query("SELECT has_function_privilege('authenticated',$1,'EXECUTE') AS ok",[inner])).rows[0].ok).toBe(true)
     expect((await db.query("SELECT has_function_privilege('anon',$1,'EXECUTE') AS ok",[inner])).rows[0].ok).toBe(false)
@@ -626,5 +628,39 @@ describe('temporary generations reuse managed budgets and private key issuance',
     const id=randomUUID();await user(member)
     expect((await fails(DOWNLOAD,[{item_id:item},member,id])).hint).toBe('file_transfer_account_download_full')
     await service();expect((await db.query('SELECT id FROM chat.file_transfer_reservations WHERE id=$1',[id])).rows).toEqual([])
+  })
+  it('keeps one record per version: an image size follows its bytes, wherever they are kept',async()=>{
+    const PUBLISH_SIZED='SELECT chat.file_device_publish($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,NULL,$11,$12) AS r'
+    const png='ef'.repeat(32),sized=randomUUID()
+    await db.query(PUBLISH_SIZED,[...args({0:sized,3:'pics/a.png',4:png,6:'a.png',7:'image/png'}),1280,720])
+    expect(await resolve({item_id:sized})).toMatchObject({source:'local',file_name:'a.png',width:1280,height:720})
+    await user()
+    expect((await fails(PUBLISH_SIZED,[...args({0:randomUUID(),3:'pics/b.png',6:'b.png'}),10,null])).hint).toBe('file_transfer_invalid')
+    // The server's measurement of the same bytes replaces what the device reported.
+    await service()
+    await db.query("SELECT * FROM chat.file_blob_register($1,$2,$3,123,'image/png',1281,721)",[owner,'staging/'+owner+'/'+randomUUID(),png])
+    expect(await resolve({item_id:sized})).toMatchObject({source:'local',width:1281,height:721})
+    // A managed file's current version has its record from the start.
+    await service()
+    const blob=(await db.query("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by) VALUES('oss',$1,$2,9,'image/png',$3) RETURNING id",['12/'+'12'.repeat(32),'12'.repeat(32),owner])).rows[0].id
+    const managed=(await db.query("INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,size_bytes,blob_id,created_by) VALUES($1,'file','m.png','image/png',9,$2,$3) RETURNING id",[group,blob,owner])).rows[0].id
+    expect((await db.query('SELECT n,blob_id FROM chat.workspace_item_versions WHERE item_id=$1',[managed])).rows).toEqual([{n:1,blob_id:blob}])
+    // Members read the version columns they always could; where a device keeps a version only through the file functions.
+    for(const [column,ok] of [['content_type',true],['blob_id',true],['relative_path',false],['host_device_id',false],['sha256',false],['file_name',false]] as const)
+      expect((await db.query("SELECT has_column_privilege('authenticated','chat.workspace_item_versions',$1,'SELECT') AS ok",[column])).rows[0].ok).toBe(ok)
+  })
+  it('records a moved version without a maker that is gone: updated_by may name a removed user, made_by may not',async()=>{
+    const ghost=randomUUID(),local=randomUUID()
+    await db.query('SELECT chat.file_device_publish($1,$2,$3,$4,$5,$6,$7,$8,NULL,NULL)',[local,group,device,'pics/g.png','9a'.repeat(32),5,'g.png','image/png'])
+    await service()
+    const blob=(await db.query("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by) VALUES('oss',$1,$2,9,'image/png',$3) RETURNING id",['9b/'+'9b'.repeat(32),'9b'.repeat(32),owner])).rows[0].id
+    const managed=(await db.query("INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,size_bytes,blob_id,created_by) VALUES($1,'file','g2.png','image/png',9,$2,$3) RETURNING id",[group,blob,owner])).rows[0].id
+    // updated_by has no foreign key: older rows can name a user that no longer exists.
+    await db.query('SET LOCAL session_replication_role = replica')
+    await db.query('UPDATE chat.workspace_items SET updated_by=$2 WHERE id=ANY($1::uuid[])',[[local,managed],ghost])
+    await db.query('SET LOCAL session_replication_role = origin')
+    await db.query("UPDATE chat.workspace_items SET filename=filename||'.moved',version=version+1 WHERE id=ANY($1::uuid[])",[[local,managed]])
+    expect((await db.query('SELECT v.item_id=$2::uuid AS managed,v.made_by FROM chat.workspace_item_versions v WHERE v.item_id=ANY($1::uuid[]) AND v.n=2 ORDER BY 1',[[local,managed],managed])).rows)
+      .toEqual([{managed:false,made_by:null},{managed:true,made_by:owner}])
   })
 })

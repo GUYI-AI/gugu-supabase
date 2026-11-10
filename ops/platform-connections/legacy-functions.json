@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "sourceCommit": "40dd744195204fce8c14cf00e81da5cfa80b45d0",
+  "baselinePostgres": "17.6",
+  "functions": [
+    { "signature": "identity.assistant_panel_snapshot(text)", "sha256": "9421e302b0e60cc7e00a9b7df3babb4eddeda150c4006ad3f78566950198ca3e" },
+    { "signature": "identity.assistant_panel_resource(text,text,text)", "sha256": "fcdabc85a17624ef9d3f36411238001dc5273845504f0a6fca25af2919581794" },
+    { "signature": "identity.assistant_panel_commit(text,uuid,text,text,bigint,text,jsonb,uuid,text,text,text)", "sha256": "b71a1fadf001f8a1b7b206969f3b935a8710ceac6833a7d87eb60bbcee0ddcb9" },
+    { "signature": "identity.assistant_panel_pending(text,text)", "sha256": "e6bb8dfb759ce405ebe1f6d465acd989529c938bb9e1c069c607250da57969af" },
+    { "signature": "identity.assistant_panel_ack(text,text,uuid,text)", "sha256": "02a0c689f93f1505ad9391e8a8245ca2832947e3a47c36b60192f4a2668f21bf" },
+    { "signature": "identity.assistant_panel_reject(text,text,uuid,text)", "sha256": "f6e29dcffc6532be4b7508a33d8a03306346ff1d6ce690985b3173a567ddc336" },
+    { "signature": "identity.assistant_panel_admit(text,text,bigint)", "sha256": "45ee50eab5fa9d77483ed1b34e79a9d83b8bd22166c5bdefe8ac80d5e999eb89" }
+  ]
+}

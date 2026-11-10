@@ -7,6 +7,11 @@ import { foundationDigest, installFoundation, installReleases, releases } from '
 import { topicResourcesFixture } from './topic-resources-fixture.mjs'
 import { installTopicResourcesConcurrently } from './topic-resource-concurrency.mjs'
 import { assertAllocatedProjectPublisher, assertNoChatFileHost } from './project-publisher-contract.mjs'
+import { installConnectionStateWithEvidence } from './platform-connection-state-fixture.mjs'
+import { assertOwnerConnectionRuntime } from './platform-connection-owner-fixture.mjs'
+import { assertConnectionAuthorityReader } from './platform-connection-authority-fixture.mjs'
+import { installConnectionEntryGateWithEvidence } from './platform-connection-upgrade-entry-fixture.mjs'
+import { assertConnectionManagementGate } from './platform-connection-upgrade-fixture.mjs'
 
 // Deliberately requires an empty, disposable Supabase PostgreSQL 17 instance.
 // Never resets schemas, migration history, or user data to make a test pass.
@@ -37,7 +42,40 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     const deviceCheckRelease = releases.find((release) => release.version.endsWith('_remove_archived_device_agents'))
     const validationRelease = releases.find((release) => release.constraintValidation)
     assert.ok(deviceCheckRelease && validationRelease)
+    let widgetUpgrade
     const releaseQuery = async (sql) => {
+      const entryGateRelease=releases.find(release=>release.version.endsWith('_connection_management_entrypoints'))
+      if(entryGateRelease && sql.includes(entryGateRelease.sql)){
+        return installConnectionEntryGateWithEvidence({db,query,sql,test:(name,action)=>t.test(name,action)})
+      }
+      const upgradeGateRelease = releases.find(release => release.version.endsWith('_connection_management_upgrade_gate'))
+      if (upgradeGateRelease && sql.includes(upgradeGateRelease.sql)) {
+        const result = await query(sql)
+        await query('BEGIN')
+        try { await assertConnectionManagementGate(db, (name, action) => t.test(name, action)) }
+        finally { await query('ROLLBACK') }
+        return result
+      }
+      const authorityRelease = releases.find((release) => release.version.endsWith('_connection_authority_read'))
+      if (authorityRelease && sql.includes(authorityRelease.sql)) {
+        const result = await query(sql)
+        await query('BEGIN')
+        try { await assertConnectionAuthorityReader(db, (name, action) => t.test(name, action)) }
+        finally { await query('ROLLBACK') }
+        return result
+      }
+      const ownerConnectionRelease = releases.find((release) => release.version.endsWith('_owner_connection_runtime'))
+      if (ownerConnectionRelease && sql.includes(ownerConnectionRelease.sql)) {
+        const result = await query(sql)
+        await query('BEGIN')
+        try { await assertOwnerConnectionRuntime(db, (name, action) => t.test(name, action)) }
+        finally { await query('ROLLBACK') }
+        return result
+      }
+      const connectionRelease = releases.find((release) => release.version.endsWith('_platform_connection_state'))
+      if (connectionRelease && sql.includes(connectionRelease.sql)) {
+        return installConnectionStateWithEvidence({ db, query, sql, release: connectionRelease, test: (name, action) => t.test(name, action) })
+      }
       const supportRelease = releases.find(release => release.version.endsWith('_support_agent_boundary'))
       if (supportRelease && sql.includes(supportRelease.sql)) {
         const snapshot = async () => ({
@@ -90,6 +128,55 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
           await query('BEGIN;\n' + projectMetadataRelease.sql + '\nCOMMIT;')
           assert.deepEqual(await snapshot(), after)
           assert.deepEqual(await ledger(), installedLedger)
+        })
+        return result
+      }
+      if (sql.includes(releases.find(release => release.version.endsWith('_widget_identity'))?.sql)) {
+        const owner = randomUUID(), group = randomUUID(), valid = randomUUID(), bad = randomUUID(), old = randomUUID(), forged = randomUUID(), between = randomUUID()
+        await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Widget identity upgrade')", [owner])
+        await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'group','Widget identity upgrade',$2)", [group, owner])
+        await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner')", [group, owner])
+        const content = JSON.stringify({ v: 2, text: 'Legacy counter', app: 'counter', view: 'main', data: { p: 'x'.repeat(4088) } })
+        const forgedContent = JSON.stringify({ v: 2, text: 'Forged legacy identity', app: 'counter', view: 'main', wid: valid })
+        for (const [id, body] of [[valid, content], [bad, '{'], [old, '{"v":1,"title":"Legacy"}'], [forged, forgedContent]]) {
+          await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type) VALUES($1,$2,$3,$4,'widget')", [id, group, owner, body])
+        }
+        const result = await query(sql)
+        await t.test('the widget DDL release registers new sends only, leaving history to its own release', async () => {
+          assert.equal((await db.query('SELECT id FROM chat.widgets WHERE chat_id=$1', [group])).rowCount, 0)
+          // A legacy client's send between the two releases: the trigger registers it under its message id.
+          await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type) VALUES($1,$2,$3,$4,'widget')", [between, group, owner, content])
+          assert.deepEqual((await db.query('SELECT id FROM chat.widgets WHERE chat_id=$1', [group])).rows, [{ id: between }])
+          const guards = (await db.query("SELECT tgname, pg_get_triggerdef(oid) AS def FROM pg_trigger WHERE tgrelid='chat.messages'::regclass AND tgname LIKE 'widget_identity_guard%' ORDER BY tgname")).rows
+          assert.deepEqual(guards.map(row => row.tgname), ['widget_identity_guard_insert', 'widget_identity_guard_update'])
+          assert.ok(guards.every(row => row.def.includes("'widget'")), 'only widget rows reach the guard')
+        })
+        widgetUpgrade = { owner, group, valid, forged, between, content, forgedContent }
+        return result
+      }
+      const backfillRelease = releases.find(release => release.version.endsWith('_widget_identity_backfill'))
+      if (backfillRelease && sql.includes(backfillRelease.sql)) {
+        const { owner, group, valid, forged, between, content, forgedContent } = widgetUpgrade
+        const result = await query(sql)
+        await t.test('widget identities backfill valid v2 once without rewriting historical messages', async () => {
+          const rows = (await db.query('SELECT id,message_id,created_by FROM chat.widgets WHERE chat_id=$1', [group])).rows
+          assert.deepEqual(rows.sort((a,b) => a.id.localeCompare(b.id)),
+            [valid,forged,between].sort().map(id => ({ id, message_id: id, created_by: owner })))
+          assert.equal((await db.query('SELECT content FROM chat.messages WHERE id=$1', [valid])).rows[0].content, content)
+          assert.deepEqual((await db.query('SELECT id,message_id FROM chat.widgets WHERE message_id=$1', [forged])).rows,
+            [{ id: forged, message_id: forged }])
+          assert.equal((await db.query('SELECT content FROM chat.messages WHERE id=$1', [forged])).rows[0].content, forgedContent)
+          await db.query('BEGIN; SET LOCAL ROLE authenticated')
+          try {
+            await db.query("SELECT set_config('request.jwt.claim.sub',$1,true)", [owner])
+            assert.deepEqual((await db.query('SELECT id,widget_id FROM chat.message_history_as($1,$2) WHERE id=$3', [group, owner, forged])).rows,
+              [{ id: forged, widget_id: forged }])
+          } finally { await db.query('ROLLBACK') }
+          await query('BEGIN;\n' + backfillRelease.sql + '\nCOMMIT;')
+          assert.equal((await db.query('SELECT id FROM chat.widgets WHERE chat_id=$1', [group])).rowCount, 3)
+          for (const signature of ['chat.register_widget_message(chat.messages)', 'chat.widget_spec(text)']) {
+            assert.equal((await db.query("SELECT has_function_privilege('authenticated',$1,'EXECUTE') AS allowed", [signature])).rows[0].allowed, false)
+          }
         })
         return result
       }
@@ -421,7 +508,7 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
       await db.query('ROLLBACK')
     }
     await t.test('project metadata tables are closed and only intended read/publish APIs are granted', async () => {
-      for (const table of ['file_device_revisions','file_temporary_transfers']) {
+      for (const table of ['file_contents','file_temporary_transfers']) {
         assert.equal((await query(`SELECT relrowsecurity AS enabled FROM pg_class WHERE oid='chat.${table}'::regclass`))[0].enabled, true)
         for (const role of ['anon','authenticated']) {
           for (const privilege of ['SELECT','INSERT','UPDATE','DELETE']) {
@@ -430,7 +517,7 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
         }
       }
       for (const signature of ['file_project_policy_as(text,text,text,boolean,boolean,text)','file_project_policy_for(text,text)',
-        'file_device_publish(uuid,text,text,text,text,bigint,text,text,integer,uuid,jsonb,text)','file_resolve_as(jsonb,text)']) {
+        'file_device_publish(uuid,text,text,text,text,bigint,text,text,integer,uuid,jsonb,text,integer,integer)','file_resolve_as(jsonb,text)']) {
         assert.equal((await db.query("SELECT has_function_privilege('authenticated',$1,'EXECUTE') AS allowed", ['chat.'+signature])).rows[0].allowed, true)
         assert.equal((await db.query("SELECT has_function_privilege('anon',$1,'EXECUTE') AS allowed", ['chat.'+signature])).rows[0].allowed, false)
       }

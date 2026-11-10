@@ -202,7 +202,9 @@ Deno.serve(async (request) => {
         return json({ error: 'invalid', message: `no route ${route}` }, 404)
     }
   } catch (error) {
-    if (error instanceof Refusal) return json({ error: error.code, message: error.message }, error.status)
+    if (error instanceof Refusal) {
+      return json({ error: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) }, error.status)
+    }
     log('failed', { route, error_type:error instanceof Error?error.name:'unknown' })
     return json({ error: 'failed', message: 'attachments failed; try again' }, 500)
   }
