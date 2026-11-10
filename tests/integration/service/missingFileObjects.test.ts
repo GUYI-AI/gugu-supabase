@@ -16,9 +16,13 @@ beforeEach(async () => {
   await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'group','missing file',$2)", [group, owner])
   await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner')", [group, owner])
   await db.query("INSERT INTO storage.objects(bucket_id,name,owner,owner_id,metadata) VALUES('chat-media',$1,$2::uuid,$2::text,jsonb_build_object('size',123,'mimetype','image/png'))", [object, owner])
-  await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content_type,content,storage_bucket_id,storage_object_name) VALUES($1,$2,$3,'attachment',$4,'chat-media',$5)",
-    [message, group, owner, `[附件] missing.png (image/png)\n[URL] https://fixture.invalid/storage/v1/object/public/chat-media/${object}\n[Size] 123\n[Kind] image`, object])
-  await db.query("INSERT INTO chat.file_transfer_storage(bucket_id,object_name,size_bytes,state,owner_account) VALUES('chat-media',$1,123,'gone',$2)", [object, owner])
+  // An adopted card (20261110053000): the chat-media object is a blob, a file in the chat's 附件 folder, pinned by the message.
+  const item = (await db.query("SELECT (chat.attachment_item_for($1, chat.file_blob_for_object('chat-media',$2), 'missing.png', $3, $4)).id AS id",
+    [group, object, owner, message])).rows[0].id
+  await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content_type,content,file_item_id,file_version) VALUES($1,$2,$3,'attachment',chat.workspace_version_envelope($4,1),$4,1)",
+    [message, group, owner, item])
+  // Placing the file recorded its storage; the operator marks that object confirmed missing.
+  await db.query("INSERT INTO chat.file_transfer_storage(bucket_id,object_name,size_bytes,state,owner_account) VALUES('chat-media',$1,123,'gone',$2) ON CONFLICT (bucket_id,object_name) DO UPDATE SET state='gone'", [object, owner])
 })
 afterEach(async () => { await db.query('ROLLBACK') })
 async function read(actor: string) {

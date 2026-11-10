@@ -52,7 +52,7 @@ async function read(token = ownerToken) {
   })
   const text = await response.text()
   expect(response.status).toBe(200)
-  return { data: JSON.parse(text) as Array<{ id: string; preview: string; preview_source: string | null }>, bytes: Buffer.byteLength(text) }
+  return { data: JSON.parse(text) as Array<{ id: string; preview: string | null; preview_source: string | null }>, bytes: Buffer.byteLength(text) }
 }
 
 describe('the chat list preview RPC through the real Data API', () => {
@@ -61,26 +61,27 @@ describe('the chat list preview RPC through the real Data API', () => {
     const small = await read()
     expect(small.data[0]?.id).toBe(ordinary)
     expect(small.data[0]).toHaveProperty('preview_source')
-    expect(small.data[0]?.preview.length).toBe(100)
+    expect(small.data[0]?.preview?.length).toBe(100)
     expect(small.data[0]?.preview_source === null).toBe(true)
     expect(small.bytes).toBeLessThan(512)
     const source = 'x'.repeat(70000) + '\n\ngugu-widget://fixture'
     const reference = await post(source)
     const full = await read()
     expect(full.data[0]?.id).toBe(reference)
-    expect(full.data[0]?.preview.length).toBe(100)
+    expect(full.data[0]?.preview?.length).toBe(100)
     expect(full.data[0]?.preview_source === source).toBe(true)
   })
 
-  it('returns no row to a signed-in non-member and suppresses source after personal deletion or retraction', async () => {
+  it('returns no row to a signed-in non-member, skips a message deleted for the viewer and says nothing of a recalled one', async () => {
     const id = await post('gugu-widget://viewer-private')
     expect((await read(peerToken)).data).toEqual([])
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [group, peer])
     expect((await read(peerToken)).data[0]?.preview_source).toBe('gugu-widget://viewer-private')
     await db.query('UPDATE chat.messages SET deleted_for_user_ids=$1::jsonb WHERE id=$2', [JSON.stringify([owner]), id])
-    expect((await read()).data[0]?.preview_source).toBeNull()
+    // Deleted for the owner: not the owner's latest message any more (20261110054000).
+    expect((await read()).data.find(row => row.id === id)).toBeUndefined()
     expect((await read(peerToken)).data[0]?.preview_source).toBe('gugu-widget://viewer-private')
     await db.query('UPDATE chat.messages SET retracted_at=now() WHERE id=$1', [id])
-    expect((await read(peerToken)).data[0]?.preview_source).toBeNull()
+    expect((await read(peerToken)).data[0]).toMatchObject({ id, preview: '[Recalled]', preview_source: null })
   })
 })

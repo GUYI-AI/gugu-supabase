@@ -182,8 +182,6 @@ function fakes(opts: {
   afterGet?: (bucket: Bucket) => void
   /** 登记成功之后。 */
   afterRegister?: (bucket: Bucket) => void
-  /** 转发的原消息是老式附件:库说的那一行,和 chat-media 里那个对象的字节(null = 对象没了)。 */
-  legacy?: { row: { object_name: string; file_name: string; content_type: string | null }; bytes: Uint8Array | null }
   /** 按引用发的是文本文件:它此刻的正文,和库里最新一版已经带着字节的正文(null = 没有带字节的一版)。 */
   document?: { text: string; snapshotted: string | null }
 } = {}) {
@@ -206,10 +204,6 @@ function fakes(opts: {
       const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>))
       calls.push({ method: init?.method ?? 'GET', url, headers })
       if ((init?.method ?? 'GET') === 'GET' && new URL(url).searchParams.has('versioning')) return new Response('<VersioningConfiguration/>',{status:200})
-      if ((init?.method ?? 'GET') === 'GET' && url.startsWith('https://db.example/storage/v1/object/sign/')) {
-        const bytes = opts.legacy?.bytes
-        return bytes ? new Response(bytes as unknown as BodyInit, { status: 200 }) : new Response('{"error":"not_found"}', { status: 400 })
-      }
       if ((init?.method ?? 'GET') === 'GET' && url.includes('/staging/')) {
         const staged = bucket.staging
         if (!staged) return new Response('<Error><Code>NoSuchKey</Code></Error>', { status: 404 })
@@ -265,17 +259,12 @@ function fakes(opts: {
           sha256:'ab'.repeat(32),size_bytes:old?5:ref.message_id?7:10,
           content_type:old?'application/x':ref.message_id?'application/pdf':'image/png',width:old?null:640,height:old?null:480,
           download_id:args.p_id,signed_at:'2026-10-16T12:00:00Z',expires_at:'2026-10-16T12:01:00.000Z',transfer_id:null,
-          ...(opts.legacy&&ref.message_id?{bucket_id:'chat-media',object_name:opts.legacy.row.object_name,
-            file_name:opts.legacy.row.file_name,content_type:opts.legacy.row.content_type,size_bytes:opts.legacy.bytes?.length??1}:{}),
         },error:null}
       }
       rpcs.push({ as: 'user', fn, args })
       if (fn === 'attachment_commit') return { data: [{ id: args.p_message_id, file_version: 1 }], error: null }
       if (fn === 'send_friend_file_as_owner') return { data: { chat_id: 'dm-1', message_id: 'm-o', sender_user_id: USER, sent_by_agent: true }, error: null }
-      if (fn === 'attachment_legacy_source') return { data: opts.legacy ? [opts.legacy.row] : [], error: null }
       if (fn === 'attachment_forward') {
-        // 老式的原消息、又没带上传:库说要字节(和迁移里那一句同一个 HINT)。
-        if (opts.legacy && !args.p_staging_key) return { data: null, error: { message: 'message old-1 is an old attachment: forward it through attachments/forward', hint: 'attachment_forward_needs_bytes', code: 'P0001' } }
         return { data: [{ id: args.p_message_id, forwarded_from_message_id: args.p_source_message_id }], error: null }
       }
       if (fn === 'attachment_document_snapshot') {
@@ -807,27 +796,7 @@ describe('按引用发(share)', () => {
 describe('转发', () => {
   const FWD = '33333333-3333-4333-8333-333333333333'
   const forwardBody = { source_message_id: 'old-1', message_id: FWD, chat_id: 'c2', sender_user_id: USER }
-  it('老式附件:先照旧转、库说要字节 → 库说出它在 chat-media 的对象 → 读出字节放进暂存(按这条新消息起名)→ 和提交同一步登记 → 带上这次上传再转', async () => {
-    const bytes = pngBytes()
-    const { deps, calls, rpcs } = fakes({ legacy: { row: { object_name: `${USER}/abc-old.png`, file_name: 'old.png', content_type: 'image/png' }, bytes } })
-    const message = await handleForward(deps, USER, forwardBody)
-    expect(message).toMatchObject({ id: FWD, forwarded_from_message_id: 'old-1' })
-    const key = `staging/${USER}/${FWD}`
-    expect(calls.map((c) => `${c.method} ${c.url.replace(/\?.*$/, '')}`)).toEqual([
-      `GET https://db.example/storage/v1/object/sign/chat-media/${USER}/abc-old.png`,
-      `PUT https://gugu-files-test.oss-cn-wulanchabu-internal.aliyuncs.com/${key}`,
-      `GET https://gugu-files-test.oss-cn-wulanchabu-internal.aliyuncs.com/${key}`,
-      expect.stringMatching(/^PUT https:\/\/gugu-files-test\.oss-cn-wulanchabu\.aliyuncs\.com\/[0-9a-f]{2}\/[0-9a-f]{64}$/),
-      expect.stringMatching(/^HEAD https:\/\/gugu-files-test\.oss-cn-wulanchabu\.aliyuncs\.com\/[0-9a-f]{2}\/[0-9a-f]{64}$/),
-    ])
-    expect(rpcs.map((r) => `${r.as} ${r.fn}`)).toEqual(['user attachment_forward', 'user attachment_legacy_source', 'service file_blob_register', 'user attachment_forward'])
-    expect(rpcs[0]!.args).not.toHaveProperty('p_staging_key')
-    expect(rpcs[1]!.args).toEqual({ p_source_message_id: 'old-1' })
-    expect(rpcs[2]!.args).toMatchObject({ p_uploader: USER, p_staging_key: key, p_size_bytes: bytes.length, p_content_type: 'image/png' })
-    expect(rpcs[3]!.args).toMatchObject({ p_source_message_id: 'old-1', p_message_id: FWD, p_chat_id: 'c2', p_staging_key: key })
-  })
-
-  it('新式附件:一次就转完 —— 不问老式来源(函数先于迁移上线时旧库里还没有它)、不碰 chat-media、不放暂存', async () => {
+  it('转发只问一次库:不碰 Storage、不放暂存', async () => {
     const { deps, calls, rpcs } = fakes()
     await handleForward(deps, USER, forwardBody)
     expect(calls).toEqual([])
@@ -835,11 +804,6 @@ describe('转发', () => {
     expect(rpcs[0]!.args).not.toHaveProperty('p_staging_key')
   })
 
-  it('老式附件的字节在 chat-media 里已经没了:说清楚(410 source_gone),不转', async () => {
-    const { deps, rpcs } = fakes({ legacy: { row: { object_name: `${USER}/gone.png`, file_name: 'gone.png', content_type: 'image/png' }, bytes: null } })
-    await expect(handleForward(deps, USER, forwardBody)).rejects.toMatchObject({ status: 410, code: 'source_gone' })
-    expect(rpcs.map((r) => r.fn)).toEqual(['attachment_forward', 'attachment_legacy_source'])
-  })
 })
 
 

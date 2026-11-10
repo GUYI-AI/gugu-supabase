@@ -55,50 +55,22 @@ afterEach(async () => {
 })
 
 describe('Agent sends on behalf of its owner (#7299)', () => {
-  async function attachment(prefix = owner, kind = 'file') {
-    const object = `${prefix}/${randomUUID()}.${kind === 'image' ? 'png' : 'pdf'}`
+  // Files go through send_friend_file_as_owner (the attachments function); since 20261110053000 this RPC sends text only:
+  // no content type or storage parameters to name.
+  it('sends text only: no attachment or system kind to ask for, and a card\'s words stay text', async () => {
+    expect(await rejected('SELECT chat.send_friend_message_as_owner($1,$2,$3,$4,$5,$6,$7)',
+      [agent, friend, 'system', 'bad-kind', 'system', null, null])).toMatch(/does not exist/)
+    const object = `${owner}/${randomUUID()}.pdf`
     await db.query('RESET role')
-    await db.query('INSERT INTO storage.objects(bucket_id,name,owner_id,metadata) VALUES (\'chat-media\',$1,$2,\'{"size":3}\')', [object, prefix])
+    await db.query('INSERT INTO storage.objects(bucket_id,name,owner_id,metadata) VALUES (\'chat-media\',$1,$2,\'{"size":3}\')', [object, owner])
     await asUser(owner)
-    const mime = kind === 'image' ? 'image/png' : 'application/pdf'
-    return { object, content: `[附件] 研究资料.${kind === 'image' ? 'png' : 'pdf'} (${mime})\n[URL] https://storage.test/storage/v1/object/public/chat-media/${object}\n[Size] 3\n[Kind] ${kind}` }
-  }
-  const sendAttachment = 'SELECT chat.send_friend_message_as_owner($1,$2,$3,$4,\'attachment\',\'chat-media\',$5) AS result'
-
-  it.each(['image', 'file'])('sends a real canonical %s attachment with owner attribution and private Agent source', async kind => {
-    const file = await attachment(owner, kind)
-    const values = [agent, friend, file.content, 'file-one', file.object]
-    const result = (await db.query<{ result: { chat_id: string; message_id: string } }>(sendAttachment, values)).rows[0]!.result
-    expect((await db.query(sendAttachment, values)).rows[0]!.result).toEqual(result)
-    expect((await db.query('SELECT content_type,sent_by_agent,agent_sender FROM chat.messages_view WHERE id=$1', [result.message_id])).rows).toEqual([{
-      content_type: 'attachment', sent_by_agent: true, agent_sender: { id: agent, name: 'Private Researcher' },
-    }])
-    expect((await db.query('SELECT storage_bucket_id,storage_object_name FROM chat.messages WHERE id=$1', [result.message_id])).rows).toEqual([{ storage_bucket_id: 'chat-media', storage_object_name: file.object }])
-    const other = await attachment(owner, kind)
-    expect(await rejected(sendAttachment, [agent, friend, other.content, 'file-one', other.object])).toContain('Idempotency conflict')
-    await asUser(friend)
-    const incoming = (await db.query('SELECT * FROM chat.messages_view WHERE id=$1', [result.message_id])).rows[0]!
-    expect(incoming).toMatchObject({ content: file.content, content_type: 'attachment', sender_user_id: owner, sent_by_agent: true, agent_sender: null })
-    expect(JSON.stringify(incoming)).not.toContain(agent)
-    expect((await db.query('SELECT * FROM chat.message_agent_sends WHERE message_id=$1', [result.message_id])).rows).toEqual([])
-    expect((await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [result.chat_id, agent])).rows).toEqual([])
-    expect((await db.query('SELECT chat_id FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2 AND inbox_published_at IS NOT NULL', [result.chat_id, friend])).rows).toEqual([{ chat_id: result.chat_id }])
-  })
-  it('refuses another person’s object, Agent-identifying paths, missing files and mismatched references', async () => {
-    for (const prefix of [friend, agent]) {
-      const file = await attachment(prefix)
-      expect(await rejected(sendAttachment, [agent, friend, file.content, 'bad-file', file.object])).toContain('canonical chat-media object')
-    }
-    const file = await attachment()
-    expect(await rejected(sendAttachment, [agent, friend, file.content, 'bad-reference', `${owner}/different.pdf`])).toContain('canonical chat-media object')
-    const missing = `${owner}/missing.pdf`
-    expect(await rejected(sendAttachment, [agent, friend, file.content.replaceAll(file.object, missing), 'missing-file', missing])).toContain('storage reference target does not exist')
-    expect((await db.query('SELECT * FROM chat.message_agent_sends WHERE agent_user_id=$1', [agent])).rows).toEqual([])
-  })
-  it('rejects system messages and storage references disguised as text', async () => {
-    const sql = 'SELECT chat.send_friend_message_as_owner($1,$2,$3,$4,$5,$6,$7)'
-    expect(await rejected(sql, [agent, friend, 'system', 'bad-kind', 'system', null, null])).toContain('Only text and attachment')
-    expect(await rejected(sql, [agent, friend, 'text', 'bad-storage', 'text', 'chat-media', `${owner}/file.pdf`])).toContain('Text messages cannot carry')
+    const card = `[附件] 研究资料.pdf (application/pdf)\n[URL] https://storage.test/storage/v1/object/public/chat-media/${object}\n[Size] 3\n[Kind] file`
+    // The same words sent as text stay text: no attachment, no Storage reference.
+    const sent = (await db.query<{ result: { message_id: string } }>('SELECT chat.send_friend_message_as_owner($1,$2,$3,$4) AS result',
+      [agent, friend, card, 'card-as-text'])).rows[0]!.result
+    await db.query('RESET role')
+    expect((await db.query('SELECT content_type,storage_bucket_id,file_item_id,file_blob_id FROM chat.messages WHERE id=$1', [sent.message_id])).rows)
+      .toEqual([{ content_type: 'text', storage_bucket_id: null, file_item_id: null, file_blob_id: null }])
   })
   it('writes a human-owned DM with exactly two people, no invitation or Agent membership', async () => {
     const result = await send()

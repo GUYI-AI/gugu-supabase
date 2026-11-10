@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 /**
  * file_urls_as decides message visibility for the messages a caller names, not for every attachment
  * message the planner happens to scan. With the visibility check as a scan filter, a hash join from the
- * refs to a message index ran chat.can_read_message once per legacy card in the database (seen on
+ * refs to a message index ran chat.can_read_message once per attachment card in the database (seen on
  * staging: ~15k buffers per single-ref call). Each case runs inside BEGIN…ROLLBACK.
  */
 interface DatabaseClient {
@@ -46,22 +46,25 @@ async function group(members: string[]): Promise<string> {
   await database.query("INSERT INTO chat.chat_members (chat_id, user_id, role) SELECT $1, u, 'member' FROM unnest($2::text[]) u", [id, members])
   return id
 }
-/** `count` legacy chat-media cards from `sender` in `chat`, the shape old clients wrote. */
-async function legacyCards(sender: string, chat: string, count: number): Promise<string[]> {
+/**
+ * `count` whisper cards from `sender` in `chat` to `to`: messages that name their bytes directly (file_blob_id), the only
+ * attachments a message reference resolves since old chat-media cards were adopted into files (20261110053000).
+ */
+async function cards(sender: string, chat: string, count: number, to: string): Promise<string[]> {
   await database.query('RESET role')
   const { rows } = await database.query<{ id: string }>(`
     WITH o AS (
       INSERT INTO storage.objects (bucket_id, name, metadata)
       SELECT 'chat-media', $1 || '/' || gen_random_uuid() || '-card.bin', '{"size":409,"mimetype":"application/octet-stream"}'
         FROM generate_series(1, $3::integer)
-      RETURNING name)
-    INSERT INTO chat.messages (id, chat_id, sender_user_id, content, content_type, storage_bucket_id, storage_object_name)
-    SELECT gen_random_uuid()::text, $2, $1,
-           '[附件] card.bin (application/octet-stream)' || E'\\n[URL] https://db.file-urls-cost.test/storage/v1/object/public/chat-media/'
-             || o.name || E'\\n[Size] 409\\n[Kind] file',
-           'attachment', 'chat-media', o.name
-      FROM o
-    RETURNING id`, [sender, chat, count])
+      RETURNING name), b AS (
+      SELECT gen_random_uuid()::text AS message, chat.file_blob_for_object('chat-media', o.name) AS blob FROM o), u AS (
+      INSERT INTO chat.file_blob_uploads (staging_key, uploader, blob_id, message_id)
+      SELECT 'staging/' || $1 || '/' || gen_random_uuid(), $1, b.blob, b.message FROM b RETURNING message_id, blob_id)
+    INSERT INTO chat.messages (id, chat_id, sender_user_id, content, content_type, is_whisper, to_user_ids, file_blob_id)
+    SELECT u.message_id, $2, $1, chat.attachment_envelope('card.bin', 409, 'application/octet-stream'), 'attachment', true, ARRAY[$4], u.blob_id
+      FROM u
+    RETURNING id`, [sender, chat, count, to])
   return rows.map(r => r.id)
 }
 async function urls(as: string, refs: unknown[]): Promise<{ message_id: string; object_name: string }[]> {
@@ -84,12 +87,12 @@ describe('file_urls_as visibility cost', () => {
   it('does not grow with attachment messages the caller did not name', async () => {
     const alice = await human(), reader = await human(), stranger = await human()
     const shared = await group([alice, reader])
-    const [target] = await legacyCards(alice, shared, 1)
+    const [target] = await cards(alice, shared, 1, reader)
     // The staging plan: refs hashed against a scan of a message index. Force that join shape so the
     // check does not depend on this database's statistics.
     await database.query('SET LOCAL enable_nestloop = off')
     const quiet = await buffers(reader, [{ message_id: target }])
-    await legacyCards(alice, await group([alice, stranger]), 300)
+    await cards(alice, await group([alice, stranger]), 300, stranger)
     const busy = await buffers(reader, [{ message_id: target }])
     expect(busy - quiet).toBeLessThan(150)
     expect(await urls(reader, [{ message_id: target }])).toEqual([expect.objectContaining({ message_id: target })])
@@ -98,8 +101,8 @@ describe('file_urls_as visibility cost', () => {
   it('returns exactly the named cards the caller may read, once each', async () => {
     const alice = await human(), reader = await human(), stranger = await human()
     const shared = await group([alice, reader]), hidden = await group([alice, stranger])
-    const [mine, other] = await legacyCards(alice, shared, 2)
-    const [secret] = await legacyCards(alice, hidden, 1)
+    const [mine, other] = await cards(alice, shared, 2, reader)
+    const [secret] = await cards(alice, hidden, 1, stranger)
     const asked = [{ message_id: mine }, { message_id: secret }, { message_id: mine }, { message_id: other }, { message_id: 'not-a-message' }]
     expect((await urls(reader, asked)).map(r => r.message_id).sort()).toEqual([mine, other].sort())
     expect((await urls(stranger, asked)).map(r => r.message_id)).toEqual([secret])
