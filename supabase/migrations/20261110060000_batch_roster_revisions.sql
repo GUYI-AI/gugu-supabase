@@ -287,10 +287,6 @@ BEGIN
         IF member_user_id IS NULL OR member_user_id = p_owner_user_id OR member_user_id = ANY (seat_user_ids) THEN
             CONTINUE;
         END IF;
-        -- #1761 云 agent 禁入群（fail-loud，不静默跳过）
-        IF chat.is_cloud_agent_user(member_user_id) THEN
-            RAISE EXCEPTION 'cloud agent % cannot join groups (#1761)', member_user_id;
-        END IF;
         -- 群只有一个 owner(= 创建者);初始成员只能是 member/admin。
         IF member_role NOT IN ('member', 'admin') THEN
             RAISE EXCEPTION 'initial member % cannot have role %', member_user_id, member_role;
@@ -317,5 +313,5 @@ BEGIN
     RETURN inserted;
 END;
 $function$;
-REVOKE ALL ON FUNCTION chat.create_gugu_group(text, text, text, jsonb, text, text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION chat.create_gugu_group(text, text, text, jsonb, text, text) FROM PUBLIC, anon, service_role;
 GRANT EXECUTE ON FUNCTION chat.create_gugu_group(text, text, text, jsonb, text, text) TO authenticated;
