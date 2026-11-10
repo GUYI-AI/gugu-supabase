@@ -1,4 +1,4 @@
--- Roll back 20261110060000_batch_roster_revisions: every inserted seat, and every seat whose
+-- Roll back 20261110062000_batch_roster_revisions: every inserted seat, and every seat whose
 -- role or listen mode changes, publishes chat_members_changed to each member again (row level),
 -- topic seats tell the source line once per seat, and create_gugu_group seats its initial
 -- members one INSERT at a time. Function bodies are the parent release's, as installed.

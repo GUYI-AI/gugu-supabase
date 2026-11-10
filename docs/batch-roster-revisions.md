@@ -1,6 +1,6 @@
 # Roster revisions: one per recipient per statement
 
-Release `20261110060000_batch_roster_revisions`. Rollback: `ops/rollback-batch-roster-revisions.sql`.
+Release `20261110062000_batch_roster_revisions`. Rollback: `ops/rollback-batch-roster-revisions.sql`.
 
 ## What a roster revision says
 
