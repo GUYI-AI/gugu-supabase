@@ -64,7 +64,7 @@ describe('the chat list preview carries reference source only when it may', () =
     expect((await read(outsider))[0]?.preview_source).toBe('gugu-widget://private')
     await db.query('UPDATE chat.messages SET retracted_at=now() WHERE id=$1', [id])
     // Recalled: still the latest message, saying nothing of what it said.
-    expect(await read(outsider)).toEqual([{ id, preview: null, preview_source: null }])
+    expect(await read(outsider)).toEqual([{ id, preview: '[Recalled]', preview_source: null }])
   })
 
   it('keeps the list RPC a stable invoker function for signed-in people only, and adds no messages column', async () => {

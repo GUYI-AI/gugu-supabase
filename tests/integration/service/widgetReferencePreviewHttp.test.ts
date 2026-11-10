@@ -82,6 +82,6 @@ describe('the chat list preview RPC through the real Data API', () => {
     expect((await read()).data.find(row => row.id === id)).toBeUndefined()
     expect((await read(peerToken)).data[0]?.preview_source).toBe('gugu-widget://viewer-private')
     await db.query('UPDATE chat.messages SET retracted_at=now() WHERE id=$1', [id])
-    expect((await read(peerToken)).data[0]).toMatchObject({ id, preview: null, preview_source: null })
+    expect((await read(peerToken)).data[0]).toMatchObject({ id, preview: '[Recalled]', preview_source: null })
   })
 })

@@ -57,7 +57,7 @@ it('the snapshot and the hydrate read return the same preview for every chat', a
   }
   const by = (label: string) => listed.find(r => r.chat_id === chats.get(label))!
   expect(by('link').preview_source).toBe('see gugu-chat://abc/def')
-  expect([by('recalled').preview, by('recalled').preview_source, by('recalled').retracted_at === null]).toEqual([null, null, false])
+  expect([by('recalled').preview, by('recalled').preview_source, by('recalled').retracted_at === null]).toEqual(['[Recalled]', null, false])
   expect(by('deleted_for_me').preview).toBe('earlier')
   expect(by('whisper').preview).toBe('earlier')
   expect(by('text').preview).toBe('hello')

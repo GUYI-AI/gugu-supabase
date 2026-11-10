@@ -8,7 +8,9 @@
 --
 -- chat.list_chat_previews is now the definition and chat.sync_snapshot calls it: same view, same preview function
 -- (chat.message_preview, which chat.preview wraps), one
--- visibility rule (stated in it) for every column. Rows gain retracted_at; a recalled latest message has no preview text.
+-- visibility rule (stated in it) for every column. Rows gain retracted_at; a recalled latest message previews as
+-- '[Recalled]' (the placeholder convention of chat.message_preview, as '[Widget]'), never its text, so released clients
+-- still draw the row; retracted_at is the marker a client localizes.
 -- sync_snapshot's previews keep one row per conversation and gain preview_source and retracted_at.
 --
 -- Locks: replacing and dropping functions locks no table. Rollback: ops/rollback-one-chat-preview.sql.
@@ -28,10 +30,11 @@ BEGIN
     IF p_chat_ids IS NULL THEN RAISE EXCEPTION 'chat ids are required'; END IF;
     -- Each chat's latest message the viewer can see: messages_view (security invoker, so the messages RLS: membership,
     -- hidden history, deleted), not a whisper, not waiting for its agent, not deleted for the viewer. A recalled message
-    -- stays the latest but says nothing of what it said: no preview text, no link source; retracted_at tells the reader.
+    -- stays the latest but says nothing of what it said: the '[Recalled]' placeholder, no link source; retracted_at marks it.
     RETURN QUERY
     SELECT latest.id, latest.chat_id, latest.created_at,
-           CASE WHEN latest.retracted_at IS NULL THEN chat.message_preview(latest.content, latest.content_type) END, latest.seq,
+           CASE WHEN latest.retracted_at IS NULL THEN chat.message_preview(latest.content, latest.content_type)
+                ELSE '[Recalled]' END, latest.seq,
            latest.content_type, latest.sender_user_id, latest.client_message_id,
            CASE WHEN latest.content_type = 'text' AND latest.retracted_at IS NULL
                AND lower(coalesce(latest.content, '')) LIKE ANY (ARRAY['%gugu-chat://%', '%gugu-widget://%'])
