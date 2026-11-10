@@ -29,6 +29,8 @@ export interface DbError {
   hint?: string | null
   code?: string | null
   details?: string | null
+  /** The HTTP status PostgREST answered with; 0 when the request never reached it. */
+  status?: number
 }
 export type Rpc = (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: DbError | null }>
 
@@ -119,6 +121,17 @@ export function refusalFromDb(error: DbError): Refusal {
   if (error.code === 'PT429') return new Refusal(429, 'rate_limited', error.message)
   if (error.code === '23505' || error.code === 'check_violation' || error.code === '23514') return new Refusal(400, 'invalid', error.message)
   return new Refusal(500, 'failed', error.message)
+}
+
+/**
+ * Who is calling (chat.attachments_principal): the id, or the refusal to answer with. Only PostgREST's 401 (no, bad or expired
+ * token) and a null principal (deleted, banned, session gone) mean signed out; anything else is the service failing.
+ */
+export async function principalOf(rpc: Rpc): Promise<string> {
+  const { data, error } = await rpc('attachments_principal', {})
+  if (error && error.status !== 401) throw new Refusal(503, 'unavailable', 'could not check your sign-in; try again')
+  if (error || typeof data !== 'string') throw new Refusal(401, 'denied', 'sign in first')
+  return data
 }
 
 export async function call(rpc: Rpc, fn: string, args: Record<string, unknown>): Promise<unknown> {
