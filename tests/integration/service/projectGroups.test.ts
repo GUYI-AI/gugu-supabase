@@ -117,6 +117,24 @@ describe('publishing records the project group', () => {
     expect(await recorded(theirs)).toBe(false)
   }))
 
+  // 20261110040000: v2 is the only implementation and reports the rows whose group was refused; the old name wraps it.
+  it('publish_device_projects_v2 reports the refused bindings; the old name answers whether anything changed', () => inRollback(async () => {
+    const mine = randomUUID()
+    const theirs = randomUUID()
+    await createGroup(mine, colleague, 'mine')
+    await createGroup(theirs, owner)
+    const payload = (rows: Published[]) => JSON.stringify(rows.map(({ local, chat, path = '/work' }) => ({
+      local_project_id: local, name: 'n', root_path: path, created_at: '2026-11-01T00:00:00.000Z', chat_id: chat,
+      folders: [{ workspace_id: `ws-${local}`, kind: 'root', path, attached_at: null }],
+    })))
+    const v2 = await as(colleague, async () => (await database.query<{ r: { changed: boolean; rejected: string[] } }>(
+      'SELECT identity.publish_device_projects_v2($1,$2::jsonb) AS r', [`dev-a-${colleague}`, payload([{ local: 'own', chat: mine }, { local: 'foreign', chat: theirs }])])).rows[0]!.r)
+    expect(v2).toEqual({ changed: true, rejected: ['foreign'] })
+    const again = await as(colleague, async () => (await database.query<{ r: boolean }>(
+      'SELECT identity.publish_device_projects($1,$2::jsonb) AS r', [`dev-a-${colleague}`, payload([{ local: 'own', chat: mine }, { local: 'foreign', chat: theirs }])])).rows[0]!.r)
+    expect(again).toBe(false)
+  }))
+
   it("in one publish, a row naming someone else's group is kept without it; the other rows are written as sent", () => inRollback(async () => {
     const mine = randomUUID()
     const theirs = randomUUID()
