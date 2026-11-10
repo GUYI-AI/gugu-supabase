@@ -156,7 +156,7 @@ Deno.serve(async (request) => {
       if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY'))) {
         return json({ error: 'denied', message: 'gc is the server\'s own job' }, 401)
       }
-      const result = await handleGc(deps)
+      const result = await handleGc(deps, 'kick')
       // OSS expires abandoned staging uploads with its own lifecycle rule; only the Supabase bucket needs this sweep.
       if (storage.kind === 'oss') return json({ ...result, staging_deleted: 0 })
       const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })
@@ -170,12 +170,11 @@ Deno.serve(async (request) => {
       }
       return json({ ...result, staging_deleted: names.length })
     }
-    const asUser = createClient(env('SUPABASE_URL'), env('SUPABASE_ANON_KEY'), {
-      global: { headers: { Authorization: authorization } },
-      auth: { persistSession: false, autoRefreshToken: false },
-    })
-    const { data: who, error: whoError } = await asUser.auth.getUser()
-    if (whoError || !who?.user?.id) return json({ error: 'denied', message: 'sign in first' }, 401)
+    // PostgREST checks the JWT's signature and expiry; the RPC checks that its session still exists and the account is
+    // neither banned nor deleted. That is what Auth's getUser answered, without a second server round trip per call.
+    const { data: principal, error: principalError } = await deps.userRpc('attachments_principal', {})
+    if (principalError || typeof principal !== 'string') return json({ error: 'denied', message: 'sign in first' }, 401)
+    const who = { user: { id: principal } }
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
     if(route.startsWith('file-')&&route!=='file-resolve') return json(await handleProjectFiles(deps,who.user.id,route,body))
     switch (route) {
@@ -203,7 +202,9 @@ Deno.serve(async (request) => {
         return json({ error: 'invalid', message: `no route ${route}` }, 404)
     }
   } catch (error) {
-    if (error instanceof Refusal) return json({ error: error.code, message: error.message }, error.status)
+    if (error instanceof Refusal) {
+      return json({ error: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) }, error.status)
+    }
     log('failed', { route, error_type:error instanceof Error?error.name:'unknown' })
     return json({ error: 'failed', message: 'attachments failed; try again' }, 500)
   }

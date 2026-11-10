@@ -2,7 +2,7 @@
 // 签名对官方文档的样例;其余是这份代码在 OSS / CDN 实测里跑通的那些(gugu-base evidence/2026-10-16-oss-cdn-probe/),
 // 用假的 OSS 与库判逻辑:先复制再登记、撞上正在回收重来、暂存没了交给库认登记、签名链接、回收。
 import { createHash } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { md5Hex } from '../../../supabase/functions/_shared/md5'
 import {
   cdnAuthKey,
@@ -49,6 +49,26 @@ describe('签名', () => {
     const bytes = new Uint8Array(1000).map((_, i) => (i * 37) & 0xff)
     expect(md5Hex(bytes)).toBe(createHash('md5').update(bytes).digest('hex'))
   })
+
+  it('the thumbnail fits a box OSS can encode, so long screenshots and narrow strips are bounded on both sides', () => {
+    // OSS: resize output side ≥ 16384 → ZoomSizeInvalid; webp side ≥ 16383 → WebpExceedRange (both 400 on devdb).
+    const box = Object.fromEntries(THUMB_PROCESS.split('/')[1]!.split(',').slice(1).map(part => part.split('_') as [string, string]))
+    expect(box.m).toBe('lfit')
+    expect(Number(box.w)).toBe(560)
+    expect(Number(box.h)).toBeLessThan(16383)
+    expect(THUMB_PROCESS.endsWith('/format,webp')).toBe(true)
+  })
+
+  // The sources that came back 400 (ZoomSizeInvalid / WebpExceedRange) on devdb with `resize,w_560`: fitted into
+  // THUMB_PROCESS's box the way OSS's m_lfit does (keep aspect, fit inside, never enlarge), every side stays encodable.
+  it.each([[1170, 40000], [560, 16383], [8, 30001], [100, 31000], [100, 65000], [4032, 3024], [40000, 100]])(
+    'a %i × %i source fits the thumbnail box below OSS limits', (width, height) => {
+      const box = Object.fromEntries(THUMB_PROCESS.split('/')[1]!.split(',').slice(1).map(part => part.split('_') as [string, string]))
+      const scale = Math.min(Number(box.w) / width, Number(box.h) / height, 1)
+      const [w, h] = [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))]
+      expect(w).toBeLessThanOrEqual(560)
+      expect(Math.max(w, h)).toBeLessThan(16383)
+    })
 
   it('CDN 鉴权 A 对阿里云文档的样例;签名链接只签路径,缩略图在同一个签名后面加 x-oss-process,有效期 1800 s', () => {
     expect(cdnAuthKey('/video/standard/test.mp4', 'aliyuncdnexp1234', { ts: 1444435200, rand: '0', uid: '0' }))
@@ -106,6 +126,23 @@ describe('字节是什么(看文件头)', () => {
     // JPEG:SOI、一个 APP0、SOF0(高 480、宽 640)
     const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8, 0x01, 0xe0, 0x02, 0x80, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     expect(sniff(jpeg)).toEqual({ contentType: 'image/jpeg', image: true, width: 640, height: 480 })
+    // A camera JPEG names its orientation in EXIF (APP1, IFD0 tag 0x0112); 5–8 are shown turned a quarter, so the size is
+    // the shown one. Both TIFF byte orders.
+    const exif = (orientation: number, le: boolean) => {
+      const u16 = (v: number) => (le ? [v & 0xff, v >> 8] : [v >> 8, v & 0xff])
+      const tiff = [...(le ? [0x49, 0x49, 0x2a, 0] : [0x4d, 0x4d, 0, 0x2a]), ...(le ? [8, 0, 0, 0] : [0, 0, 0, 8]),
+        ...u16(1), ...u16(0x0112), ...u16(3), ...(le ? [1, 0, 0, 0] : [0, 0, 0, 1]), ...u16(orientation), 0, 0, 0, 0, 0, 0]
+      const payload = [...new TextEncoder().encode('Exif'), 0, 0, ...tiff]
+      return new Uint8Array([0xff, 0xd8, 0xff, 0xe1, ...u16be(payload.length + 2), ...payload, ...jpeg.subarray(2)])
+    }
+    const u16be = (v: number) => [v >> 8, v & 0xff]
+    for (const le of [true, false]) for (let o = 1; o <= 8; o++) {
+      expect(sniff(exif(o, le))).toEqual({ contentType: 'image/jpeg', image: true, ...(o >= 5 ? { width: 480, height: 640 } : { width: 640, height: 480 }) })
+    }
+    // A real JPEG (Pillow) of 37×11 pixels with EXIF orientation 6 followed by an XMP packet, also APP1: only the EXIF one
+    // names the orientation. Cut right after its frame header.
+    const exifThenXmp = Uint8Array.from(atob('/9j/4AAQSkZJRgABAQAAAQABAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAYAAAAAAAD/4QDsaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wLwA8eDp4bXBtZXRhIHhtbG5zOng9ImFkb2JlOm5zOm1ldGEvIj48cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPjxyZGY6RGVzY3JpcHRpb24geG1sbnM6dGlmZj0iaHR0cDovL25zLmFkb2JlLmNvbS90aWZmLzEuMC8iIHRpZmY6T3JpZW50YXRpb249IjYiLz48L3JkZjpSREY+PC94OnhtcG1ldGE+/9sAQwAIBgYHBgUIBwcHCQkICgwUDQwLCwwZEhMPFB0aHx4dGhwcICQuJyAiLCMcHCg3KSwwMTQ0NB8nOT04MjwuMzQy/9sAQwEJCQkMCwwYDQ0YMiEcITIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy/8AAEQgACwAlAwEiAAIRAQMRAQ=='), (c) => c.charCodeAt(0))
+    expect(sniff(exifThenXmp)).toEqual({ contentType: 'image/jpeg', image: true, width: 11, height: 37 })
     const gif = new Uint8Array([...new TextEncoder().encode('GIF89a'), 0x20, 0x00, 0x10, 0x00, 0, 0])
     expect(sniff(gif)).toEqual({ contentType: 'image/gif', image: true, width: 32, height: 16 })
     const webp = new Uint8Array(30)
@@ -156,6 +193,7 @@ function fakes(opts: {
   const order: string[] = []
   const rpcs: { as: 'user' | 'service'; fn: string; args: Record<string, unknown> }[] = []
   const logs: string[] = []
+  const events: Record<string, unknown>[] = []
   const removed: string[] = []
   const registerErrors = [...(opts.registerErrors ?? [])]
   const controls: {as:'user'|'service';fn:string;args:Record<string,unknown>}[]=[]
@@ -284,11 +322,11 @@ function fakes(opts: {
     storageRemove: async (bucket, object) => void removed.push(`${bucket}/${object}`),
     now: () => new Date('2026-10-16T12:00:00Z'),
     uuid: () => '22222222-2222-4222-8222-222222222222',
-    log: (stage) => void logs.push(stage),
+    log: (stage, extra) => { logs.push(stage); events.push({ stage, ...extra }) },
     retryDelayMs: 0,
     documentText: async () => opts.document!.text,
   }
-  return { deps, calls, rpcs, controls, logs, removed, bucket, order }
+  return { deps, calls, rpcs, controls, logs, events, removed, bucket, order }
 }
 /** The quota/actor guard must precede every byte read. Staging remains immutable and charged. */
 function expectManagedCommit(f: ReturnType<typeof fakes>, publication: string, start = 0) {
@@ -491,6 +529,13 @@ describe('提交', () => {
     expect(refusalFromDb({ message: 'something else' })).toMatchObject({ status: 500, code: 'failed' })
     expect(new Refusal(400, 'invalid', 'x')).toBeInstanceOf(Error)
   })
+
+  it('#2383 收件人从来不在群里:400 recipient_not_member,带上库给的 id 列表,不当成可重试的 500', () => {
+    const refusal = refusalFromDb({ message: 'recipient_not_member', hint: 'recipient_not_member', code: 'P0001', details: 'a,b' })
+    expect(refusal).toMatchObject({ status: 400, code: 'recipient_not_member', message: 'recipient_not_member', details: 'a,b' })
+    // Other refusals never carry the database's details through.
+    expect(refusalFromDb({ message: 'x', hint: 'attachment_source_gone', details: 'internal' }).details).toBeUndefined()
+  })
 })
 
 describe('代主人发给好友', () => {
@@ -617,8 +662,10 @@ describe('直传表单、签名链接、回收', () => {
       { blob_id: 'b1', claim_token: 't1', bucket_id: 'oss', object_name: 'ab/x', content_type: 'image/png' },
       { blob_id: 'b2', claim_token: 't2', bucket_id: 'workspace', object_name: 'c/u/old', content_type: 'application/x' },
     ]
-    const { deps, calls, rpcs, removed, controls, order } = fakes({ claimed })
+    const { deps, calls, rpcs, removed, controls, order, events } = fakes({ claimed })
     expect(await handleGc(deps)).toEqual({ claimed: 2, deleted: 2, failed: 0 })
+    expect(events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'kick',
+      at: '2026-10-16T12:00:00.000Z', day: '2026-10-16', claimed: 2, deleted: 2, finished: 2, failed: 0, outcome: 'completed' }])
     expect(controls.filter(r => r.fn === 'file_temporary_expire')).toEqual([{as:'service',fn:'file_temporary_expire',args:{p_limit:500}}])
     expect(order.indexOf('service:file_temporary_expire')).toBeLessThan(order.indexOf('service:file_transfer_expire'))
     expect(controls.filter(r => r.fn === 'file_transfer_expire')).toEqual([{as:'service',fn:'file_transfer_expire',args:{p_limit:500}}])
@@ -636,6 +683,8 @@ describe('直传表单、签名链接、回收', () => {
     const broken = fakes({ claimed })
     broken.deps.storageRemove = async () => { throw new Error('storage 500') }
     expect(await handleGc(broken.deps)).toEqual({ claimed: 2, deleted: 1, failed: 1 })
+    expect(broken.events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'kick',
+      at: '2026-10-16T12:00:00.000Z', day: '2026-10-16', claimed: 2, deleted: 1, finished: 1, failed: 1, outcome: 'completed' }])
     expect(broken.rpcs.filter((r) => r.fn === 'file_blob_gc_fail').map((r) => r.args)).toEqual([{ p_blob_id: 'b2', p_claim_token: 't2', p_error: 'Error: storage 500' }])
   })
   it('gc removes temporary ciphertext at the same private provider without invoking CDN or weakening claim confirmation',async()=>{
@@ -644,6 +693,69 @@ describe('直传表单、签名链接、回收', () => {
     expect(calls.map(c=>`${c.method} ${c.url.replace(/\?.*$/,'')}`)).toEqual(['DELETE https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/temporary/group/file/generation'])
     expect(removed).toEqual([])
     expect(rpcs.filter(r=>r.fn==='file_blob_gc_finish').map(r=>r.args)).toEqual([{p_blob_id:'temporary',p_claim_token:'token'}])
+  })
+  it('gc logs an empty invocation once with an explicit UTC day', async () => {
+    const f = fakes()
+    f.deps.now = () => new Date('2026-11-07T00:30:00+09:00')
+    expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 0, deleted: 0, failed: 0 })
+    expect(f.events).toEqual([{ stage: 'gc_result', entry: 'kick', at: '2026-11-06T15:30:00.000Z', day: '2026-11-06',
+      claimed: 0, deleted: 0, finished: 0, failed: 0, outcome: 'completed' }])
+  })
+  it('gc counts a successful physical deletion even if its finish confirmation fails, preserving the API result', async () => {
+    const f = fakes({ claimed: [{ blob_id: 'b1', claim_token: 't1', bucket_id: 'workspace', object_name: 'c/u/old', content_type: 'application/pdf' }] })
+    const rpc = f.deps.serviceRpc
+    f.deps.serviceRpc = (fn, args) => fn === 'file_blob_gc_finish'
+      ? Promise.resolve({ data: null, error: { message: 'finish unavailable' } }) : rpc(fn, args)
+    expect(await handleGc(f.deps, 'file-accept')).toEqual({ claimed: 1, deleted: 0, failed: 1 })
+    expect(f.removed).toEqual(['workspace/c/u/old'])
+    expect(f.events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'file-accept',
+      at: '2026-10-16T12:00:00.000Z', day: '2026-10-16', claimed: 1, deleted: 1, finished: 0, failed: 1, outcome: 'completed' }])
+  })
+  it.each(['file_temporary_expire', 'file_transfer_expire', 'file_blob_gc_claim'])('gc records unknown claims and rethrows a %s refusal', async failedRpc => {
+    const f = fakes(), rpc = f.deps.serviceRpc
+    f.deps.serviceRpc = (fn, args) => fn === failedRpc
+      ? Promise.resolve({ data: null, error: { message: 'RPC unavailable' } }) : rpc(fn, args)
+    await expect(handleGc(f.deps, 'kick')).rejects.toMatchObject({ status: 500 })
+    expect(f.calls).toEqual([])
+    expect(f.removed).toEqual([])
+    expect(f.events).toEqual([{ stage: 'gc_result', entry: 'kick', at: '2026-10-16T12:00:00.000Z', day: '2026-10-16',
+      claimed: null, deleted: 0, finished: 0, failed: 0, outcome: 'error' }])
+  })
+  it.each([false, true])('gc preserves a successful result when summary logging throws (stderr unavailable: %s)', async stderrFails => {
+    const f = fakes({ claimed: [{ blob_id: 'b1', claim_token: 't1', bucket_id: 'workspace', object_name: 'c/u/old', content_type: 'application/pdf' }] }), loggingError = new Error('summary logger unavailable')
+    f.deps.log = () => { throw loggingError }
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => { if (stderrFails) throw new Error('stderr unavailable') })
+    try {
+      expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 1, deleted: 1, failed: 0 })
+      expect(f.removed).toEqual(['workspace/c/u/old'])
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
+    } finally { stderr.mockRestore() }
+  })
+  it.each([false, true])('gc preserves the original exception when summary logging throws (stderr unavailable: %s)', async stderrFails => {
+    const f = fakes(), original = new Error('claim transport unavailable'), loggingError = new Error('summary logger unavailable')
+    const rpc = f.deps.serviceRpc
+    f.deps.serviceRpc = (fn, args) => fn === 'file_blob_gc_claim' ? Promise.reject(original) : rpc(fn, args)
+    f.deps.log = () => { throw loggingError }
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => { if (stderrFails) throw new Error('stderr unavailable') })
+    try {
+      await expect(handleGc(f.deps, 'kick')).rejects.toBe(original)
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
+    } finally { stderr.mockRestore() }
+  })
+  it('gc excludes sensitive exception fields from its fallback log', async () => {
+    const sensitive = ['synthetic-private-report.pdf', 'synthetic-user@example.invalid', '/synthetic/private/upload', 'SyntheticSensitiveName', 'synthetic-stack-marker']
+    const loggingError = new Error(sensitive.slice(0, 3).join(' '))
+    loggingError.name = sensitive[3]!
+    loggingError.stack = sensitive[4]
+    const f = fakes()
+    f.deps.log = () => { throw loggingError }
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 0, deleted: 0, failed: 0 })
+      const output = JSON.stringify(stderr.mock.calls)
+      for (const value of sensitive) expect(output).not.toContain(value)
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
+    } finally { stderr.mockRestore() }
   })
 })
 
