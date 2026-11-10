@@ -28,6 +28,7 @@ export interface DbError {
   message: string
   hint?: string | null
   code?: string | null
+  details?: string | null
 }
 export type Rpc = (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: DbError | null }>
 
@@ -68,7 +69,7 @@ export function objectStorage(deps: AttachmentsDeps): AttachmentObjectStorage {
 
 /** 说给调用者听的拒绝:HTTP 状态 + 机读的 code + 一句话。 */
 export class Refusal extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) {
+  constructor(readonly status: number, readonly code: string, message: string, readonly details?: string) {
     super(message)
   }
 }
@@ -103,6 +104,11 @@ export function refusalFromDb(error: DbError): Refusal {
     file_place_invalid: [400, 'invalid'],
     attachment_forward_needs_bytes: [400, 'needs_bytes'],
     workspace_version_conflict: [409, 'version_conflict'],
+  }
+  // #2383: a recipient that never sat in the chat. A permanent refusal (400, never retried); details carries
+  // the offending ids from the database, comma-separated, so the caller can name them.
+  if (error.hint === 'recipient_not_member') {
+    return new Refusal(400, 'recipient_not_member', error.message, error.details ?? undefined)
   }
   const hit = error.hint ? byHint[error.hint] : undefined
   if (hit) return new Refusal(hit[0], hit[1], error.message)

@@ -50,6 +50,26 @@ describe('签名', () => {
     expect(md5Hex(bytes)).toBe(createHash('md5').update(bytes).digest('hex'))
   })
 
+  it('the thumbnail fits a box OSS can encode, so long screenshots and narrow strips are bounded on both sides', () => {
+    // OSS: resize output side ≥ 16384 → ZoomSizeInvalid; webp side ≥ 16383 → WebpExceedRange (both 400 on devdb).
+    const box = Object.fromEntries(THUMB_PROCESS.split('/')[1]!.split(',').slice(1).map(part => part.split('_') as [string, string]))
+    expect(box.m).toBe('lfit')
+    expect(Number(box.w)).toBe(560)
+    expect(Number(box.h)).toBeLessThan(16383)
+    expect(THUMB_PROCESS.endsWith('/format,webp')).toBe(true)
+  })
+
+  // The sources that came back 400 (ZoomSizeInvalid / WebpExceedRange) on devdb with `resize,w_560`: fitted into
+  // THUMB_PROCESS's box the way OSS's m_lfit does (keep aspect, fit inside, never enlarge), every side stays encodable.
+  it.each([[1170, 40000], [560, 16383], [8, 30001], [100, 31000], [100, 65000], [4032, 3024], [40000, 100]])(
+    'a %i × %i source fits the thumbnail box below OSS limits', (width, height) => {
+      const box = Object.fromEntries(THUMB_PROCESS.split('/')[1]!.split(',').slice(1).map(part => part.split('_') as [string, string]))
+      const scale = Math.min(Number(box.w) / width, Number(box.h) / height, 1)
+      const [w, h] = [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))]
+      expect(w).toBeLessThanOrEqual(560)
+      expect(Math.max(w, h)).toBeLessThan(16383)
+    })
+
   it('CDN 鉴权 A 对阿里云文档的样例;签名链接只签路径,缩略图在同一个签名后面加 x-oss-process,有效期 1800 s', () => {
     expect(cdnAuthKey('/video/standard/test.mp4', 'aliyuncdnexp1234', { ts: 1444435200, rand: '0', uid: '0' }))
       .toBe('1444435200-0-0-23bf85053008f5c0e791667a313e28ce')
@@ -106,6 +126,23 @@ describe('字节是什么(看文件头)', () => {
     // JPEG:SOI、一个 APP0、SOF0(高 480、宽 640)
     const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8, 0x01, 0xe0, 0x02, 0x80, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     expect(sniff(jpeg)).toEqual({ contentType: 'image/jpeg', image: true, width: 640, height: 480 })
+    // A camera JPEG names its orientation in EXIF (APP1, IFD0 tag 0x0112); 5–8 are shown turned a quarter, so the size is
+    // the shown one. Both TIFF byte orders.
+    const exif = (orientation: number, le: boolean) => {
+      const u16 = (v: number) => (le ? [v & 0xff, v >> 8] : [v >> 8, v & 0xff])
+      const tiff = [...(le ? [0x49, 0x49, 0x2a, 0] : [0x4d, 0x4d, 0, 0x2a]), ...(le ? [8, 0, 0, 0] : [0, 0, 0, 8]),
+        ...u16(1), ...u16(0x0112), ...u16(3), ...(le ? [1, 0, 0, 0] : [0, 0, 0, 1]), ...u16(orientation), 0, 0, 0, 0, 0, 0]
+      const payload = [...new TextEncoder().encode('Exif'), 0, 0, ...tiff]
+      return new Uint8Array([0xff, 0xd8, 0xff, 0xe1, ...u16be(payload.length + 2), ...payload, ...jpeg.subarray(2)])
+    }
+    const u16be = (v: number) => [v >> 8, v & 0xff]
+    for (const le of [true, false]) for (let o = 1; o <= 8; o++) {
+      expect(sniff(exif(o, le))).toEqual({ contentType: 'image/jpeg', image: true, ...(o >= 5 ? { width: 480, height: 640 } : { width: 640, height: 480 }) })
+    }
+    // A real JPEG (Pillow) of 37×11 pixels with EXIF orientation 6 followed by an XMP packet, also APP1: only the EXIF one
+    // names the orientation. Cut right after its frame header.
+    const exifThenXmp = Uint8Array.from(atob('/9j/4AAQSkZJRgABAQAAAQABAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAYAAAAAAAD/4QDsaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wLwA8eDp4bXBtZXRhIHhtbG5zOng9ImFkb2JlOm5zOm1ldGEvIj48cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPjxyZGY6RGVzY3JpcHRpb24geG1sbnM6dGlmZj0iaHR0cDovL25zLmFkb2JlLmNvbS90aWZmLzEuMC8iIHRpZmY6T3JpZW50YXRpb249IjYiLz48L3JkZjpSREY+PC94OnhtcG1ldGE+/9sAQwAIBgYHBgUIBwcHCQkICgwUDQwLCwwZEhMPFB0aHx4dGhwcICQuJyAiLCMcHCg3KSwwMTQ0NB8nOT04MjwuMzQy/9sAQwEJCQkMCwwYDQ0YMiEcITIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy/8AAEQgACwAlAwEiAAIRAQMRAQ=='), (c) => c.charCodeAt(0))
+    expect(sniff(exifThenXmp)).toEqual({ contentType: 'image/jpeg', image: true, width: 11, height: 37 })
     const gif = new Uint8Array([...new TextEncoder().encode('GIF89a'), 0x20, 0x00, 0x10, 0x00, 0, 0])
     expect(sniff(gif)).toEqual({ contentType: 'image/gif', image: true, width: 32, height: 16 })
     const webp = new Uint8Array(30)
@@ -491,6 +528,13 @@ describe('提交', () => {
     expect(refusalFromDb({ message: 'rate-limited', code: 'PT429' })).toMatchObject({ status: 429 })
     expect(refusalFromDb({ message: 'something else' })).toMatchObject({ status: 500, code: 'failed' })
     expect(new Refusal(400, 'invalid', 'x')).toBeInstanceOf(Error)
+  })
+
+  it('#2383 收件人从来不在群里:400 recipient_not_member,带上库给的 id 列表,不当成可重试的 500', () => {
+    const refusal = refusalFromDb({ message: 'recipient_not_member', hint: 'recipient_not_member', code: 'P0001', details: 'a,b' })
+    expect(refusal).toMatchObject({ status: 400, code: 'recipient_not_member', message: 'recipient_not_member', details: 'a,b' })
+    // Other refusals never carry the database's details through.
+    expect(refusalFromDb({ message: 'x', hint: 'attachment_source_gone', details: 'internal' }).details).toBeUndefined()
   })
 })
 

@@ -73,6 +73,8 @@ beforeEach(async()=>{
   }
   await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Studio Mac','fixture','linux')",[device,host])
   await db.query("INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at,chat_id) VALUES($1,$2,'root','fixture','/fixture',now(),$3)",[device,host,project])
+  // What publish_device_projects records for a bound project (20261109210000_project_groups).
+  await db.query('INSERT INTO chat.project_groups(chat_id) VALUES($1) ON CONFLICT DO NOTHING',[project])
   const baseline=Number((await db.query("SELECT chat.file_transfer_usage('upload','global','*') AS n")).rows[0].n)
   await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=EXCLUDED.settings",[{...settings,storage_global_bytes:baseline+settings.storage_global_bytes}])
 })

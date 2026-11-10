@@ -101,7 +101,10 @@ describe('E4b kill -9', () => {
       expect(settle).toBeGreaterThanOrEqual(0)
       pa.close()
       pb.close()
-      expect(await waitFor(async () => (await stats(child.adminUrl)).documents === 0, 8000)).toBeGreaterThanOrEqual(0)
+      const unloaded = await waitFor(async () => (await stats(child.adminUrl)).documents === 0, 8000)
+      // Intermittent in CI only: print what the service still holds before failing.
+      if (unloaded < 0) console.error('E4b: document still loaded 8 s after both pages closed', JSON.stringify(await stats(child.adminUrl)))
+      expect(unloaded).toBeGreaterThanOrEqual(0)
       const row = await fx.row(doc)
       expect(typed).toHaveLength(60)
       expect(typed.filter((tk) => count(row!.inline_text!, tk) !== 1)).toEqual([])
