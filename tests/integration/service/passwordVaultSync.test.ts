@@ -102,6 +102,21 @@ it('a new device joins only through challenge, reveal and approval by a full dev
   expect(again.rotationRequired).toBe(true)
 })
 
+it('「不是我」 refuses a request for its key: asking again with that key changes nothing; a new key asks anew', async () => {
+  const publicKey = key()
+  await call('identity.password_vault_request($1,$2,$3)', [laptop, publicKey, commit()])
+  // Only a full member refuses; the asking device cannot refuse others either.
+  await refused(/not an approved member/, 'identity.password_vault_refuse($1,$2)', [server, laptop])
+  await call('identity.password_vault_refuse($1,$2)', [mac, laptop])
+  expect((await state(mac)).devices.find((d: any) => d.deviceId === laptop)).toMatchObject({ status: 'refused', commitment: null, approverNonce: null })
+  const before = (await state(mac)).revision
+  expect(await call('identity.password_vault_request($1,$2,$3)', [laptop, publicKey, commit()])).toEqual({ status: 'refused' })
+  await refused(/not waiting for a challenge/, 'identity.password_vault_challenge($1,$2,$3)', [mac, laptop, key()])
+  await refused(/no request to refuse/, 'identity.password_vault_refuse($1,$2)', [mac, laptop])
+  expect(await call('identity.password_vault_request($1,$2,$3)', [laptop, key(), commit()])).toEqual({ status: 'pending' })
+  expect(BigInt((await state(mac)).revision)).toBeGreaterThan(BigInt(before))
+})
+
 it('saves are versioned; a stale write is refused and nothing changes', async () => {
   const item = randomUUID()
   expect(await save(mac, item, 0, 1)).toMatchObject({ version: '1' })

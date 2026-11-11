@@ -44,7 +44,7 @@ CREATE TABLE identity.password_vault_devices (
     approver_device_id text,
     approver_nonce text CHECK (approver_nonce ~ '^[A-Za-z0-9+/]{43}=$'),
     device_nonce text CHECK (device_nonce ~ '^[A-Za-z0-9+/]{43}=$'),
-    status text NOT NULL CHECK (status IN ('pending','approved')),
+    status text NOT NULL CHECK (status IN ('pending','approved','refused')),
     scope text CHECK (scope IN ('full','granted')),
     requested_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     approved_at timestamptz,
@@ -214,6 +214,8 @@ BEGIN
     -- Same key: already a member. Another key (the app was reinstalled and lost its device key): the device asks again
     -- like a new one, its old shares go with the old row, and deleting an approved row marks the vault for re-keying.
     IF FOUND AND prior.status = 'approved' AND prior.public_key = p_public_key THEN RETURN jsonb_build_object('status', 'approved'); END IF;
+    -- Refused with this key: asking again changes nothing, so the prompt does not come back by itself.
+    IF FOUND AND prior.status = 'refused' AND prior.public_key = p_public_key THEN RETURN jsonb_build_object('status', 'refused'); END IF;
     IF p_commitment IS NULL THEN RAISE EXCEPTION 'PASSWORD_VAULT_INPUT: commitment' USING ERRCODE = '22023'; END IF;
     DELETE FROM identity.password_vault_devices WHERE owner_user_id = owner_id AND device_id = p_device_id;
     INSERT INTO identity.password_vault_devices(owner_user_id, device_id, public_key, commitment, status)
@@ -290,6 +292,20 @@ DECLARE owner_id text := identity.password_vault_owner(p_caller_device_id);
 BEGIN
     PERFORM identity.password_vault_write(owner_id);
     DELETE FROM identity.password_vault_devices WHERE owner_user_id = owner_id AND device_id = p_device_id AND status = 'pending';
+END;
+$$;
+-- 「不是我」 on a full device. The request stays refused for its key; only a new key (the person asks again on purpose,
+-- or the app was reinstalled) makes a new request.
+CREATE FUNCTION identity.password_vault_refuse(p_caller_device_id text, p_device_id text) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+DECLARE owner_id text := identity.password_vault_owner(p_caller_device_id);
+BEGIN
+    PERFORM identity.password_vault_member(owner_id, p_caller_device_id, true);
+    PERFORM identity.password_vault_write(owner_id);
+    UPDATE identity.password_vault_devices SET status = 'refused', commitment = NULL, approver_device_id = NULL,
+        approver_nonce = NULL, device_nonce = NULL
+     WHERE owner_user_id = owner_id AND device_id = p_device_id AND status = 'pending';
+    IF NOT FOUND THEN RAISE EXCEPTION 'PASSWORD_VAULT_STATE: no request to refuse' USING ERRCODE = '55000'; END IF;
 END;
 $$;
 -- Create or edit one item. p_expected_version 0 = new. A full device replaces the item's shares for limited devices
@@ -456,6 +472,7 @@ REVOKE ALL ON FUNCTION identity.password_vault_owner(text), identity.password_va
     identity.password_vault_initialize(text,text,text), identity.password_vault_request(text,text,text),
     identity.password_vault_challenge(text,text,text), identity.password_vault_reveal(text,text),
     identity.password_vault_approve(text,text,text,text,integer,jsonb), identity.password_vault_dismiss(text,text),
+    identity.password_vault_refuse(text,text),
     identity.password_vault_reset(text),
     identity.password_vault_save(text,uuid,bigint,integer,text,text,jsonb), identity.password_vault_delete(text,uuid,bigint),
     identity.password_vault_rotate(text,integer,text[],jsonb,jsonb,jsonb),
@@ -466,6 +483,7 @@ GRANT EXECUTE ON FUNCTION identity.password_vault_state(text,bigint), identity.p
     identity.password_vault_initialize(text,text,text), identity.password_vault_request(text,text,text),
     identity.password_vault_challenge(text,text,text), identity.password_vault_reveal(text,text),
     identity.password_vault_approve(text,text,text,text,integer,jsonb), identity.password_vault_dismiss(text,text),
+    identity.password_vault_refuse(text,text),
     identity.password_vault_reset(text),
     identity.password_vault_save(text,uuid,bigint,integer,text,text,jsonb), identity.password_vault_delete(text,uuid,bigint),
     identity.password_vault_rotate(text,integer,text[],jsonb,jsonb,jsonb),
