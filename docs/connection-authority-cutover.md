@@ -5,7 +5,11 @@ adds the only legacy-to-owner writer, opens the owner RPCs to signed-in owners a
 makes them refuse every account it has not switched. Legacy tables, rows, policies,
 function definitions and ACLs are unchanged. The version policy stays OFF. Release
 `20261111130000_connection_cutover_rehearsal_followups` makes reinstalled owners
-switchable and gives the refusals stable codes. Operator steps: `connection-cutover-runbook.md`.
+switchable and gives the refusals stable codes. Release
+`20261111160000_integration_catalog_metadata` accepts the provider directory `catalog`
+that clients since 0.3.2 send; without it their integrations collection stays in `error`
+and the cutover keeps the account legacy (`COLLECTION_NOT_READY`). Operator steps:
+`connection-cutover-runbook.md`.
 
 ## Owner RPC access
 

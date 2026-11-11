@@ -72,6 +72,42 @@ test('rejects account bodies containing secret or unknown fields', async () => {
   await assert.rejects(auditConnectionInventory(f.source, f), error => error.message === 'CONNECTION_AUDIT_UNSUPPORTED_METADATA')
 })
 
+test('a provider directory row keeps its catalog (clients since 0.3.2); no other row may carry one', async () => {
+  const directory = f => f.source.items.find(item => item.resource_key === 'catalog:github')
+  const account = f => f.source.items.find(item => item.resource_key === '["github","fixture"]')
+  for (const catalog of [{ categoryId: 'dev', aliases: ['GitHub', '代码托管'] }, { categoryId: 'dev' }, null]) {
+    const f = fixture()
+    directory(f).data = { ...directory(f).data, catalog }
+    const audit = await auditConnectionInventory(f.source, f)
+    assert.equal(audit.entries.length, 4)
+    const plain = fixture()
+    assert.notEqual(audit.hash, (await auditConnectionInventory(plain.source, plain)).hash, 'the catalog is part of the audited row')
+  }
+  const f = fixture()
+  directory(f).data = { ...directory(f).data, catalog: { categoryId: 'dev' } }
+  f.source.operations[0] = { ...f.source.operations[0], resource_key: 'catalog:github',
+    payload: { data: { ...directory(f).data, enabled: false }, deviceId: 'device-fixture' } }
+  assert.equal((await auditConnectionInventory(f.source, f)).operations.length, 1, 'a pending directory toggle keeps the catalog')
+  for (const [label, mutate] of [
+    ['account row', f => { account(f).data = { ...account(f).data, catalog: { categoryId: 'dev' } } }],
+    ['account row null', f => { account(f).data = { ...account(f).data, catalog: null } }],
+    ['account operation', f => { f.source.operations[0].payload.before = { providerId: 'github', catalog: { categoryId: 'dev' } } }],
+    ['extra key', f => { directory(f).data = { ...directory(f).data, catalog: { categoryId: 'dev', icon: 'x' } } }],
+    ['category missing', f => { directory(f).data = { ...directory(f).data, catalog: { aliases: ['GitHub'] } } }],
+    ['category grammar', f => { directory(f).data = { ...directory(f).data, catalog: { categoryId: '../dev' } } }],
+    ['catalog string', f => { directory(f).data = { ...directory(f).data, catalog: 'dev' } }],
+    ['aliases not array', f => { directory(f).data = { ...directory(f).data, catalog: { categoryId: 'dev', aliases: 'GitHub' } } }],
+    ['alias nested', f => { directory(f).data = { ...directory(f).data, catalog: { categoryId: 'dev', aliases: [{ name: 'GitHub' }] } } }],
+    ['alias control', f => { directory(f).data = { ...directory(f).data, catalog: { categoryId: 'dev', aliases: ['Git\u0007Hub'] } } }],
+    ['33 aliases', f => { directory(f).data = { ...directory(f).data, catalog: { categoryId: 'dev', aliases: Array.from({ length: 33 }, (_, i) => `a${i}`) } } }],
+    ['other nested', f => { directory(f).data = { ...directory(f).data, permission: { scope: 'all' } } }],
+  ]) {
+    const f = fixture()
+    mutate(f)
+    await assert.rejects(auditConnectionInventory(f.source, f), error => error.message === 'CONNECTION_AUDIT_UNSUPPORTED_METADATA', label)
+  }
+})
+
 test('rejects unprepared/error collections, wrong counts, duplicate keys and foreign rows', async () => {
   for (const mutate of [
     f => { f.source.items.pop() },

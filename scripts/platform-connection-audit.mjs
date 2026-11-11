@@ -38,11 +38,30 @@ function metadata(value, allowed) {
   return value
 }
 
-function payload(value) {
+// A provider directory row may also carry the provider's public category and
+// search aliases ({categoryId, aliases?}), the same bounded shape as
+// identity.assistant_panel_validate; no other row kind may.
+const catalogIdentifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+function directoryMetadata(value) {
+  if (!record(value)) fail('CONNECTION_AUDIT_INVALID_METADATA')
+  const { catalog, ...fields } = value
+  metadata(fields, itemFields)
+  if (catalog !== undefined && catalog !== null && (!record(catalog)
+    || Object.keys(catalog).some(key => key !== 'categoryId' && key !== 'aliases')
+    || typeof catalog.categoryId !== 'string' || !catalogIdentifier.test(catalog.categoryId)
+    || 'aliases' in catalog && (!Array.isArray(catalog.aliases) || catalog.aliases.length > 32
+      || catalog.aliases.some(alias => typeof alias !== 'string' || [...alias].length < 1 || [...alias].length > 128
+        || /[\u0000-\u001f\u007f-\u009f]/.test(alias)))))
+    fail('CONNECTION_AUDIT_UNSUPPORTED_METADATA')
+  if (Buffer.byteLength(stableConnectionJson(value)) > 262_144) fail('CONNECTION_AUDIT_METADATA_TOO_LARGE')
+  return value
+}
+
+function payload(value, directory) {
   if (!record(value)) fail('CONNECTION_AUDIT_INVALID_OPERATION')
   for (const [key, entry] of Object.entries(value)) {
     if (!payloadFields.has(key)) fail('CONNECTION_AUDIT_UNSUPPORTED_OPERATION')
-    if (key === 'data' || key === 'before') metadata(entry, itemFields)
+    if (key === 'data' || key === 'before') directory ? directoryMetadata(entry) : metadata(entry, itemFields)
     else if (!nullableText(entry) && typeof entry !== 'boolean') fail('CONNECTION_AUDIT_INVALID_OPERATION')
   }
   return value
@@ -84,7 +103,7 @@ export async function auditConnectionInventory(source, { readBody } = {}) {
     keys.add(item.resource_key)
     const marker = item.resource_key === '__collection__' || item.resource_key.startsWith('__collection__:')
     const kind = marker ? 'collection' : item.resource_key.startsWith('catalog:') ? 'catalog' : 'account'
-    const data = metadata(item.data, marker ? markerFields : itemFields)
+    const data = kind === 'catalog' ? directoryMetadata(item.data) : metadata(item.data, marker ? markerFields : itemFields)
     if (!marker && !item.deleted_at && (typeof data.providerId !== 'string'
       || kind === 'account' && typeof data.accountId !== 'string')) fail('CONNECTION_AUDIT_INVALID_ACCOUNT')
     let publicBody = null
@@ -153,7 +172,7 @@ export async function auditConnectionInventory(source, { readBody } = {}) {
     operationIds.add(operation.operation_id)
     normalizedOperations.push({ operationId: operation.operation_id, resourceKey: operation.resource_key,
       revision: operation.revision, expectedRevision: operation.expected_item_revision, operation: operation.operation,
-      deviceId: operation.device_id, payload: payload(operation.payload), status: operation.status,
+      deviceId: operation.device_id, payload: payload(operation.payload, typeof operation.resource_key === 'string' && operation.resource_key.startsWith('catalog:')), status: operation.status,
       terminalAt: operation.terminal_at ?? null, errorCode: operation.error_code ?? null,
       createdAt: operation.created_at ?? null, appliedAt: operation.applied_at ?? null,
       appliedDeviceId: operation.applied_device_id ?? null, cleanupAttemptedAt: operation.cleanup_attempted_at ?? null,
