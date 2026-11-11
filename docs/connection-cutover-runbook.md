@@ -8,7 +8,8 @@ Operator procedure for `scripts/platform-connection-cutover.mjs`; the design is 
 
 1. Deploy the backend (both releases). The version policy stays OFF.
 2. Deploy gugu-cloud (revoke grant and platform-credential guard, pinned to this backend).
-3. Dry-run the tool over the full owner list (no `--apply`).
+3. Dry-run the tool over the full owner list (no `--apply`). This is the audit: there is no
+   separate export.
 4. Review the report: every `kept-legacy`, `failed` and `stranded` account against the
    table below. Remove accounts that must stay legacy from the list.
 5. Apply for one test account: a list holding only that owner, with `--apply`.
@@ -27,6 +28,7 @@ Top level: `operator`, `dryRun`, `startedAt`, `finishedAt`, and `summary` (`acco
 `import`), `before`/`after` head, `inventory` (`connections` {live, retired, revoked},
 `catalogs`, `markers`, `operations`, verified bodies, `manifestHash`), `removedAssistants`
 (`importedTombstones`, `supersededTombstones`, `excludedRows`, `excludedOperations`),
+`databaseDigest` (the inventory digest preparation and the switch recheck),
 `platformCredentials` (official overlay only), `code` and, for database refusals, `sqlstate`.
 
 Exit 0: every account switched, already owner or eligible, nothing stranded. Exit 2: any

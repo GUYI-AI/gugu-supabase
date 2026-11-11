@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { auditConnectionInventory, boundedConnectionFile, connectionAuditLimits } from './platform-connection-audit.mjs'
 import { connectionBodyLocations, connectionBodyStore } from './platform-connection-bodies.mjs'
-import { prepareConnectionCandidate } from './platform-connection-prepare.mjs'
+import { prepareConnectionCandidate, readConnectionInventory } from './platform-connection-prepare.mjs'
 
 // Per-account legacy -> owner cutover: inventory, server-side body fetch, audit,
 // prepare, cutover. Dry-run never writes. Reports hold owner IDs, counts, hashes,
@@ -92,7 +92,7 @@ async function readState(db, ownerId) {
     if (account?.available) {
       await db.query('SAVEPOINT inventory')
       try {
-        source = (await db.query('SELECT identity.connection_legacy_inventory($1) AS value', [ownerId])).rows[0].value
+        source = await readConnectionInventory(db, ownerId)
         await db.query('RELEASE inventory')
       } catch (error) {
         if (typeof error?.severity !== 'string' || lostSession.has(error.code)) throw error
@@ -163,6 +163,8 @@ export async function cutoverConnectionAccount(db, ownerId, { readBody, apply = 
     if (state.sourceRefusal) return keep(state.sourceRefusal)
     source = state.source
     if (source.identityState !== 'found') return keep({ code: 'CONNECTION_CUTOVER_NO_LEGACY_ASSISTANT' })
+    // The digest preparation rechecks under its locks and the switch compares: recorded even when the account stays legacy.
+    report.databaseDigest = source.databaseDigest
     // Removed (reinstalled) assistants: tombstones imported, live rows and changes left out (counted only).
     if (source.removedAssistants) {
       const { importedTombstones, supersededTombstones, excludedRows, excludedOperations } = source.removedAssistants

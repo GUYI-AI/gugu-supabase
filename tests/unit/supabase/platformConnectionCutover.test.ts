@@ -1,3 +1,4 @@
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { objectKey, ossSign, uriEncode } from '../../../supabase/functions/_shared/oss'
 import { connectionBodyStore, connectionOssGet } from '../../../scripts/platform-connection-bodies.mjs'
@@ -100,6 +101,17 @@ describe('cutover tool inputs and reports', () => {
       .toEqual({ code: 'CONNECTION_AUDIT_BODY_HASH_MISMATCH' })
   })
 
+  it('reads the legacy inventory in one place, so the recorded digest and the rechecked one cannot drift', () => {
+    // The import rule once lived in an owner-run export and in the database function, and they drifted. The tool, the
+    // preparation and the switch now all go through readConnectionInventory; no other script or ops file reads it.
+    const root = new URL('../../../', import.meta.url)
+    const sites = ['scripts', 'ops'].flatMap(dir => readdirSync(new URL(dir, root)).map(name => `${dir}/${name}`))
+      .filter(file => /\.(mjs|sql)$/.test(file) && readFileSync(new URL(file, root), 'utf8').includes('connection_legacy_inventory'))
+    expect(sites).toEqual(['scripts/platform-connection-prepare.mjs'])
+    expect(readFileSync(new URL('scripts/platform-connection-prepare.mjs', root), 'utf8').match(/connection_legacy_inventory/g)).toHaveLength(1)
+    expect(existsSync(new URL('ops/audit-platform-connections.sql', root))).toBe(false)
+  })
+
   it('uses one code for a collection that is not ready, wherever it is detected', () => {
     const database = (message: string) => Object.assign(new Error(message), { code: '55000', severity: 'ERROR' })
     for (const message of ['Connection legacy control is unprepared', 'Connection collection is incomplete', 'Connection collection is unprepared'])
@@ -130,7 +142,7 @@ function scripted({ mode = 'legacy', credentials }: { mode?: 'legacy' | 'owner';
     if (sql.includes('FROM identity.users')) return { rows: [{ available: true }] }
     if (sql.includes('connection_has_legacy_data')) return { rows: [{ value: false }] }
     if (sql.includes('identity.gugu_devices')) return { rows: [] }
-    if (sql.includes('connection_legacy_inventory')) return { rows: [{ value: { identityState: 'none' } }] }
+    if (sql.includes('connection_legacy_inventory')) return { rows: [{ inventory: { identityState: 'none' } }] }
     if (sql.includes('connection_authority_cutover')) {
       head = { mode: 'owner', epoch: '1', phase: 'stable', prepared: false, initialized: true }
       return { rows: [{ result: {} }] }

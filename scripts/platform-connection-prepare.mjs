@@ -5,6 +5,12 @@ import { auditConnectionInventory, boundedConnectionFile, compareConnectionInven
 
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 
+/** The one legacy inventory: maintenance scope, the same function and digest the
+ * cutover tool records, preparation rechecks under its locks, and the switch compares. */
+export async function readConnectionInventory(db, ownerId) {
+  return (await db.query('SELECT identity.connection_legacy_inventory($1) AS inventory', [ownerId])).rows[0]?.inventory
+}
+
 /** All body IO finishes before taking database locks. Dry-run never writes.
  * Apply only stages and compares a candidate; it never activates a new writer. */
 export async function prepareConnectionCandidate(db, source, { readBody, apply = false } = {}) {
@@ -20,7 +26,7 @@ export async function prepareConnectionCandidate(db, source, { readBody, apply =
     await db.query("SET LOCAL statement_timeout = '2s'")
     await db.query("SET LOCAL lock_timeout = '250ms'")
     await db.query("SET LOCAL transaction_timeout = '2s'")
-    const current = (await db.query('SELECT identity.connection_legacy_inventory($1) AS inventory', [source.ownerId])).rows[0]?.inventory
+    const current = await readConnectionInventory(db, source.ownerId)
     if (current?.databaseDigest !== source.databaseDigest) fail('CONNECTION_PREPARE_SOURCE_CHANGED')
     if (!apply) {
       await db.query('ROLLBACK')
