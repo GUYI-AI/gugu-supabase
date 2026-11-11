@@ -29,13 +29,18 @@ const device = async (id: string, user = owner, kind = 'desktop') => db.query(`I
   (device_id,user_id,label,hostname,platform,machine_id,capabilities) VALUES($1,$2,'fixture','h','darwin',$3,$4)`,
   [id, user, `machine-${id}`, JSON.stringify({ host_kind: kind })])
 const state = (id: string, since = 0, user = owner) => call('identity.password_vault_state($1,$2)', [id, since], user)
+// The next signed membership entry. The database only orders them; devices verify the signatures (client contract tests).
+async function entry(seq?: number): Promise<string> {
+  const next = seq ?? Number((await db.query<{ n: string }>('SELECT COALESCE(max(seq), 0) + 1 AS n FROM identity.password_vault_log WHERE owner_user_id = $1', [owner])).rows[0]!.n)
+  return JSON.stringify({ seq: next, body: JSON.stringify({ seq: next }), signature: randomBytes(64).toString('base64') })
+}
 // The four joining steps, as the two clients run them.
 async function join(id: string, scope: 'full' | 'granted', shares: object[], publicKey = key()) {
   await call('identity.password_vault_request($1,$2,$3)', [id, publicKey, commit()])
   await call('identity.password_vault_challenge($1,$2,$3)', [mac, id, key()])
   await call('identity.password_vault_reveal($1,$2)', [id, key()])
   const epoch = (await state(mac)).epoch
-  await call('identity.password_vault_approve($1,$2,$3,$4,$5,$6)', [mac, id, publicKey, scope, epoch, JSON.stringify(shares)])
+  await call('identity.password_vault_approve($1,$2,$3,$4,$5,$6,$7)', [mac, id, publicKey, scope, epoch, JSON.stringify(shares), await entry()])
   return publicKey
 }
 const save = (id: string, item: string, expected: number, epoch: number, wrapped = blob('wrapped'), shares: object[] = []) =>
@@ -54,7 +59,7 @@ beforeEach(async () => {
   ;[owner, mac, laptop, server] = [randomUUID(), randomUUID(), randomUUID(), randomUUID()]
   await person(owner)
   await device(mac); await device(laptop); await device(server, owner, 'server')
-  await call('identity.password_vault_initialize($1,$2,$3)', [mac, key(), blob('vk-mac')])
+  await call('identity.password_vault_initialize($1,$2,$3,$4)', [mac, key(), blob('vk-mac'), await entry()])
 })
 afterEach(async () => { await db.query('ROLLBACK') })
 
@@ -67,7 +72,7 @@ it('the tables are closed; only the owner of the device reaches the vault', asyn
   const stranger = randomUUID(); await person(stranger); await device(randomUUID(), stranger)
   await refused(/PASSWORD_VAULT_DEVICE/, 'identity.password_vault_state($1,0)', [mac], stranger)
   await refused(/PASSWORD_VAULT_DEVICE/, 'identity.password_vault_request($1,$2,$3)', [laptop, key(), commit()], stranger)
-  await refused(/PASSWORD_VAULT_STATE: vault already exists/, 'identity.password_vault_initialize($1,$2,$3)', [laptop, key(), blob('vk')])
+  await refused(/PASSWORD_VAULT_STATE: vault already exists/, 'identity.password_vault_initialize($1,$2,$3,$4)', [laptop, key(), blob('vk'), await entry()])
 })
 
 it('a new device joins only through challenge, reveal and approval by a full device; pending sees no ciphertext', async () => {
@@ -81,14 +86,14 @@ it('a new device joins only through challenge, reveal and approval by a full dev
   await refused(/not waiting for a reveal/, 'identity.password_vault_reveal($1,$2)', [laptop, key()])
   await call('identity.password_vault_challenge($1,$2,$3)', [mac, laptop, key()])
   await refused(/not waiting for a challenge/, 'identity.password_vault_challenge($1,$2,$3)', [mac, laptop, key()])
-  await refused(/not ready for approval/, 'identity.password_vault_approve($1,$2,$3,$4,$5,$6)', [mac, laptop, publicKey, 'full', 1, JSON.stringify([{ deviceId: laptop, sealed: blob('vk') }])])
+  await refused(/not ready for approval/, 'identity.password_vault_approve($1,$2,$3,$4,$5,$6,$7)', [mac, laptop, publicKey, 'full', 1, JSON.stringify([{ deviceId: laptop, sealed: blob('vk') }]), await entry()])
   const pending = (await state(mac)).devices.find((d: any) => d.deviceId === laptop)
   expect(pending).toMatchObject({ status: 'pending', approverDeviceId: mac, deviceNonce: null })
   await call('identity.password_vault_reveal($1,$2)', [laptop, key()])
   // Approval seals to exactly the key the approver compared.
-  await refused(/not ready for approval/, 'identity.password_vault_approve($1,$2,$3,$4,$5,$6)', [mac, laptop, key(), 'full', 1, JSON.stringify([{ deviceId: laptop, sealed: blob('vk') }])])
-  await refused(/receives the vault key/, 'identity.password_vault_approve($1,$2,$3,$4,$5,$6)', [mac, laptop, publicKey, 'full', 1, '[]'])
-  await call('identity.password_vault_approve($1,$2,$3,$4,$5,$6)', [mac, laptop, publicKey, 'full', 1, JSON.stringify([{ deviceId: laptop, sealed: blob('vk') }])])
+  await refused(/not ready for approval/, 'identity.password_vault_approve($1,$2,$3,$4,$5,$6,$7)', [mac, laptop, key(), 'full', 1, JSON.stringify([{ deviceId: laptop, sealed: blob('vk') }]), await entry()])
+  await refused(/receives the vault key/, 'identity.password_vault_approve($1,$2,$3,$4,$5,$6,$7)', [mac, laptop, publicKey, 'full', 1, '[]', await entry()])
+  await call('identity.password_vault_approve($1,$2,$3,$4,$5,$6,$7)', [mac, laptop, publicKey, 'full', 1, JSON.stringify([{ deviceId: laptop, sealed: blob('vk') }]), await entry()])
   const joined = await state(laptop)
   expect(joined.shares).toHaveLength(1)
   expect(joined.items.map((i: any) => i.itemId)).toEqual([item])
@@ -115,6 +120,29 @@ it('「不是我」 refuses a request for its key: asking again with that key ch
   await refused(/no request to refuse/, 'identity.password_vault_refuse($1,$2)', [mac, laptop])
   expect(await call('identity.password_vault_request($1,$2,$3)', [laptop, key(), commit()])).toEqual({ status: 'pending' })
   expect(BigInt((await state(mac)).revision)).toBeGreaterThan(BigInt(before))
+})
+
+it('membership entries are numbered without gaps, land only with the change they describe, and reach every device', async () => {
+  // The vault's creation wrote entry 1; a device that only asks to join can read the log (its trust starts there).
+  const publicKey = key()
+  await call('identity.password_vault_request($1,$2,$3)', [laptop, publicKey, commit()])
+  expect((await state(laptop)).log.map((e: any) => e.seq)).toEqual([1])
+  await call('identity.password_vault_challenge($1,$2,$3)', [mac, laptop, key()])
+  await call('identity.password_vault_reveal($1,$2)', [laptop, key()])
+  const approve = async (value: string) => call('identity.password_vault_approve($1,$2,$3,$4,$5,$6,$7)',
+    [mac, laptop, publicKey, 'full', 1, JSON.stringify([{ deviceId: laptop, sealed: blob('vk') }]), value])
+  await refused(/PASSWORD_VAULT_STALE: membership changed/, 'identity.password_vault_approve($1,$2,$3,$4,$5,$6,$7)',
+    [mac, laptop, publicKey, 'full', 1, JSON.stringify([{ deviceId: laptop, sealed: blob('vk') }]), await entry(1)])
+  await refused(/PASSWORD_VAULT_STALE: membership changed/, 'identity.password_vault_approve($1,$2,$3,$4,$5,$6,$7)',
+    [mac, laptop, publicKey, 'full', 1, JSON.stringify([{ deviceId: laptop, sealed: blob('vk') }]), await entry(3)])
+  await refused(/PASSWORD_VAULT_INPUT: membership entry/, 'identity.password_vault_approve($1,$2,$3,$4,$5,$6,$7)',
+    [mac, laptop, publicKey, 'full', 1, JSON.stringify([{ deviceId: laptop, sealed: blob('vk') }]), JSON.stringify({ seq: 2 })])
+  // A refused change leaves no entry behind.
+  await refused(/scope/, 'identity.password_vault_approve($1,$2,$3,$4,$5,$6,$7)', [mac, laptop, publicKey, 'everything', 1, '[]', await entry()])
+  expect((await state(mac)).log.map((e: any) => e.seq)).toEqual([1])
+  await approve(await entry())
+  const since = await call('identity.password_vault_state($1,$2,$3)', [laptop, 0, 1])
+  expect(since.log).toEqual([expect.objectContaining({ seq: 2, attestation: null })])
 })
 
 it('saves are versioned; a stale write is refused and nothing changes', async () => {
@@ -161,19 +189,19 @@ it('removing a device asks for a re-key; the re-key covers every item and every 
   expect((await state(mac)).rotationRequired).toBe(true)
   const items = (version: number, ids = [a, b]) => JSON.stringify(ids.map(itemId => ({ itemId, expectedVersion: version, wrappedKey: blob('w2'), ciphertext: blob('i2') })))
   const keys = (...ids: string[]) => JSON.stringify(ids.map(deviceId => ({ deviceId, sealed: blob('vk2') })))
-  await refused(/items changed/, 'identity.password_vault_rotate($1,$2,$3,$4,$5)', [mac, 1, [], items(1, [a]), keys(mac, laptop)])
-  await refused(/item changed/, 'identity.password_vault_rotate($1,$2,$3,$4,$5)', [mac, 1, [], items(7), keys(mac, laptop)])
-  await refused(/every remaining full device/, 'identity.password_vault_rotate($1,$2,$3,$4,$5)', [mac, 1, [], items(1), keys(mac)])
+  await refused(/items changed/, 'identity.password_vault_rotate($1,$2,$3,$4,$5,$6,$7)', [mac, 1, [], items(1, [a]), keys(mac, laptop), null, await entry()])
+  await refused(/item changed/, 'identity.password_vault_rotate($1,$2,$3,$4,$5,$6,$7)', [mac, 1, [], items(7), keys(mac, laptop), null, await entry()])
+  await refused(/every remaining full device/, 'identity.password_vault_rotate($1,$2,$3,$4,$5,$6,$7)', [mac, 1, [], items(1), keys(mac), null, await entry()])
   // The removed device is no longer the owner's at all.
-  await refused(/device is not owned/, 'identity.password_vault_rotate($1,$2,$3,$4,$5)', [server, 1, [], items(1), keys(mac, laptop)])
+  await refused(/device is not owned/, 'identity.password_vault_rotate($1,$2,$3,$4,$5,$6,$7)', [server, 1, [], items(1), keys(mac, laptop), null, await entry()])
   expect((await state(mac)).epoch).toBe(1)
-  expect(await call('identity.password_vault_rotate($1,$2,$3,$4,$5)', [mac, 1, [], items(1), keys(mac, laptop)])).toMatchObject({ epoch: 2 })
+  expect(await call('identity.password_vault_rotate($1,$2,$3,$4,$5,$6,$7)', [mac, 1, [], items(1), keys(mac, laptop), null, await entry()])).toMatchObject({ epoch: 2 })
   const after = await state(laptop)
   expect(after).toMatchObject({ epoch: 2, rotationRequired: false })
   expect(after.shares).toEqual([expect.objectContaining({ epoch: 2, itemId: null })])
   expect(after.items.map((i: any) => [i.itemId, i.epoch, i.version]).sort()).toEqual([[a, 2, '2'], [b, 2, '2']].sort())
   // Removing laptop in the same call takes it out and leaves only mac's key.
-  await call('identity.password_vault_rotate($1,$2,$3,$4,$5)', [mac, 2, [laptop], items(2), keys(mac)])
+  await call('identity.password_vault_rotate($1,$2,$3,$4,$5,$6,$7)', [mac, 2, [laptop], items(2), keys(mac), null, await entry()])
   await refused(/not an approved member/, 'identity.password_vault_save($1,$2,$3,$4,$5,$6,$7)', [laptop, a, 3, 3, blob('w'), blob('i'), '[]'])
   expect((await state(laptop)).items).toEqual([])
 })
@@ -183,24 +211,24 @@ it('an empty vault can be started again only when no approved device can open th
   await as(owner, 'SELECT identity.remove_device($1)', [mac])
   await call('identity.password_vault_reset($1)', [laptop])
   expect(await state(laptop)).toEqual({ initialized: false })
-  expect(await call('identity.password_vault_initialize($1,$2,$3)', [laptop, key(), blob('vk')])).toMatchObject({ epoch: 1 })
+  expect(await call('identity.password_vault_initialize($1,$2,$3,$4)', [laptop, key(), blob('vk'), await entry()])).toMatchObject({ epoch: 1 })
 })
 
 it('a recovery code lets a device join without another device; the account alone is not enough; a use consumes it', async () => {
   const proof = randomBytes(32).toString('base64'), verifier = createHash('sha256').update(Buffer.from(proof, 'base64')).digest('hex')
   const recoveryKey = key(), sealed = blob('vk-recovery')
-  await refused(/not an approved member/, 'identity.password_vault_set_recovery($1,$2,$3,$4,$5)', [laptop, 1, recoveryKey, verifier, sealed])
-  await call('identity.password_vault_set_recovery($1,$2,$3,$4,$5)', [mac, 1, recoveryKey, verifier, sealed])
-  await refused(/a recovery code exists/, 'identity.password_vault_set_recovery($1,$2,$3,$4,$5)', [mac, 1, key(), verifier, blob('other')])
+  await refused(/not an approved member/, 'identity.password_vault_set_recovery($1,$2,$3,$4,$5,$6)', [laptop, 1, recoveryKey, verifier, sealed, await entry()])
+  await call('identity.password_vault_set_recovery($1,$2,$3,$4,$5,$6)', [mac, 1, recoveryKey, verifier, sealed, await entry()])
+  await refused(/a recovery code exists/, 'identity.password_vault_set_recovery($1,$2,$3,$4,$5,$6)', [mac, 1, key(), verifier, blob('other'), await entry()])
   expect(await state(mac)).toMatchObject({ recovery: true, recoveryPublicKey: recoveryKey })
   // Only full members see the code's public key (they re-seal to it); the cloud keeps only the verifier of the proof.
   expect(await state(laptop)).toMatchObject({ recovery: true, recoveryPublicKey: null })
   await refused(/recovery code does not match/, 'identity.password_vault_recovery_begin($1,$2)', [laptop, randomBytes(32).toString('base64')])
-  await refused(/recovery code does not match/, 'identity.password_vault_recover($1,$2,$3,$4,$5)', [laptop, randomBytes(32).toString('base64'), key(), 1, blob('vk')])
+  await refused(/recovery code does not match/, 'identity.password_vault_recover($1,$2,$3,$4,$5,$6)', [laptop, randomBytes(32).toString('base64'), key(), 1, blob('vk'), await entry()])
   await refused(/the recovery code can still open/, 'identity.password_vault_reset($1)', [laptop])
   expect(await call('identity.password_vault_recovery_begin($1,$2)', [laptop, proof])).toEqual({ epoch: 1, sealed })
   const laptopKey = key()
-  await call('identity.password_vault_recover($1,$2,$3,$4,$5)', [laptop, proof, laptopKey, 1, blob('vk-laptop')])
+  await call('identity.password_vault_recover($1,$2,$3,$4,$5,$6)', [laptop, proof, laptopKey, 1, blob('vk-laptop'), await entry()])
   const after = await state(laptop)
   expect(after).toMatchObject({ recovery: false, recoveryPublicKey: null })
   expect(after.devices.find((d: any) => d.deviceId === laptop)).toMatchObject({ status: 'approved', scope: 'full', publicKey: laptopKey })
@@ -210,9 +238,9 @@ it('a recovery code lets a device join without another device; the account alone
 
 it('re-keying keeps the recovery code (re-sealed), replaces it, or drops it', async () => {
   const proof = randomBytes(32).toString('base64'), verifier = createHash('sha256').update(Buffer.from(proof, 'base64')).digest('hex')
-  await call('identity.password_vault_set_recovery($1,$2,$3,$4,$5)', [mac, 1, key(), verifier, blob('vk1')])
-  const rotate = (epoch: number, recovery: object | null) => call('identity.password_vault_rotate($1,$2,$3,$4,$5,$6)',
-    [mac, epoch, [], '[]', JSON.stringify([{ deviceId: mac, sealed: blob('vk') }]), recovery === null ? null : JSON.stringify(recovery)])
+  await call('identity.password_vault_set_recovery($1,$2,$3,$4,$5,$6)', [mac, 1, key(), verifier, blob('vk1'), await entry()])
+  const rotate = async (epoch: number, recovery: object | null) => call('identity.password_vault_rotate($1,$2,$3,$4,$5,$6,$7)',
+    [mac, epoch, [], '[]', JSON.stringify([{ deviceId: mac, sealed: blob('vk') }]), recovery === null ? null : JSON.stringify(recovery), await entry()])
   const resealed = blob('vk2-recovery')
   await rotate(1, { sealed: resealed })
   expect(await call('identity.password_vault_recovery_begin($1,$2)', [laptop, proof])).toEqual({ epoch: 2, sealed: resealed })

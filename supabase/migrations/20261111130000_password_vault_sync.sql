@@ -78,12 +78,25 @@ CREATE TABLE identity.password_vault_shares (
     FOREIGN KEY (owner_user_id, device_id) REFERENCES identity.password_vault_devices(owner_user_id, device_id) ON DELETE CASCADE
 );
 CREATE UNIQUE INDEX password_vault_shares_one ON identity.password_vault_shares(owner_user_id, device_id, key_epoch, COALESCE(item_id, '00000000-0000-0000-0000-000000000000'::uuid));
+-- Who is in the vault and which key is current, as the devices themselves signed it: one entry per change (create,
+-- approve, re-key, recovery code, recovery). The cloud stores and orders them; it cannot sign them, and every device
+-- accepts an entry only when a member of the entry before it signed it (SYNC.md, "Signed membership").
+CREATE TABLE identity.password_vault_log (
+    owner_user_id text NOT NULL REFERENCES identity.password_vault_heads(owner_user_id) ON DELETE CASCADE,
+    seq bigint NOT NULL CHECK (seq > 0),
+    body text NOT NULL CHECK (length(body) <= 65536),
+    signature text NOT NULL CHECK (signature ~ '^[A-Za-z0-9+/]{86}==$'),
+    attestation text CHECK (attestation ~ '^[A-Za-z0-9+/]{86}==$'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (owner_user_id, seq)
+);
 ALTER TABLE identity.password_vault_heads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE identity.password_vault_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE identity.password_vault_devices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE identity.password_vault_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE identity.password_vault_shares ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON identity.password_vault_heads, identity.password_vault_devices, identity.password_vault_items,
-    identity.password_vault_shares FROM PUBLIC, anon, authenticated, service_role;
+    identity.password_vault_shares, identity.password_vault_log FROM PUBLIC, anon, authenticated, service_role;
 
 CREATE FUNCTION identity.password_vault_owner(p_device_id text) RETURNS text
 LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
@@ -135,6 +148,21 @@ BEGIN
     END LOOP;
 END;
 $$;
+-- Appends the next signed membership entry; entries are numbered without gaps, so two racing writers cannot both land.
+CREATE FUNCTION identity.password_vault_append(p_owner text, p_entry jsonb) RETURNS void
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF jsonb_typeof(p_entry) IS DISTINCT FROM 'object' OR jsonb_typeof(p_entry->'seq') IS DISTINCT FROM 'number'
+        OR jsonb_typeof(p_entry->'body') IS DISTINCT FROM 'string' OR jsonb_typeof(p_entry->'signature') IS DISTINCT FROM 'string' THEN
+        RAISE EXCEPTION 'PASSWORD_VAULT_INPUT: membership entry' USING ERRCODE = '22023';
+    END IF;
+    IF (p_entry->>'seq')::bigint IS DISTINCT FROM COALESCE((SELECT max(seq) FROM identity.password_vault_log WHERE owner_user_id = p_owner), 0) + 1 THEN
+        RAISE EXCEPTION 'PASSWORD_VAULT_STALE: membership changed' USING ERRCODE = '40001';
+    END IF;
+    INSERT INTO identity.password_vault_log(owner_user_id, seq, body, signature, attestation)
+    VALUES (p_owner, (p_entry->>'seq')::bigint, p_entry->>'body', p_entry->>'signature', p_entry->>'attestation');
+END;
+$$;
 -- A deleted approved device (remove_device cascades here) held the current key: the next full device re-keys.
 CREATE FUNCTION identity.password_vault_device_gone() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
@@ -149,7 +177,7 @@ $$;
 CREATE TRIGGER password_vault_device_gone AFTER DELETE ON identity.password_vault_devices
     FOR EACH ROW EXECUTE FUNCTION identity.password_vault_device_gone();
 
-CREATE FUNCTION identity.password_vault_state(p_device_id text, p_since bigint DEFAULT 0) RETURNS jsonb
+CREATE FUNCTION identity.password_vault_state(p_device_id text, p_since bigint DEFAULT 0, p_log_since bigint DEFAULT 0) RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE owner_id text := identity.password_vault_owner(p_device_id); head identity.password_vault_heads; result jsonb;
     my_scope text;
@@ -163,6 +191,9 @@ BEGIN
     SELECT jsonb_build_object('initialized', true, 'epoch', head.key_epoch, 'revision', head.revision::text,
         'rotationRequired', head.rotation_required, 'recovery', head.recovery_public_key IS NOT NULL,
         'recoveryPublicKey', CASE WHEN my_scope = 'full' THEN head.recovery_public_key END,
+        'log', COALESCE((SELECT jsonb_agg(jsonb_build_object('seq', l.seq, 'body', l.body, 'signature', l.signature,
+                'attestation', l.attestation) ORDER BY l.seq)
+            FROM identity.password_vault_log l WHERE l.owner_user_id = owner_id AND l.seq > COALESCE(p_log_since, 0)), '[]'::jsonb),
         'devices', COALESCE((SELECT jsonb_agg(jsonb_build_object('deviceId', v.device_id, 'label', d.label, 'platform', d.platform,
                 'hostKind', d.capabilities->>'host_kind', 'status', v.status, 'scope', v.scope, 'publicKey', v.public_key,
                 'commitment', v.commitment, 'approverDeviceId', v.approver_device_id, 'approverNonce', v.approver_nonce,
@@ -189,12 +220,13 @@ BEGIN
 END;
 $$;
 -- The owner's first device creates the vault and holds its first key.
-CREATE FUNCTION identity.password_vault_initialize(p_device_id text, p_public_key text, p_sealed_key text) RETURNS jsonb
+CREATE FUNCTION identity.password_vault_initialize(p_device_id text, p_public_key text, p_sealed_key text, p_entry jsonb) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE owner_id text := identity.password_vault_owner(p_device_id);
 BEGIN
     INSERT INTO identity.password_vault_heads(owner_user_id, key_epoch) VALUES (owner_id, 1) ON CONFLICT DO NOTHING;
     IF NOT FOUND THEN RAISE EXCEPTION 'PASSWORD_VAULT_STATE: vault already exists' USING ERRCODE = '55000'; END IF;
+    PERFORM identity.password_vault_append(owner_id, p_entry);
     INSERT INTO identity.password_vault_devices(owner_user_id, device_id, public_key, status, scope, approved_at)
     VALUES (owner_id, p_device_id, p_public_key, 'approved', 'full', clock_timestamp());
     PERFORM identity.password_vault_put_shares(owner_id, 1, jsonb_build_array(jsonb_build_object('deviceId', p_device_id, 'sealed', p_sealed_key)));
@@ -248,12 +280,13 @@ END;
 $$;
 -- Step 4: the person compared the codes on both screens. The approver seals keys to exactly the key it compared.
 CREATE FUNCTION identity.password_vault_approve(p_approver_device_id text, p_device_id text, p_public_key text, p_scope text,
-    p_epoch integer, p_shares jsonb) RETURNS void
+    p_epoch integer, p_shares jsonb, p_entry jsonb) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE owner_id text := identity.password_vault_owner(p_approver_device_id);
 BEGIN
     PERFORM identity.password_vault_member(owner_id, p_approver_device_id, true);
     PERFORM identity.password_vault_write(owner_id);
+    PERFORM identity.password_vault_append(owner_id, p_entry);
     IF p_scope IS NULL OR p_scope NOT IN ('full','granted') THEN RAISE EXCEPTION 'PASSWORD_VAULT_INPUT: scope' USING ERRCODE = '22023'; END IF;
     IF p_epoch IS DISTINCT FROM (SELECT key_epoch FROM identity.password_vault_heads WHERE owner_user_id = owner_id) THEN
         RAISE EXCEPTION 'PASSWORD_VAULT_STALE: key epoch changed' USING ERRCODE = '40001';
@@ -371,7 +404,7 @@ $$;
 -- p_recovery: NULL drops the recovery code; {sealed} keeps it, re-sealed to its public key; {publicKey, verifier, sealed}
 -- replaces it with a new code.
 CREATE FUNCTION identity.password_vault_rotate(p_device_id text, p_epoch integer, p_remove_device_ids text[], p_items jsonb, p_shares jsonb,
-    p_recovery jsonb DEFAULT NULL)
+    p_recovery jsonb, p_entry jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE owner_id text := identity.password_vault_owner(p_device_id); next_revision bigint; next_epoch integer; live integer; item jsonb;
@@ -379,6 +412,7 @@ BEGIN
     PERFORM identity.password_vault_member(owner_id, p_device_id, true);
     IF p_device_id = ANY(COALESCE(p_remove_device_ids, '{}')) THEN RAISE EXCEPTION 'PASSWORD_VAULT_INPUT: cannot remove itself' USING ERRCODE = '22023'; END IF;
     next_revision := identity.password_vault_write(owner_id);
+    PERFORM identity.password_vault_append(owner_id, p_entry);
     IF p_epoch IS DISTINCT FROM (SELECT key_epoch FROM identity.password_vault_heads WHERE owner_user_id = owner_id) THEN
         RAISE EXCEPTION 'PASSWORD_VAULT_STALE: key epoch changed' USING ERRCODE = '40001';
     END IF;
@@ -414,13 +448,15 @@ $$;
 
 -- First recovery code (none yet): a full device seals the current vault key to the code's public key. Replacing or
 -- dropping an existing code goes through password_vault_rotate, so the old code stops opening anything.
-CREATE FUNCTION identity.password_vault_set_recovery(p_device_id text, p_epoch integer, p_public_key text, p_verifier text, p_sealed text)
+CREATE FUNCTION identity.password_vault_set_recovery(p_device_id text, p_epoch integer, p_public_key text, p_verifier text, p_sealed text,
+    p_entry jsonb)
 RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE owner_id text := identity.password_vault_owner(p_device_id);
 BEGIN
     PERFORM identity.password_vault_member(owner_id, p_device_id, true);
     PERFORM identity.password_vault_write(owner_id);
+    PERFORM identity.password_vault_append(owner_id, p_entry);
     UPDATE identity.password_vault_heads SET recovery_public_key = p_public_key, recovery_verifier = p_verifier, recovery_sealed = p_sealed
      WHERE owner_user_id = owner_id AND key_epoch = p_epoch AND recovery_public_key IS NULL;
     IF NOT FOUND THEN RAISE EXCEPTION 'PASSWORD_VAULT_STALE: epoch changed or a recovery code exists' USING ERRCODE = '40001'; END IF;
@@ -448,7 +484,8 @@ END;
 $$;
 -- Step 2: the device joins as a full member holding the key it opened, replacing any earlier entry of its own, and the
 -- code is used up.
-CREATE FUNCTION identity.password_vault_recover(p_device_id text, p_proof text, p_public_key text, p_epoch integer, p_sealed_key text)
+CREATE FUNCTION identity.password_vault_recover(p_device_id text, p_proof text, p_public_key text, p_epoch integer, p_sealed_key text,
+    p_entry jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE owner_id text := identity.password_vault_owner(p_device_id); head identity.password_vault_heads; next_revision bigint;
@@ -456,6 +493,7 @@ BEGIN
     next_revision := identity.password_vault_write(owner_id);
     head := identity.password_vault_recovery_proven(owner_id, p_proof);
     IF p_epoch IS DISTINCT FROM head.key_epoch THEN RAISE EXCEPTION 'PASSWORD_VAULT_STALE: key epoch changed' USING ERRCODE = '40001'; END IF;
+    PERFORM identity.password_vault_append(owner_id, p_entry);
     DELETE FROM identity.password_vault_devices WHERE owner_user_id = owner_id AND device_id = p_device_id;
     INSERT INTO identity.password_vault_devices(owner_user_id, device_id, public_key, status, scope, approved_at)
     VALUES (owner_id, p_device_id, p_public_key, 'approved', 'full', clock_timestamp());
@@ -466,27 +504,27 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION identity.password_vault_owner(text), identity.password_vault_write(text),
+REVOKE ALL ON FUNCTION identity.password_vault_owner(text), identity.password_vault_write(text), identity.password_vault_append(text,jsonb),
     identity.password_vault_member(text,text,boolean), identity.password_vault_put_shares(text,integer,jsonb),
-    identity.password_vault_device_gone(), identity.password_vault_state(text,bigint), identity.password_vault_revision(text),
-    identity.password_vault_initialize(text,text,text), identity.password_vault_request(text,text,text),
+    identity.password_vault_device_gone(), identity.password_vault_state(text,bigint,bigint), identity.password_vault_revision(text),
+    identity.password_vault_initialize(text,text,text,jsonb), identity.password_vault_request(text,text,text),
     identity.password_vault_challenge(text,text,text), identity.password_vault_reveal(text,text),
-    identity.password_vault_approve(text,text,text,text,integer,jsonb), identity.password_vault_dismiss(text,text),
+    identity.password_vault_approve(text,text,text,text,integer,jsonb,jsonb), identity.password_vault_dismiss(text,text),
     identity.password_vault_refuse(text,text),
     identity.password_vault_reset(text),
     identity.password_vault_save(text,uuid,bigint,integer,text,text,jsonb), identity.password_vault_delete(text,uuid,bigint),
-    identity.password_vault_rotate(text,integer,text[],jsonb,jsonb,jsonb),
-    identity.password_vault_set_recovery(text,integer,text,text,text), identity.password_vault_recovery_proven(text,text),
-    identity.password_vault_recovery_begin(text,text), identity.password_vault_recover(text,text,text,integer,text)
+    identity.password_vault_rotate(text,integer,text[],jsonb,jsonb,jsonb,jsonb),
+    identity.password_vault_set_recovery(text,integer,text,text,text,jsonb), identity.password_vault_recovery_proven(text,text),
+    identity.password_vault_recovery_begin(text,text), identity.password_vault_recover(text,text,text,integer,text,jsonb)
     FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION identity.password_vault_state(text,bigint), identity.password_vault_revision(text),
-    identity.password_vault_initialize(text,text,text), identity.password_vault_request(text,text,text),
+GRANT EXECUTE ON FUNCTION identity.password_vault_state(text,bigint,bigint), identity.password_vault_revision(text),
+    identity.password_vault_initialize(text,text,text,jsonb), identity.password_vault_request(text,text,text),
     identity.password_vault_challenge(text,text,text), identity.password_vault_reveal(text,text),
-    identity.password_vault_approve(text,text,text,text,integer,jsonb), identity.password_vault_dismiss(text,text),
+    identity.password_vault_approve(text,text,text,text,integer,jsonb,jsonb), identity.password_vault_dismiss(text,text),
     identity.password_vault_refuse(text,text),
     identity.password_vault_reset(text),
     identity.password_vault_save(text,uuid,bigint,integer,text,text,jsonb), identity.password_vault_delete(text,uuid,bigint),
-    identity.password_vault_rotate(text,integer,text[],jsonb,jsonb,jsonb),
-    identity.password_vault_set_recovery(text,integer,text,text,text), identity.password_vault_recovery_begin(text,text),
-    identity.password_vault_recover(text,text,text,integer,text)
+    identity.password_vault_rotate(text,integer,text[],jsonb,jsonb,jsonb,jsonb),
+    identity.password_vault_set_recovery(text,integer,text,text,text,jsonb), identity.password_vault_recovery_begin(text,text),
+    identity.password_vault_recover(text,text,text,integer,text,jsonb)
     TO authenticated;
