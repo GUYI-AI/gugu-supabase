@@ -13,14 +13,13 @@ All application RPCs derive the owner from `auth.uid()`. Scope is `platform` or
 metadata can be read offline, without an assistant, its home, or a private chat.
 Uninitialized snapshots return `not-ready` and null collections. Provider catalog
 presentation can come from the client registry while account state is unavailable.
-The first owner write of an account with no connection head and no legacy
-connection data initializes it natively as owner, epoch 1, stable: the same head the
-cutover writer produces. Accounts with legacy rows, revocations or queued effects are
-refused (`55000`) until imported. Platform publication then becomes ready without a
-native host or a renderer-created collection marker. Any legacy-mode head, including
-a prepared candidate, reads as not-ready from snapshot/resource, and writes and
-pending refuse it (`55000`) until `connection_authority_cutover` hands it over.
-Collection markers cannot promote a candidate.
+Only the maintenance `connection_authority_cutover` creates an owner head (owner,
+epoch 1, stable for an account without legacy data). An owner write never
+initializes an account: with no head, a legacy head or a prepared candidate, writes,
+admission, acknowledgement and pending are refused (`55000`) and snapshot/resource
+read `not-ready`. After the switch, platform publication is ready without a native
+host or a renderer-created collection marker. Collection markers cannot promote a
+candidate. Preparation is refused once an account has been switched.
 
 The native API consists of snapshot/resource, commit, recreate_begin,
 commit_batch, pending, admit and ack. Use named arguments and decimal strings for
@@ -92,7 +91,7 @@ maintenance-only `connection_authority_cutover`; draining legacy HTTP/OAuth effe
 before it remains an operational step.
 
 The installation fixture exercises eighteen groups in transactions that roll back
-its users and temporary API grants; it runs before the cutover release, which is
-what grants the owner RPCs to `authenticated`.
+its users and temporary API grants. It runs at its own release, before the cutover
+release, so its first owner writes still initialize accounts natively there.
 Owner RPC/RLS and the separate official credential-deletion wrapper require
 non-author review before use.

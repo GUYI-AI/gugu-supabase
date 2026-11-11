@@ -1,7 +1,8 @@
 -- Connection authority cutover (#238). Adds the only maintenance writer of
--- authority_mode='owner', opens the owner RPCs to authenticated owners, and
--- makes every owner RPC refuse an account whose authority is not owner. No
--- legacy table, row, policy, function definition or ACL is changed.
+-- authority_mode='owner', opens the owner RPCs to authenticated owners, makes
+-- every owner RPC refuse an account whose authority is not owner, and closes
+-- candidate preparation after the switch. No legacy table, row, policy or ACL is
+-- changed; legacy function definitions are not touched.
 DO $prerequisites$ BEGIN
     IF to_regprocedure('identity.connection_management_write_fence(text,boolean)') IS NULL
         OR to_regprocedure('identity.connection_authority()') IS NULL
@@ -13,90 +14,107 @@ $prerequisites$;
 
 -- The one definition of "this account has legacy connection data": account
 -- rows or tombstones, or unfinished legacy panel operations. Catalog entries
--- and collection markers are not account state.
-CREATE FUNCTION identity.connection_has_legacy_data(p_owner text) RETURNS boolean
+-- and collection markers are not account state. With p_except_assistant, only
+-- rows under any other assistant count (e.g. kept from before a reinstall).
+CREATE FUNCTION identity.connection_has_legacy_data(p_owner text,p_except_assistant text DEFAULT NULL) RETURNS boolean
 LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
     SELECT EXISTS (SELECT 1 FROM identity.assistant_panel_items WHERE owner_user_id = p_owner AND domain = 'integrations'
+            AND assistant_user_id IS DISTINCT FROM p_except_assistant
             AND NOT starts_with(resource_key,'catalog:') AND resource_key <> '__collection__'
             AND NOT starts_with(resource_key,'__collection__:'))
         OR EXISTS (SELECT 1 FROM identity.assistant_panel_changes WHERE owner_user_id = p_owner AND domain = 'integrations'
+            AND assistant_user_id IS DISTINCT FROM p_except_assistant
             AND source = 'panel' AND status IN ('pending','failed'))
 $$;
-REVOKE ALL ON FUNCTION identity.connection_has_legacy_data(text) FROM PUBLIC,anon,authenticated,service_role;
+REVOKE ALL ON FUNCTION identity.connection_has_legacy_data(text,text) FROM PUBLIC,anon,authenticated,service_role;
 
 -- Every owner RPC write path (commit, recreate_begin, commit_batch, admit,
--- ack, platform revoke) passes through this lock. It now requires owner
--- authority. An account with no head and no legacy connection data is
--- initialized natively in the cutover writer's shape: owner, epoch 1, stable.
--- Legacy and prepared-but-not-switched heads are refused.
+-- ack, platform revoke) passes through this lock. It now requires an owner head
+-- written by connection_authority_cutover. Nothing else creates owner heads:
+-- an account with no head, a legacy head or a prepared candidate is refused.
 CREATE OR REPLACE FUNCTION identity.connection_owner_lock(p_owner text) RETURNS void
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
-DECLARE head identity.connection_heads%ROWTYPE;
 BEGIN
     -- Same authority lock as the management write fence and the cutover writer.
     PERFORM pg_advisory_xact_lock(hashtextextended('gugu:connection-authority:' || p_owner,0));
-    SELECT * INTO head FROM identity.connection_heads WHERE owner_user_id = p_owner FOR UPDATE;
-    IF NOT FOUND THEN
-        -- Native initialization is not a migration: an unprepared legacy account
-        -- with account rows/tombstones or pending effects must not become empty.
-        IF identity.connection_has_legacy_data(p_owner) THEN
-            RAISE EXCEPTION 'Connection migration is not prepared' USING ERRCODE = '55000';
-        END IF;
-        INSERT INTO identity.connection_heads(owner_user_id,native_initialized_at,authority_mode,authority_epoch,authority_phase)
-            VALUES(p_owner,clock_timestamp(),'owner',1,'stable') ON CONFLICT DO NOTHING RETURNING * INTO head;
-        IF FOUND THEN
-            PERFORM chat.send_user_event(jsonb_build_object('revision',head.revision::text,'scopeKey',NULL,'resourceKey',NULL,
-                'authorityEpoch',head.authority_epoch::text),'connection_changed','gugu:user:' || p_owner || ':events',true);
-            RETURN;
-        END IF;
-        -- A concurrent preparation created the head first; judge that row.
-        SELECT * INTO head FROM identity.connection_heads WHERE owner_user_id = p_owner FOR UPDATE;
-    END IF;
-    IF head.authority_mode IS DISTINCT FROM 'owner' THEN
+    PERFORM 1 FROM identity.connection_heads WHERE owner_user_id = p_owner FOR UPDATE;
+    IF NOT EXISTS (SELECT 1 FROM identity.connection_heads WHERE owner_user_id = p_owner
+        AND authority_mode = 'owner' AND native_initialized_at IS NOT NULL) THEN
         RAISE EXCEPTION 'Connection authority has not been switched to owner' USING ERRCODE = '55000';
-    END IF;
-    IF head.native_initialized_at IS NULL THEN
-        RAISE EXCEPTION 'Connection candidate has not completed authority handover' USING ERRCODE = '55000';
     END IF;
 END;
 $$;
 REVOKE ALL ON FUNCTION identity.connection_owner_lock(text) FROM PUBLIC,anon,authenticated,service_role;
 
+-- Patch installed definitions in place (one anchored change each, the anchor
+-- must occur exactly once) so OIDs, owners, earlier guards and grants are kept.
 -- Owner reads report a legacy account exactly like an uninitialized one
--- (not-ready / refused pending). Patch the installed definitions in place so
--- the earlier entry-point guards, OIDs, owners and other grants are kept.
-DO $owner_readers$
+-- (not-ready / refused pending). Preparation takes the cutover's lock order and
+-- refuses once the account was switched: re-preparing replaces the candidate
+-- tables, which after the switch are the owner's live state.
+DO $owner_patches$
 DECLARE spec record; fn oid; v_definition text;
 BEGIN
     FOR spec IN SELECT * FROM (VALUES
-      ('identity.connection_snapshot(text)',
+      (1,'identity.connection_snapshot(text)',
        'SELECT revision,native_initialized_at IS NOT NULL INTO head_revision,initialized FROM identity.connection_heads WHERE owner_user_id = owner_id;',
        'SELECT revision,native_initialized_at IS NOT NULL AND authority_mode = ''owner'' INTO head_revision,initialized FROM identity.connection_heads WHERE owner_user_id = owner_id;'),
-      ('identity.connection_resource(text,text)',
+      (2,'identity.connection_resource(text,text)',
        'SELECT revision INTO head_revision FROM identity.connection_heads WHERE owner_user_id = owner_id AND native_initialized_at IS NOT NULL;',
        'SELECT revision INTO head_revision FROM identity.connection_heads WHERE owner_user_id = owner_id AND native_initialized_at IS NOT NULL AND authority_mode = ''owner'';'),
-      ('identity.connection_pending(text)',
+      (3,'identity.connection_pending(text)',
        'SELECT revision INTO head_revision FROM identity.connection_heads WHERE owner_user_id=owner_id AND native_initialized_at IS NOT NULL;',
-       'SELECT revision INTO head_revision FROM identity.connection_heads WHERE owner_user_id=owner_id AND native_initialized_at IS NOT NULL AND authority_mode=''owner'';')
-    ) AS patches(signature,anchor,replacement)
+       'SELECT revision INTO head_revision FROM identity.connection_heads WHERE owner_user_id=owner_id AND native_initialized_at IS NOT NULL AND authority_mode=''owner'';'),
+      (4,'identity.connection_prepare_import(text,text,text,jsonb)',
+       '-- Same order as the old writer: assistant identity, old control, new owner.',
+       '-- Same order as the cutover writer: policy, owner authority, head, assistant, old control.'),
+      (5,'identity.connection_prepare_import(text,text,text,jsonb)',
+       'PERFORM 1 FROM identity.users WHERE id = assistant FOR SHARE;',
+       'PERFORM pg_advisory_xact_lock_shared(hashtextextended(''gugu:connection-management-policy'',0));
+    PERFORM pg_advisory_xact_lock(hashtextextended(''gugu:connection-authority:'' || p_owner,0));
+    PERFORM 1 FROM identity.connection_heads WHERE owner_user_id = p_owner FOR UPDATE;
+    IF EXISTS (SELECT 1 FROM identity.connection_heads WHERE owner_user_id = p_owner
+        AND (authority_mode <> ''legacy'' OR native_initialized_at IS NOT NULL)) THEN
+        RAISE EXCEPTION ''Connection preparation is closed after the authority switch'' USING ERRCODE = ''55000'';
+    END IF;
+    PERFORM 1 FROM identity.users WHERE id = assistant FOR SHARE;')
+    ) AS patches(step,signature,anchor,replacement) ORDER BY step
     LOOP
         fn := to_regprocedure(spec.signature);
-        IF fn IS NULL THEN RAISE EXCEPTION 'Missing owner connection reader: %',spec.signature; END IF;
+        IF fn IS NULL THEN RAISE EXCEPTION 'Missing owner connection function: %',spec.signature; END IF;
         v_definition := pg_get_functiondef(fn);
         IF (length(v_definition)-length(replace(v_definition,spec.anchor,'')))/length(spec.anchor) <> 1 THEN
-            RAISE EXCEPTION 'Owner connection reader has an unexpected body: %',spec.signature;
+            RAISE EXCEPTION 'Owner connection function has an unexpected body: %',spec.signature;
         END IF;
         EXECUTE replace(v_definition,spec.anchor,spec.replacement);
     END LOOP;
 END;
-$owner_readers$;
+$owner_patches$;
+
+-- One immutable row per switch: which path, which audited evidence, which
+-- operator. recorded_by is the database role; operator_id is the person.
+CREATE TABLE identity.connection_authority_switches (
+    owner_user_id text NOT NULL REFERENCES identity.connection_heads(owner_user_id) ON DELETE CASCADE,
+    authority_epoch bigint NOT NULL CHECK (authority_epoch > 0),
+    path text NOT NULL CHECK (path IN ('native','import')),
+    source_digest text CHECK (source_digest IS NULL OR source_digest ~ '^[0-9a-f]{64}$'),
+    manifest_hash text CHECK (manifest_hash IS NULL OR manifest_hash ~ '^[0-9a-f]{64}$'),
+    operator_id text NOT NULL CHECK (operator_id ~ '^[A-Za-z0-9][A-Za-z0-9._@:+-]{0,127}$'),
+    recorded_by text NOT NULL DEFAULT current_user,
+    switched_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (owner_user_id,authority_epoch),
+    CHECK ((path = 'import') = (source_digest IS NOT NULL AND manifest_hash IS NOT NULL)),
+    CHECK (path = 'import' OR source_digest IS NULL AND manifest_hash IS NULL)
+);
+ALTER TABLE identity.connection_authority_switches ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON identity.connection_authority_switches FROM PUBLIC,anon,authenticated,service_role;
 
 -- Maintenance-only authority writer. The only path from legacy to owner.
 -- p_expected_digest/p_manifest_hash NULL: native initialization of an account
 -- without legacy connection data. Otherwise the audited, prepared candidate is
 -- rechecked against the live legacy source and handed over in this transaction.
 -- Any drift raises and rolls back the whole transaction; the account stays legacy.
-CREATE FUNCTION identity.connection_authority_cutover(p_owner text,p_expected_epoch bigint,
+CREATE FUNCTION identity.connection_authority_cutover(p_owner text,p_expected_epoch bigint,p_operator text,
     p_expected_digest text DEFAULT NULL,p_manifest_hash text DEFAULT NULL) RETURNS jsonb
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 DECLARE
@@ -110,6 +128,7 @@ BEGIN
         RAISE EXCEPTION 'Connection cutover requires bounded outer statement and lock timeouts' USING ERRCODE = '22023';
     END IF;
     IF p_owner IS NULL OR p_expected_epoch IS NULL OR p_expected_epoch < 0
+        OR p_operator IS NULL OR p_operator !~ '^[A-Za-z0-9][A-Za-z0-9._@:+-]{0,127}$'
         OR imported AND (p_expected_digest !~ '^[0-9a-f]{64}$' OR p_manifest_hash IS NULL OR p_manifest_hash !~ '^[0-9a-f]{64}$')
         OR NOT imported AND p_manifest_hash IS NOT NULL THEN
         RAISE EXCEPTION 'Connection cutover evidence is invalid' USING ERRCODE = '22023';
@@ -149,6 +168,23 @@ BEGIN
             OR EXISTS (SELECT 1 FROM identity.connection_operations WHERE owner_user_id = p_owner) THEN
             RAISE EXCEPTION 'Connection legacy operations are unfinished' USING ERRCODE = '55000';
         END IF;
+        -- The import covers one assistant; rows under another (e.g. tombstones kept
+        -- from before a reinstall) would be dropped and could be re-added later.
+        IF identity.connection_has_legacy_data(p_owner,assistant) THEN
+            RAISE EXCEPTION 'Connection legacy rows belong to several assistants' USING ERRCODE = '55000';
+        END IF;
+        -- Every staged row must be writable afterwards: connection_scope accepts only
+        -- platform or a device the owner still owns (never legacy:unknown).
+        IF EXISTS (SELECT 1 FROM identity.connection_items i WHERE i.owner_user_id = p_owner
+                AND NOT (i.scope_key = 'platform' AND i.device_id IS NULL
+                    OR i.scope_key = 'device:' || i.device_id AND EXISTS (SELECT 1 FROM identity.gugu_devices d
+                        WHERE d.device_id = i.device_id AND d.user_id::text = p_owner)))
+            OR EXISTS (SELECT 1 FROM identity.connection_operations c WHERE c.owner_user_id = p_owner
+                AND NOT (c.scope_key = 'platform' AND c.device_id IS NULL
+                    OR c.scope_key = 'device:' || c.device_id AND EXISTS (SELECT 1 FROM identity.gugu_devices d
+                        WHERE d.device_id = c.device_id AND d.user_id::text = p_owner))) THEN
+            RAISE EXCEPTION 'Connection candidate has rows outside an owned scope' USING ERRCODE = '55000';
+        END IF;
         -- The staged rows are exactly the live legacy rows, tombstones included.
         IF EXISTS (
             (SELECT resource_key,device_id,revision,data,body_item_id,body_sha256,deleted_at,stale_at,observed_at,updated_at
@@ -184,6 +220,8 @@ BEGIN
         AND authority_phase = 'stable' AND (prepared_at IS NOT NULL) = imported
       RETURNING * INTO head;
     IF NOT FOUND THEN RAISE EXCEPTION 'Connection authority changed during cutover' USING ERRCODE = 'PT409'; END IF;
+    INSERT INTO identity.connection_authority_switches(owner_user_id,authority_epoch,path,source_digest,manifest_hash,operator_id)
+        VALUES(p_owner,head.authority_epoch,CASE WHEN imported THEN 'import' ELSE 'native' END,p_expected_digest,p_manifest_hash,p_operator);
     -- The owner RPCs' existing best-effort hint; online clients re-read.
     PERFORM chat.send_user_event(jsonb_build_object('revision',head.revision::text,'scopeKey',NULL,'resourceKey',NULL,
         'authorityEpoch',head.authority_epoch::text),'connection_changed','gugu:user:' || p_owner || ':events',true);
@@ -191,7 +229,7 @@ BEGIN
         'phase',head.authority_phase,'acceptingNewOperations',head.authority_phase = 'stable');
 END;
 $$;
-REVOKE ALL ON FUNCTION identity.connection_authority_cutover(text,bigint,text,text) FROM PUBLIC,anon,authenticated,service_role;
+REVOKE ALL ON FUNCTION identity.connection_authority_cutover(text,bigint,text,text,text) FROM PUBLIC,anon,authenticated,service_role;
 
 -- Operator resolution of a post-cutover operation whose executor reported
 -- CONNECTION_OUTCOME_UNKNOWN. Bound to that operation's UUID and unknown
@@ -205,6 +243,7 @@ CREATE TABLE identity.connection_unknown_outcome_resolutions (
     outcome text NOT NULL CHECK (outcome IN ('applied','failed','not-started')),
     error_code text CHECK (error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,63}$' AND error_code <> 'CONNECTION_OUTCOME_UNKNOWN'),
     evidence_hash text NOT NULL CHECK (evidence_hash ~ '^[0-9a-f]{64}$'),
+    operator_id text NOT NULL CHECK (operator_id ~ '^[A-Za-z0-9][A-Za-z0-9._@:+-]{0,127}$'),
     recorded_by text NOT NULL DEFAULT current_user,
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (operation_id,admission_id),
@@ -214,13 +253,14 @@ ALTER TABLE identity.connection_unknown_outcome_resolutions ENABLE ROW LEVEL SEC
 REVOKE ALL ON identity.connection_unknown_outcome_resolutions FROM PUBLIC,anon,authenticated,service_role;
 
 CREATE FUNCTION identity.connection_resolve_unknown_outcome(p_owner text,p_operation_id uuid,p_outcome text,
-    p_evidence_hash text,p_error_code text DEFAULT NULL) RETURNS jsonb
+    p_evidence_hash text,p_operator text,p_error_code text DEFAULT NULL) RETURNS jsonb
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 DECLARE change identity.connection_operations%ROWTYPE; admission identity.connection_admissions%ROWTYPE;
     resolution identity.connection_unknown_outcome_resolutions%ROWTYPE; head_revision bigint;
 BEGIN
     IF p_owner IS NULL OR p_operation_id IS NULL OR p_outcome IS NULL OR p_outcome NOT IN ('applied','failed','not-started')
         OR p_evidence_hash IS NULL OR p_evidence_hash !~ '^[0-9a-f]{64}$'
+        OR p_operator IS NULL OR p_operator !~ '^[A-Za-z0-9][A-Za-z0-9._@:+-]{0,127}$'
         OR p_outcome = 'failed' AND (p_error_code IS NULL OR p_error_code !~ '^[A-Z][A-Z0-9_]{0,63}$'
             OR p_error_code = 'CONNECTION_OUTCOME_UNKNOWN')
         OR p_outcome <> 'failed' AND p_error_code IS NOT NULL THEN
@@ -235,10 +275,12 @@ BEGIN
     IF change.source = 'legacy' THEN
         RAISE EXCEPTION 'Imported legacy operations use connection_record_takeover' USING ERRCODE = '55000';
     END IF;
-    -- Repeating the identical recorded decision returns its original receipt.
+    -- Repeating the identical decision for the operation's current admission
+    -- returns its original receipt. An earlier admission's receipt never answers
+    -- a later unknown outcome of the same operation.
     SELECT * INTO resolution FROM identity.connection_unknown_outcome_resolutions
-      WHERE operation_id = p_operation_id AND outcome = p_outcome AND evidence_hash = p_evidence_hash
-        AND error_code IS NOT DISTINCT FROM p_error_code ORDER BY recorded_at DESC LIMIT 1;
+      WHERE operation_id = p_operation_id AND admission_id = change.last_admission_id AND outcome = p_outcome
+        AND evidence_hash = p_evidence_hash AND error_code IS NOT DISTINCT FROM p_error_code;
     IF NOT FOUND THEN
         SELECT * INTO admission FROM identity.connection_admissions
           WHERE admission_id = change.last_admission_id AND operation_id = p_operation_id;
@@ -248,8 +290,8 @@ BEGIN
             RAISE EXCEPTION 'Connection operation outcome is not unknown' USING ERRCODE = 'PT409';
         END IF;
         INSERT INTO identity.connection_unknown_outcome_resolutions(operation_id,admission_id,owner_user_id,request_hash,
-            outcome,error_code,evidence_hash) VALUES(p_operation_id,admission.admission_id,p_owner,change.request_hash,
-            p_outcome,p_error_code,p_evidence_hash) RETURNING * INTO resolution;
+            outcome,error_code,evidence_hash,operator_id) VALUES(p_operation_id,admission.admission_id,p_owner,change.request_hash,
+            p_outcome,p_error_code,p_evidence_hash,p_operator) RETURNING * INTO resolution;
         -- The admission receipt stays immutable and no item is written:
         -- applied completes, failed stays terminal, not-started is admissible
         -- again under the same original UUID.
@@ -263,10 +305,11 @@ BEGIN
             'resourceKey',change.resource_key),'connection_changed','gugu:user:' || p_owner || ':events',true);
     END IF;
     RETURN jsonb_build_object('operationId',resolution.operation_id,'admissionId',resolution.admission_id,
-        'outcome',resolution.outcome,'errorCode',resolution.error_code,'recordedAt',resolution.recorded_at);
+        'outcome',resolution.outcome,'errorCode',resolution.error_code,'operatorId',resolution.operator_id,
+        'recordedAt',resolution.recorded_at);
 END;
 $$;
-REVOKE ALL ON FUNCTION identity.connection_resolve_unknown_outcome(text,uuid,text,text,text) FROM PUBLIC,anon,authenticated,service_role;
+REVOKE ALL ON FUNCTION identity.connection_resolve_unknown_outcome(text,uuid,text,text,text,text) FROM PUBLIC,anon,authenticated,service_role;
 
 -- Open the owner RPCs to signed-in owners only, in the same transaction as
 -- the owner-authority guard above. anon, PUBLIC and service_role stay closed.

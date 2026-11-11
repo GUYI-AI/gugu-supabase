@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { objectKey, ossSign, uriEncode } from '../../../supabase/functions/_shared/oss'
 import { connectionBodyStore, connectionOssGet } from '../../../scripts/platform-connection-bodies.mjs'
-import { connectionCutoverRefusal, parseConnectionOwners } from '../../../scripts/platform-connection-cutover.mjs'
+import { connectionCutoverRefusal, connectionOperatorPattern, cutoverConnectionAccounts, parseConnectionOwners }
+  from '../../../scripts/platform-connection-cutover.mjs'
 
 const oss = { region: 'cn-hangzhou', bucket: 'fixture-bucket', endpoint: 'oss-cn-hangzhou.aliyuncs.com',
   accessKeyId: 'fixture-id', accessKeySecret: 'fixture-secret', objectPrefix: 'env/beta' }
@@ -71,10 +72,24 @@ describe('cutover tool inputs and reports', () => {
       Array.from({ length: 501 }, () => a).join('\n')]) expect(() => parseConnectionOwners(text)).toThrow(/CONNECTION_CUTOVER_/)
   })
 
+  it('refuses to apply without a named operator before touching the database', async () => {
+    for (const ok of ['ops.alice', 'alice@example.com', 'ci-operator', 'a']) expect(connectionOperatorPattern.test(ok)).toBe(true)
+    for (const bad of ['', ' alice', 'two words', '-x', 'x'.repeat(129), 'a;b']) expect(connectionOperatorPattern.test(bad)).toBe(false)
+    const db = { query: async () => { throw new Error('database touched') } }
+    for (const operator of [undefined, 'two words'])
+      await expect(cutoverConnectionAccounts(db, ['6f1c2b9e-1b7e-4f3e-9d43-0a7b8c9d0e1f'], { apply: true, operator }))
+        .rejects.toMatchObject({ code: 'CONNECTION_CUTOVER_OPERATOR_REQUIRED' })
+  })
+
   it('reports stable codes, never raw messages, and SQLSTATEs only for database errors', () => {
     const database = (message: string, code: string) => Object.assign(new Error(message), { code, severity: 'ERROR' })
     expect(connectionCutoverRefusal(database('Connection source changed after preparation', 'PT409')))
       .toEqual({ code: 'CONNECTION_CUTOVER_SOURCE_CHANGED', sqlstate: 'PT409' })
+    for (const [message, code] of [['Connection legacy rows belong to several assistants', 'CONNECTION_CUTOVER_SEVERAL_ASSISTANTS'],
+      ['Connection candidate has rows outside an owned scope', 'CONNECTION_CUTOVER_UNSCOPED_ROWS'],
+      ['Connection platform credentials have no owner mapping yet', 'CONNECTION_CUTOVER_PLATFORM_CREDENTIAL'],
+      ['Connection preparation is closed after the authority switch', 'CONNECTION_CUTOVER_ALREADY_OWNER']])
+      expect(connectionCutoverRefusal(database(message, '55000'))).toEqual({ code, sqlstate: '55000' })
     expect(connectionCutoverRefusal(database('canceling statement due to lock timeout', '55P03')))
       .toEqual({ code: 'CONNECTION_CUTOVER_LOCK_TIMEOUT', sqlstate: '55P03' })
     expect(connectionCutoverRefusal(database('duplicate key value violates unique constraint "secret_name"', '23505')))

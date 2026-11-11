@@ -24,7 +24,8 @@ const storage = { SUPABASE_URL: endpoint, SUPABASE_SERVICE_ROLE_KEY: serviceKey 
 const headers = JSON.stringify({ 'x-gugu-connection-client-version': '999.0.0', 'x-gugu-connection-client-platform': 'desktop' })
 type Legacy = { owner: string; assistant: string; device: string; instance: string; chat: string; provision: string; operation: string }
 const legacy: Legacy[] = [], humans: string[] = [], objects: string[] = []
-let db: pg.Client, imported: Legacy, unfinished: Legacy, fresh: string, orphaned: string
+let db: pg.Client, imported: Legacy, unfinished: Legacy, several: Legacy, fresh: string, orphaned: string
+const operator = 'ci-operator'
 
 async function as<T>(owner: string, action: () => Promise<T>): Promise<T> {
   await db.query("SELECT set_config('request.jwt.claims',$1,false),set_config('request.headers',$2,false)",
@@ -111,6 +112,12 @@ beforeAll(async () => {
   await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,removed_at) VALUES($1,'agent','Removed assistant',$2,now())", [agent, orphaned])
   await db.query(`INSERT INTO identity.assistant_panel_items(assistant_user_id,owner_user_id,domain,resource_key,revision,data,deleted_at)
     VALUES($1,$2,'integrations','["github","orphan"]',1,'{}',now())`, [agent, orphaned])
+  // A reinstalled assistant: tombstones stay under the earlier one, which the import would drop.
+  several = await withAssistant()
+  const earlier = randomUUID()
+  await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,removed_at) VALUES($1,'agent','Earlier assistant',$2,now())", [earlier, several.owner])
+  await db.query(`INSERT INTO identity.assistant_panel_items(assistant_user_id,owner_user_id,domain,resource_key,device_id,revision,data,deleted_at)
+    VALUES($1,$2,'integrations','["github","before-reinstall"]',$3,1,'{}',now())`, [earlier, several.owner, several.device])
 }, 60_000)
 
 afterAll(async () => {
@@ -141,14 +148,17 @@ const byOwner = (report: { accounts: { ownerId: string }[] }) => new Map(report.
 
 it('dry-runs every account without writing and classifies native, import and kept-legacy accounts', async () => {
   const readBody = (_id: string, location: unknown, limit: number) => connectionBodyStore(storage)(location, limit)
-  const report = await cutoverConnectionAccounts(db, [imported.owner, fresh, unfinished.owner, orphaned], { readBody })
+  const report = await cutoverConnectionAccounts(db, [imported.owner, fresh, unfinished.owner, orphaned, several.owner], { readBody })
   expect(await heads()).toEqual([])
   const accounts = byOwner(report)
-  expect(report).toMatchObject({ dryRun: true, summary: { accounts: 4, eligible: 2, 'kept-legacy': 2, switched: 0 } })
+  expect(report).toMatchObject({ dryRun: true, summary: { accounts: 5, eligible: 2, 'kept-legacy': 3, switched: 0 } })
   expect(accounts.get(imported.owner)).toMatchObject({ plan: 'import', result: 'eligible', inventory: { items: 4, operations: 0, verifiedBodies: 2 } })
   expect(accounts.get(fresh)).toMatchObject({ plan: 'native', result: 'eligible', before: { mode: 'legacy', epoch: '0', legacyData: false } })
   expect(accounts.get(unfinished.owner)).toMatchObject({ plan: 'import', result: 'kept-legacy', code: 'CONNECTION_CUTOVER_UNFINISHED_OPERATIONS' })
   expect(accounts.get(orphaned)).toMatchObject({ plan: 'import', result: 'kept-legacy', code: 'CONNECTION_CUTOVER_NO_LEGACY_ASSISTANT' })
+  expect(accounts.get(several.owner)).toMatchObject({ plan: 'import', result: 'kept-legacy', code: 'CONNECTION_CUTOVER_SEVERAL_ASSISTANTS' })
+  await expect(cutoverConnectionAccounts(db, [fresh], { readBody, apply: true })).rejects.toMatchObject({ code: 'CONNECTION_CUTOVER_OPERATOR_REQUIRED' })
+  expect(await heads()).toEqual([])
   expect(JSON.stringify(report)).not.toContain(sentinel)
   const missing = await cutoverConnectionAccounts(db, [imported.owner], {})
   expect(missing.accounts[0]).toMatchObject({ result: 'kept-legacy', code: 'CONNECTION_CUTOVER_BODY_SOURCE_REQUIRED' })
@@ -156,9 +166,15 @@ it('dry-runs every account without writing and classifies native, import and kep
 
 it('applies per account, hands over the audited candidate, refuses old integration writes and reruns as a no-op', async () => {
   const readBody = (_id: string, location: unknown, limit: number) => connectionBodyStore(storage)(location, limit)
-  const owners = [imported.owner, fresh, unfinished.owner, orphaned]
-  const report = await cutoverConnectionAccounts(db, owners, { readBody, apply: true })
-  expect(report).toMatchObject({ dryRun: false, summary: { switched: 2, 'kept-legacy': 2 } })
+  const owners = [imported.owner, fresh, unfinished.owner, orphaned, several.owner]
+  const report = await cutoverConnectionAccounts(db, owners, { readBody, apply: true, operator })
+  expect(report).toMatchObject({ dryRun: false, operator, summary: { switched: 2, 'kept-legacy': 3 } })
+  expect(byOwner(report).get(several.owner)).toMatchObject({ result: 'kept-legacy', code: 'CONNECTION_CUTOVER_SEVERAL_ASSISTANTS' })
+  const recorded = (await db.query(`SELECT owner_user_id,path,operator_id FROM identity.connection_authority_switches
+    WHERE owner_user_id=ANY($1)`, [owners])).rows
+  expect(new Map(recorded.map((row: { owner_user_id: string }) => [row.owner_user_id, row]))).toEqual(new Map([
+    [imported.owner, { owner_user_id: imported.owner, path: 'import', operator_id: operator }],
+    [fresh, { owner_user_id: fresh, path: 'native', operator_id: operator }]]))
   for (const owner of [imported.owner, fresh]) {
     expect(byOwner(report).get(owner)).toMatchObject({ result: 'switched',
       after: { mode: 'owner', epoch: '1', phase: 'stable', initialized: true } })
@@ -173,8 +189,8 @@ it('applies per account, hands over the audited candidate, refuses old integrati
   await expect(commit(imported, JSON.stringify(['github', 'late']), { providerId: 'github', accountId: 'late', configured: true }, null))
     .rejects.toMatchObject({ code: 'PT409' })
   const before = await heads()
-  const rerun = await cutoverConnectionAccounts(db, owners, { readBody, apply: true })
-  expect(rerun.summary).toMatchObject({ 'already-owner': 2, 'kept-legacy': 2, switched: 0 })
+  const rerun = await cutoverConnectionAccounts(db, owners, { readBody, apply: true, operator })
+  expect(rerun.summary).toMatchObject({ 'already-owner': 2, 'kept-legacy': 3, switched: 0 })
   expect(await heads()).toEqual(before)
 })
 
@@ -183,8 +199,13 @@ it('CLI writes a private report, prints only counts and never credentials or bod
   try {
     const ownersFile = join(directory, 'owners.txt'), output = join(directory, 'report.json')
     await writeFile(ownersFile, `# staged list\n${imported.owner}\n${unfinished.owner}\n`, { mode: 0o600 })
-    const args = [cli, '--owners', ownersFile, '--output', output, '--database-url-env', 'GUGU_INTEGRATION_DATABASE_URL', '--bodies-from-storage']
+    const base = [cli, '--owners', ownersFile, '--database-url-env', 'GUGU_INTEGRATION_DATABASE_URL', '--bodies-from-storage']
+    const args = [...base, '--output', output, '--operator', operator]
     const env = { ...process.env, ...storage }
+    // No operator: refused before any report or database work.
+    await expect(execute(process.execPath, [...base, '--output', join(directory, 'anonymous.json')], { env }))
+      .rejects.toMatchObject({ code: 1, stderr: 'CONNECTION_CUTOVER_OPERATOR_REQUIRED\n' })
+    await expect(stat(join(directory, 'anonymous.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     const failure = await execute(process.execPath, args, { env }).catch(error => error)
     expect(failure.code).toBe(2)
     expect(failure.stderr).toBe('')
@@ -192,9 +213,12 @@ it('CLI writes a private report, prints only counts and never credentials or bod
       'kept-legacy': 1, failed: 0, 'not-attempted': 0 })
     expect((await stat(output)).mode & 0o777).toBe(0o600)
     const text = await readFile(output, 'utf8')
+    expect(JSON.parse(text)).toMatchObject({ version: 1, dryRun: true, operator })
     for (const secret of [serviceKey, sentinel, url]) expect(text).not.toContain(secret)
-    await expect(execute(process.execPath, args, { env })).rejects.toMatchObject({ code: 1, stderr: 'CONNECTION_CUTOVER_FAILED\n' })
-    await expect(execute(process.execPath, [cli, '--owners', ownersFile, '--output', join(directory, 'x.json'), '--bodies-dir', directory,
-      '--bodies-from-storage'], { env })).rejects.toMatchObject({ code: 1, stderr: 'CONNECTION_CUTOVER_INVALID_ARGUMENTS\n' })
+    // The report is claimed before the database is touched; an existing one is never replaced.
+    await expect(execute(process.execPath, args, { env })).rejects.toMatchObject({ code: 1, stderr: 'CONNECTION_CUTOVER_REPORT_EXISTS\n' })
+    expect(await readFile(output, 'utf8')).toBe(text)
+    await expect(execute(process.execPath, [...base, '--output', join(directory, 'x.json'), '--operator', operator, '--bodies-dir', directory],
+      { env })).rejects.toMatchObject({ code: 1, stderr: 'CONNECTION_CUTOVER_INVALID_ARGUMENTS\n' })
   } finally { await rm(directory, { recursive: true, force: true }) }
 })

@@ -48,7 +48,7 @@ it('serves the explicit gate through real Auth/JWT/PostgREST and preserves saved
     // The real authority writer, not a hand-written head: owner/1/stable.
     await db.query('BEGIN')
     await db.query("SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'; SET LOCAL transaction_timeout='2s'")
-    expect((await db.query('SELECT identity.connection_authority_cutover($1,0) v',[ownerId])).rows[0].v)
+    expect((await db.query("SELECT identity.connection_authority_cutover($1,0,'access-fixture') v",[ownerId])).rows[0].v)
       .toEqual({version:1,mode:'owner',epoch:'1',phase:'stable',acceptingNewOperations:true})
     await db.query('COMMIT')
     await db.query('UPDATE identity.connection_heads SET revision=2 WHERE owner_user_id=$1',[ownerId])
