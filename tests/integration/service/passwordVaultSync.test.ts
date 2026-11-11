@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
 
@@ -159,9 +159,48 @@ it('removing a device asks for a re-key; the re-key covers every item and every 
 })
 
 it('an empty vault can be started again only when no approved device can open the old one', async () => {
-  await refused(/an approved device can still open the vault/, 'identity.password_vault_reset($1)', [laptop])
+  await refused(/an approved device or the recovery code can still open/, 'identity.password_vault_reset($1)', [laptop])
   await as(owner, 'SELECT identity.remove_device($1)', [mac])
   await call('identity.password_vault_reset($1)', [laptop])
   expect(await state(laptop)).toEqual({ initialized: false })
   expect(await call('identity.password_vault_initialize($1,$2,$3)', [laptop, key(), blob('vk')])).toMatchObject({ epoch: 1 })
+})
+
+it('a recovery code lets a device join without another device; the account alone is not enough; a use consumes it', async () => {
+  const proof = randomBytes(32).toString('base64'), verifier = createHash('sha256').update(Buffer.from(proof, 'base64')).digest('hex')
+  const recoveryKey = key(), sealed = blob('vk-recovery')
+  await refused(/not an approved member/, 'identity.password_vault_set_recovery($1,$2,$3,$4,$5)', [laptop, 1, recoveryKey, verifier, sealed])
+  await call('identity.password_vault_set_recovery($1,$2,$3,$4,$5)', [mac, 1, recoveryKey, verifier, sealed])
+  await refused(/a recovery code exists/, 'identity.password_vault_set_recovery($1,$2,$3,$4,$5)', [mac, 1, key(), verifier, blob('other')])
+  expect(await state(mac)).toMatchObject({ recovery: true, recoveryPublicKey: recoveryKey })
+  // Only full members see the code's public key (they re-seal to it); the cloud keeps only the verifier of the proof.
+  expect(await state(laptop)).toMatchObject({ recovery: true, recoveryPublicKey: null })
+  await refused(/recovery code does not match/, 'identity.password_vault_recovery_begin($1,$2)', [laptop, randomBytes(32).toString('base64')])
+  await refused(/recovery code does not match/, 'identity.password_vault_recover($1,$2,$3,$4,$5)', [laptop, randomBytes(32).toString('base64'), key(), 1, blob('vk')])
+  await refused(/the recovery code can still open/, 'identity.password_vault_reset($1)', [laptop])
+  expect(await call('identity.password_vault_recovery_begin($1,$2)', [laptop, proof])).toEqual({ epoch: 1, sealed })
+  const laptopKey = key()
+  await call('identity.password_vault_recover($1,$2,$3,$4,$5)', [laptop, proof, laptopKey, 1, blob('vk-laptop')])
+  const after = await state(laptop)
+  expect(after).toMatchObject({ recovery: false, recoveryPublicKey: null })
+  expect(after.devices.find((d: any) => d.deviceId === laptop)).toMatchObject({ status: 'approved', scope: 'full', publicKey: laptopKey })
+  expect(after.shares).toEqual([expect.objectContaining({ itemId: null, epoch: 1 })])
+  await refused(/recovery code does not match/, 'identity.password_vault_recovery_begin($1,$2)', [server, proof])
+})
+
+it('re-keying keeps the recovery code (re-sealed), replaces it, or drops it', async () => {
+  const proof = randomBytes(32).toString('base64'), verifier = createHash('sha256').update(Buffer.from(proof, 'base64')).digest('hex')
+  await call('identity.password_vault_set_recovery($1,$2,$3,$4,$5)', [mac, 1, key(), verifier, blob('vk1')])
+  const rotate = (epoch: number, recovery: object | null) => call('identity.password_vault_rotate($1,$2,$3,$4,$5,$6)',
+    [mac, epoch, [], '[]', JSON.stringify([{ deviceId: mac, sealed: blob('vk') }]), recovery === null ? null : JSON.stringify(recovery)])
+  const resealed = blob('vk2-recovery')
+  await rotate(1, { sealed: resealed })
+  expect(await call('identity.password_vault_recovery_begin($1,$2)', [laptop, proof])).toEqual({ epoch: 2, sealed: resealed })
+  const next = randomBytes(32).toString('base64')
+  await rotate(2, { publicKey: key(), verifier: createHash('sha256').update(Buffer.from(next, 'base64')).digest('hex'), sealed: blob('vk3') })
+  await refused(/recovery code does not match/, 'identity.password_vault_recovery_begin($1,$2)', [laptop, proof])
+  expect(await call('identity.password_vault_recovery_begin($1,$2)', [laptop, next])).toMatchObject({ epoch: 3 })
+  await rotate(3, null)
+  expect(await state(mac)).toMatchObject({ epoch: 4, recovery: false })
+  await refused(/recovery code does not match/, 'identity.password_vault_recovery_begin($1,$2)', [laptop, next])
 })
