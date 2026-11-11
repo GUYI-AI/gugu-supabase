@@ -1,24 +1,26 @@
 # Owner connection primitives
 
-These primitives require the preparation release in #209. Application and mutation
-RPCs remain closed to all API roles; only the explicit routing reader is granted
-to authenticated owners. This release does not activate a second writer, replace legacy
-RPCs, select a minimum client version, or shut down old writes. Readiness and
-canonical mapping of prepared legacy rows must be verified before a separate
-authority transition can grant access. Do not run preparation again after native
-activity. No credential is moved by this release.
+These primitives require the preparation release in #209. The owner-runtime release
+kept application and mutation RPCs closed to all API roles. Since the cutover release
+(`20261111100000_connection_authority_cutover`, see `connection-authority-cutover.md`)
+the eight owner RPCs are granted to `authenticated` only, and every one of them treats
+an account whose authority mode is not `owner` as unavailable. Legacy RPCs are not
+replaced and no minimum client version is selected. Do not run preparation again
+after native activity. No credential is moved.
 
 All application RPCs derive the owner from `auth.uid()`. Scope is `platform` or
 `device:<owned device ID>`; platform requests have a null device target. Saved
 metadata can be read offline, without an assistant, its home, or a private chat.
 Uninitialized snapshots return `not-ready` and null collections. Provider catalog
 presentation can come from the client registry while account state is unavailable.
-An explicit first authorization initializes a native head only after rejecting
-unprepared legacy accounts, revocations and queued effects. Platform publication
-then becomes ready without a native host or a renderer-created collection marker.
-Prepared candidates keep a null native initialization timestamp, return not-ready
-and reject writes until a separately approved handover. Collection markers cannot
-promote a candidate.
+The first owner write of an account with no connection head and no legacy
+connection data initializes it natively as owner, epoch 1, stable: the same head the
+cutover writer produces. Accounts with legacy rows, revocations or queued effects are
+refused (`55000`) until imported. Platform publication then becomes ready without a
+native host or a renderer-created collection marker. Any legacy-mode head, including
+a prepared candidate, reads as not-ready from snapshot/resource, and writes and
+pending refuse it (`55000`) until `connection_authority_cutover` hands it over.
+Collection markers cannot promote a candidate.
 
 The native API consists of snapshot/resource, commit, recreate_begin,
 commit_batch, pending, admit and ack. Use named arguments and decimal strings for
@@ -57,7 +59,9 @@ ID before the effect. An already started operation cannot be admitted again.
 Ack records an immutable outcome and never changes an item. A replacement runtime
 on the same owned device can resend a known completed ack. An uncertain effect
 must be terminal `CONNECTION_OUTCOME_UNKNOWN`, without replay or a fresh UUID.
-Unknown outcomes continue to refuse new-task admission until reconciled.
+Unknown outcomes continue to refuse new-task admission until reconciled; for
+native (non-imported) operations the operator reconciles them with
+`connection_resolve_unknown_outcome` (see `connection-authority-cutover.md`).
 Null-operation admission is only a new-task barrier, never effect authorization.
 
 Imported pending is not evidence of an unstarted effect. The maintenance-only
@@ -83,11 +87,12 @@ must be installed before the first new-location client. An unavailable reader is
 an error, not legacy discovery. The closed internal
 `connection_authority_fence(text,bigint)` holds the authority advisory lock and
 head row lock for its surrounding transaction, rejects stale epochs/quiescence,
-and never grants operation admission. The actual write/effect entry-point wiring,
-legacy HTTP drain and epoch-based transition writer remain activation blockers;
-a mode read or API grant alone cannot supply that atomic transition.
+and never grants operation admission. The epoch-based transition writer is the
+maintenance-only `connection_authority_cutover`; draining legacy HTTP/OAuth effects
+before it remains an operational step.
 
 The installation fixture exercises eighteen groups in transactions that roll back
-its users and temporary API grants. The real production roles stay closed.
+its users and temporary API grants; it runs before the cutover release, which is
+what grants the owner RPCs to `authenticated`.
 Owner RPC/RLS and the separate official credential-deletion wrapper require
 non-author review before use.

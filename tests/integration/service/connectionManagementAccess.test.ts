@@ -38,15 +38,20 @@ it('serves the explicit gate through real Auth/JWT/PostgREST and preserves saved
     const anonymous=await rpc('connection_management_access',{},undefined,anon)
     expect(anonymous.status).toBe(401);expect((await anonymous.json()).code).toBe('42501')
     expect((await rpc('connection_management_access',{},undefined,service)).status).toBe(403)
-    // Only the disposable fixture grants the dormant reader to test its body.
-    expect((await db.query('SELECT has_function_privilege(\'authenticated\',$1,\'EXECUTE\') allowed',[name])).rows[0].allowed).toBe(false)
-    await db.query('GRANT EXECUTE ON FUNCTION '+name+' TO authenticated')
+    // The cutover release grants the owner readers to signed-in owners.
+    expect((await db.query('SELECT has_function_privilege(\'authenticated\',$1,\'EXECUTE\') allowed',[name])).rows[0].allowed).toBe(true)
     const refused=await rpc('connection_snapshot',{p_device_id:null},'0.3.1')
     expect(refused.status).toBe(426)
     const error=await refused.json()
     expect(error).toMatchObject({code:'PT426',message:'请升级到 8.0.0-beta.12 版本后再管理连接'})
     expect(JSON.parse(error.details)).toEqual({errorCode:'CONNECTION_CLIENT_UPGRADE_REQUIRED',feature:'connection-management',minimumVersion:'8.0.0-beta.12',clientPlatform:'desktop',policyRevision:nextRevision})
-    await db.query("INSERT INTO identity.connection_heads(owner_user_id,native_initialized_at,authority_mode,revision) VALUES($1,clock_timestamp(),'owner',2)",[ownerId])
+    // The real authority writer, not a hand-written head: owner/1/stable.
+    await db.query('BEGIN')
+    await db.query("SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'; SET LOCAL transaction_timeout='2s'")
+    expect((await db.query('SELECT identity.connection_authority_cutover($1,0) v',[ownerId])).rows[0].v)
+      .toEqual({version:1,mode:'owner',epoch:'1',phase:'stable',acceptingNewOperations:true})
+    await db.query('COMMIT')
+    await db.query('UPDATE identity.connection_heads SET revision=2 WHERE owner_user_id=$1',[ownerId])
     await db.query(`INSERT INTO identity.connection_items(owner_user_id,scope_key,resource_key,revision,data,public_metadata,deleted_at)
       VALUES($1,'platform','["amap","saved"]',1,'{"providerId":"amap","accountId":"saved","configured":true}','{"providerId":"amap","accountId":"saved"}',NULL),
       ($1,'platform','["amap","revoked"]',2,'{"providerId":"amap","accountId":"revoked"}',NULL,clock_timestamp())`,[ownerId])
@@ -58,7 +63,6 @@ it('serves the explicit gate through real Auth/JWT/PostgREST and preserves saved
     expect(snapshot.items.find((x:{resourceKey:string})=>x.resourceKey==='["amap","revoked"]').deletedAt).toBeTruthy()
     expect((await db.query('SELECT to_jsonb(i) value FROM identity.connection_items i WHERE owner_user_id=$1 ORDER BY resource_key',[ownerId])).rows).toEqual(before)
   } finally {
-    await db.query('REVOKE EXECUTE ON FUNCTION '+name+' FROM authenticated')
     await db.query("SELECT identity.connection_management_set_policy(revision,false,'{}') FROM identity.connection_management_client_policy WHERE id")
     if(ownerId)expect((await admin.auth.admin.deleteUser(ownerId)).error).toBeNull()
     await owner.removeAllChannels();await admin.removeAllChannels();await db.end()
