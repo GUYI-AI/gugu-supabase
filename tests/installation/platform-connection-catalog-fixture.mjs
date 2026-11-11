@@ -36,20 +36,27 @@ export async function installConnectionCatalogWithEvidence({ db, query, sql, url
   const result = await query(sql)
 
   await test('directory catalog release patches one span each and keeps the OID, owner, attributes and grants', async () => {
-    const after = await definition()
-    let old = before.prosrc, now = after.prosrc
-    for (const [anchor, present] of patches) {
-      const parts = old.split(anchor)
-      assert.equal(parts.length, 2, `anchor: ${anchor}`)
-      assert.ok(now.startsWith(parts[0]), `only the anchored span changed: ${anchor}`)
-      const tail = now.slice(parts[0].length), end = tail.indexOf(parts[1].slice(0, 200))
-      assert.ok(end >= 0, `the text after the anchor is unchanged: ${anchor}`)
-      const span = tail.slice(0, end)
-      for (const text of present) assert.ok(span.includes(text), `${anchor}: ${text}`)
-      // Continue with the remainder, so later anchors are checked against unchanged text.
-      old = parts[1]; now = tail.slice(end)
+    const after = await definition(), now = after.prosrc
+    // The old body is segment, anchor, segment, ... ; the new one must keep every segment and differ only in the spans.
+    const segments = []
+    let rest = before.prosrc
+    for (const [anchor] of patches) {
+      const parts = rest.split(anchor)
+      assert.equal(parts.length, 2, `anchor occurs once: ${anchor}`)
+      segments.push(parts[0]); rest = parts[1]
     }
-    assert.equal(now, old, 'nothing changed after the last anchor')
+    segments.push(rest)
+    assert.ok(now.startsWith(segments[0]), 'text before the first anchor is unchanged')
+    let at = segments[0].length
+    for (const [index, [anchor, present]] of patches.entries()) {
+      const following = segments[index + 1]
+      const next = index === patches.length - 1 ? now.length - following.length : now.indexOf(following, at)
+      assert.ok(next >= at && now.slice(next, next + following.length) === following, `text after the span is unchanged: ${anchor}`)
+      const span = now.slice(at, next)
+      for (const text of present) assert.ok(span.includes(text), `${anchor}: ${text}`)
+      at = next + following.length
+    }
+    assert.equal(at, now.length, 'nothing else changed')
     assert.deepEqual({ ...after, prosrc: null }, { ...before, prosrc: null })
   })
 
@@ -116,10 +123,13 @@ export async function installConnectionCatalogWithEvidence({ db, query, sql, url
           ($1,$2,'integrations','__collection__:' || $3,$3,3,'{"state":"ready","schemaVersion":1,"itemCount":0}')`, [assistant, owner, home])
       return { owner, home, assistant }
     }
+    // A refusal aborts the subtransaction; reject() rolls it back, which also undoes SET LOCAL ROLE.
     const as = async (user, action) => {
       await db.query("SELECT set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: user, role: 'authenticated' })])
       await db.query('SET LOCAL ROLE authenticated')
-      try { return await action() } finally { await db.query('RESET ROLE') }
+      const value = await action()
+      await db.query('RESET ROLE')
+      return value
     }
     const reject = async (action, code, message) => {
       await db.query('SAVEPOINT catalog_expected_error')
