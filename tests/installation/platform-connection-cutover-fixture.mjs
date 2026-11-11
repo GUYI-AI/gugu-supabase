@@ -113,12 +113,13 @@ export async function installConnectionCutoverWithEvidence({ db, query, sql, url
       }
       const rpc = (user, name, placeholders, values = []) => as(user, async () =>
         (await db.query(`SELECT identity.${name}(${placeholders}) AS result`, values)).rows[0].result)
-      const reject = async (action, code) => {
+      const reject = async (action, code, message) => {
         await db.query('SAVEPOINT cutover_expected_error')
         let error
         try { await action() } catch (caught) { error = caught }
         await db.query('ROLLBACK TO cutover_expected_error; RELEASE cutover_expected_error')
         assert.equal(error?.code, code, error?.message ?? 'expected refusal')
+        if (message) assert.equal(error.message, message)
       }
       // The maintenance writer refuses an unbounded caller; bound only this call.
       const bounded = async (statement, values) => {
@@ -208,7 +209,8 @@ export async function installConnectionCutoverWithEvidence({ db, query, sql, url
         await reject(() => rpc(stale, 'connection_admit', "'absent-runtime',3,NULL"), '55000')
         // A new account cannot switch itself by calling an owner write directly.
         const fresh = await human()
-        await reject(() => rpc(fresh, 'connection_recreate_begin', "$1,'platform',NULL,NULL,NULL,'amap',0", [randomUUID()]), '55000')
+        await reject(() => rpc(fresh, 'connection_recreate_begin', "$1,'platform',NULL,NULL,NULL,'amap',0", [randomUUID()]), '55000',
+          'Connection authority has not been switched to owner')
         await reject(() => rpc(fresh, 'connection_admit', "'absent-runtime',0,NULL"), '55000')
         assert.equal(await head(fresh), null)
         assert.deepEqual(await reader(fresh), { version: 1, mode: 'legacy', epoch: '0', phase: 'stable', acceptingNewOperations: true })
@@ -240,21 +242,23 @@ export async function installConnectionCutoverWithEvidence({ db, query, sql, url
         const tombstone = (owner, key, device, revision = controlRevision) => db.query(`INSERT INTO identity.assistant_panel_items(
           assistant_user_id,owner_user_id,domain,resource_key,device_id,revision,data,deleted_at)
           VALUES($1,$2,'integrations',$3,$4,$5,'{}',clock_timestamp())`, [owner, legacyOwner, key, device, revision])
-        for (const [label, seed] of [
-          ['rows under several assistants', async () => {
+        for (const [label, message, seed] of [
+          ['rows under several assistants', 'Connection legacy rows belong to several assistants', async () => {
             const earlier = randomUUID()
             await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,removed_at) VALUES($1,'agent','Earlier assistant',$2,now())",
               [earlier, legacyOwner])
             await tombstone(earlier, '["github","before-reinstall"]', legacyDevice, 1)
           }],
-          ['a row without a device (staged as legacy:unknown)', () => tombstone(assistant, '["github","no-device"]', null)],
-          ['a row under a device the owner no longer has', () => tombstone(assistant, '["github","gone-device"]', `gone-${randomUUID()}`)],
+          ['a row without a device (staged as legacy:unknown)', 'Connection candidate has rows outside an owned scope',
+            () => tombstone(assistant, '["github","no-device"]', null)],
+          ['a row under a device the owner no longer has', 'Connection candidate has rows outside an owned scope',
+            () => tombstone(assistant, '["github","gone-device"]', `gone-${randomUUID()}`)],
         ]) {
           await db.query('SAVEPOINT outside')
           await seed()
           const outside = await inventory()
           await prepare(outside.databaseDigest, 'e'.repeat(64))
-          await reject(() => cutover(legacyOwner, 0, outside.databaseDigest, 'e'.repeat(64)), '55000')
+          await reject(() => cutover(legacyOwner, 0, outside.databaseDigest, 'e'.repeat(64)), '55000', message)
           assert.equal((await head(legacyOwner)).authority_mode, 'legacy', label)
           await db.query('ROLLBACK TO outside; RELEASE outside')
         }
@@ -311,7 +315,7 @@ export async function installConnectionCutoverWithEvidence({ db, query, sql, url
           WHERE owner_user_id=$1 ORDER BY scope_key,resource_key`, [legacyOwner])).rows
         const switchedRows = await ownerRows(), switchedHead = await head(legacyOwner)
         assert.equal((await inventory()).databaseDigest, source.databaseDigest)
-        await reject(() => prepare(source.databaseDigest, audited.hash), '55000')
+        await reject(() => prepare(source.databaseDigest, audited.hash), '55000', 'Connection preparation is closed after the authority switch')
         assert.deepEqual(await ownerRows(), switchedRows)
         assert.deepEqual(await head(legacyOwner), switchedHead)
         const snapshot = await rpc(legacyOwner, 'connection_snapshot', 'NULL')
