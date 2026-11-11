@@ -13,6 +13,8 @@ import { assertConnectionAuthorityReader } from './platform-connection-authority
 import { installConnectionEntryGateWithEvidence } from './platform-connection-upgrade-entry-fixture.mjs'
 import { assertConnectionManagementGate } from './platform-connection-upgrade-fixture.mjs'
 import { installConnectionCutoverWithEvidence } from './platform-connection-cutover-fixture.mjs'
+import { installConnectionFollowupsWithEvidence } from './platform-connection-followups-fixture.mjs'
+import { installConnectionCatalogWithEvidence, releasedDirectoryRow } from './platform-connection-catalog-fixture.mjs'
 
 // Deliberately requires an empty, disposable Supabase PostgreSQL 17 instance.
 // Never resets schemas, migration history, or user data to make a test pass.
@@ -45,6 +47,14 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     assert.ok(deviceCheckRelease && validationRelease)
     let widgetUpgrade
     const releaseQuery = async (sql) => {
+      const catalogRelease = releases.find(release => release.version.endsWith('_integration_catalog_metadata'))
+      if (catalogRelease && sql.includes(catalogRelease.sql)) {
+        return installConnectionCatalogWithEvidence({ db, query, sql, url: url.href, test: (name, action) => t.test(name, action) })
+      }
+      const followupsRelease = releases.find(release => release.version.endsWith('_connection_cutover_rehearsal_followups'))
+      if (followupsRelease && sql.includes(followupsRelease.sql)) {
+        return installConnectionFollowupsWithEvidence({ db, query, sql, test: (name, action) => t.test(name, action) })
+      }
       const cutoverRelease = releases.find(release => release.version.endsWith('_connection_authority_cutover'))
       if (cutoverRelease && sql.includes(cutoverRelease.sql)) {
         return installConnectionCutoverWithEvidence({ db, query, sql, url: url.href, test: (name, action) => t.test(name, action) })
@@ -450,6 +460,9 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
       return result
     }
     assert.deepEqual(await installReleases(releaseQuery), { applied: versions, versions })
+    await t.test('the installed backend accepts what 0.3.2 clients publish for a provider directory row', async () => {
+      await query(`SELECT identity.assistant_panel_validate('integrations','catalog:amap','${JSON.stringify(releasedDirectoryRow)}'::jsonb)`)
+    })
     await t.test('installed publishers retain directory-allocated names and private grants', async () => {
       await assertAllocatedProjectPublisher(query)
     })

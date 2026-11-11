@@ -38,11 +38,30 @@ function metadata(value, allowed) {
   return value
 }
 
-function payload(value) {
+// A provider directory row may also carry the provider's public category and
+// search aliases ({categoryId, aliases?}), the same bounded shape as
+// identity.assistant_panel_validate; no other row kind may.
+const catalogIdentifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+function directoryMetadata(value) {
+  if (!record(value)) fail('CONNECTION_AUDIT_INVALID_METADATA')
+  const { catalog, ...fields } = value
+  metadata(fields, itemFields)
+  if (catalog !== undefined && catalog !== null && (!record(catalog)
+    || Object.keys(catalog).some(key => key !== 'categoryId' && key !== 'aliases')
+    || typeof catalog.categoryId !== 'string' || !catalogIdentifier.test(catalog.categoryId)
+    || 'aliases' in catalog && (!Array.isArray(catalog.aliases) || catalog.aliases.length > 32
+      || catalog.aliases.some(alias => typeof alias !== 'string' || [...alias].length < 1 || [...alias].length > 128
+        || /[\u0000-\u001f\u007f-\u009f]/.test(alias)))))
+    fail('CONNECTION_AUDIT_UNSUPPORTED_METADATA')
+  if (Buffer.byteLength(stableConnectionJson(value)) > 262_144) fail('CONNECTION_AUDIT_METADATA_TOO_LARGE')
+  return value
+}
+
+function payload(value, directory) {
   if (!record(value)) fail('CONNECTION_AUDIT_INVALID_OPERATION')
   for (const [key, entry] of Object.entries(value)) {
     if (!payloadFields.has(key)) fail('CONNECTION_AUDIT_UNSUPPORTED_OPERATION')
-    if (key === 'data' || key === 'before') metadata(entry, itemFields)
+    if (key === 'data' || key === 'before') directory ? directoryMetadata(entry) : metadata(entry, itemFields)
     else if (!nullableText(entry) && typeof entry !== 'boolean') fail('CONNECTION_AUDIT_INVALID_OPERATION')
   }
   return value
@@ -59,14 +78,24 @@ export async function auditConnectionInventory(source, { readBody } = {}) {
     fail('CONNECTION_AUDIT_INVALID_IDENTITY')
   if (source.items.length > connectionAuditLimits.items || source.operations.length > connectionAuditLimits.operations)
     fail('CONNECTION_AUDIT_TOO_MANY_RECORDS')
+  // Tombstones of removed (reinstalled) assistants are imported; the source lists
+  // those assistants. A prepared candidate keeps each row's assistant but no list.
+  const removedAssistants = source.removedAssistants === undefined ? null : source.removedAssistants
+  if (removedAssistants !== null && (!record(removedAssistants) || !Array.isArray(removedAssistants.assistantIds)
+    || removedAssistants.assistantIds.some(id => !uuid.test(id) || id === source.assistantId))) fail('CONNECTION_AUDIT_INCOMPLETE_SOURCE')
   if (Buffer.byteLength(stableConnectionJson(source)) > connectionAuditLimits.inventoryBytes) fail('CONNECTION_AUDIT_INVENTORY_TOO_LARGE')
 
   const keys = new Set(), operationIds = new Set(), normalizedItems = [], normalizedOperations = [], markers = []
   const groups = new Map(), bodyCache = new Map()
   let totalBodyBytes = 0, verifiedBodies = 0
   for (const item of source.items) {
+    const removedTombstone = record(item) && item.assistant_user_id !== source.assistantId
+    if (removedTombstone && (!uuid.test(item.assistant_user_id ?? '') || !item.deleted_at || item.body_item_id !== null
+      || typeof item.resource_key !== 'string' || item.resource_key.startsWith('catalog:') || item.resource_key === '__collection__'
+      || item.resource_key.startsWith('__collection__:')
+      || removedAssistants !== null && !removedAssistants.assistantIds.includes(item.assistant_user_id))) fail('CONNECTION_AUDIT_INVALID_ITEM')
     if (!record(item) || item.domain !== 'integrations' || item.owner_user_id !== source.ownerId
-      || item.assistant_user_id !== source.assistantId || typeof item.resource_key !== 'string' || !item.resource_key
+      || typeof item.resource_key !== 'string' || !item.resource_key
       || item.resource_key.length > 512 || !decimal(item.revision) || BigInt(item.revision) > BigInt(source.headRevision)
       || !nullableText(item.device_id) || !nullableText(item.deleted_at) || !nullableText(item.stale_at ?? null)
       || !nullableText(item.body_item_id) || !nullableText(item.body_sha256)) fail('CONNECTION_AUDIT_INVALID_ITEM')
@@ -74,7 +103,7 @@ export async function auditConnectionInventory(source, { readBody } = {}) {
     keys.add(item.resource_key)
     const marker = item.resource_key === '__collection__' || item.resource_key.startsWith('__collection__:')
     const kind = marker ? 'collection' : item.resource_key.startsWith('catalog:') ? 'catalog' : 'account'
-    const data = metadata(item.data, marker ? markerFields : itemFields)
+    const data = kind === 'catalog' ? directoryMetadata(item.data) : metadata(item.data, marker ? markerFields : itemFields)
     if (!marker && !item.deleted_at && (typeof data.providerId !== 'string'
       || kind === 'account' && typeof data.accountId !== 'string')) fail('CONNECTION_AUDIT_INVALID_ACCOUNT')
     let publicBody = null
@@ -143,7 +172,7 @@ export async function auditConnectionInventory(source, { readBody } = {}) {
     operationIds.add(operation.operation_id)
     normalizedOperations.push({ operationId: operation.operation_id, resourceKey: operation.resource_key,
       revision: operation.revision, expectedRevision: operation.expected_item_revision, operation: operation.operation,
-      deviceId: operation.device_id, payload: payload(operation.payload), status: operation.status,
+      deviceId: operation.device_id, payload: payload(operation.payload, typeof operation.resource_key === 'string' && operation.resource_key.startsWith('catalog:')), status: operation.status,
       terminalAt: operation.terminal_at ?? null, errorCode: operation.error_code ?? null,
       createdAt: operation.created_at ?? null, appliedAt: operation.applied_at ?? null,
       appliedDeviceId: operation.applied_device_id ?? null, cleanupAttemptedAt: operation.cleanup_attempted_at ?? null,

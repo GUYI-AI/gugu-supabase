@@ -16,10 +16,13 @@ presentation can come from the client registry while account state is unavailabl
 Only the maintenance `connection_authority_cutover` creates an owner head (owner,
 epoch 1, stable for an account without legacy data). An owner write never
 initializes an account: with no head, a legacy head or a prepared candidate, writes,
-admission, acknowledgement and pending are refused (`55000`) and snapshot/resource
-read `not-ready`. After the switch, platform publication is ready without a native
-host or a renderer-created collection marker. Collection markers cannot promote a
-candidate. Preparation is refused once an account has been switched.
+admission, acknowledgement and pending are refused (`PT409`, DETAIL `errorCode`
+`CONNECTION_AUTHORITY_NOT_OWNER`; a quiescing head: `CONNECTION_AUTHORITY_QUIESCING`)
+and snapshot/resource read `not-ready`. A legacy integrations write after the switch
+is `PT409` `CONNECTION_AUTHORITY_SWITCHED`. After the switch, platform publication is
+ready without a native host or a renderer-created collection marker. Collection
+markers cannot promote a candidate. Preparation is refused once an account has been
+switched.
 
 The native API consists of snapshot/resource, commit, recreate_begin,
 commit_batch, pending, admit and ack. Use named arguments and decimal strings for
