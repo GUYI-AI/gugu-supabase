@@ -70,6 +70,8 @@ is no forwarding or second writable metadata source.
    and apply policy/authority/grants under the documented policy/authority locks.
    A database lock cannot cancel an upstream request or an offline old binary.
    The deployment lead must fix and rehearse this CD transaction before use.
+   The authority writer, owner grants and per-account tool are described in
+   `docs/connection-authority-cutover.md`; that release leaves this policy OFF.
 5. Verify explicit refusal, upgrade/re-read with the same identity, original
    authorization/credential custody, tombstones and original UUID receipts.
    No reset or reauthorization is part of upgrading.
