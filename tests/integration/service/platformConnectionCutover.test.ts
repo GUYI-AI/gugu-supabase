@@ -108,7 +108,7 @@ beforeAll(async () => {
   // Legacy rows whose assistant is no longer provisioned: neither importable nor empty.
   orphaned = await human()
   const agent = randomUUID()
-  await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id) VALUES($1,'agent','Removed assistant',$2)", [agent, orphaned])
+  await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,removed_at) VALUES($1,'agent','Removed assistant',$2,now())", [agent, orphaned])
   await db.query(`INSERT INTO identity.assistant_panel_items(assistant_user_id,owner_user_id,domain,resource_key,revision,data,deleted_at)
     VALUES($1,$2,'integrations','["github","orphan"]',1,'{}',now())`, [agent, orphaned])
 }, 60_000)
