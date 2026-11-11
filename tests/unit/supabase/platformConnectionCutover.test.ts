@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { objectKey, ossSign, uriEncode } from '../../../supabase/functions/_shared/oss'
 import { connectionBodyStore, connectionOssGet } from '../../../scripts/platform-connection-bodies.mjs'
-import { connectionCutoverRefusal, connectionOperatorPattern, cutoverConnectionAccounts, parseConnectionOwners }
+import { connectionCutoverExitCode, connectionCutoverRefusal, connectionOperatorPattern, cutoverConnectionAccounts, parseConnectionOwners }
   from '../../../scripts/platform-connection-cutover.mjs'
 
 const oss = { region: 'cn-hangzhou', bucket: 'fixture-bucket', endpoint: 'oss-cn-hangzhou.aliyuncs.com',
@@ -98,5 +98,85 @@ describe('cutover tool inputs and reports', () => {
       .toEqual({ code: 'CONNECTION_BODY_UNAVAILABLE' })
     expect(connectionCutoverRefusal(Object.assign(new Error('x'), { code: 'CONNECTION_AUDIT_BODY_HASH_MISMATCH' })))
       .toEqual({ code: 'CONNECTION_AUDIT_BODY_HASH_MISMATCH' })
+  })
+
+  it('uses one code for a collection that is not ready, wherever it is detected', () => {
+    const database = (message: string) => Object.assign(new Error(message), { code: '55000', severity: 'ERROR' })
+    for (const message of ['Connection legacy control is unprepared', 'Connection collection is incomplete', 'Connection collection is unprepared'])
+      expect(connectionCutoverRefusal(database(message))).toEqual({ code: 'CONNECTION_CUTOVER_COLLECTION_NOT_READY', sqlstate: '55000' })
+    for (const code of ['CONNECTION_AUDIT_COLLECTION_NOT_READY', 'CONNECTION_AUDIT_COLLECTION_COUNT_MISMATCH', 'CONNECTION_AUDIT_INVALID_COLLECTION_DEVICE'])
+      expect(connectionCutoverRefusal(Object.assign(new Error(code), { code }))).toEqual({ code: 'CONNECTION_CUTOVER_COLLECTION_NOT_READY' })
+  })
+
+  it('tells a lost database session apart from other failures', () => {
+    for (const error of [Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }), new Error('Connection terminated unexpectedly'),
+      Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), { code: 'ECONNREFUSED' })])
+      expect(connectionCutoverRefusal(error)).toEqual({ code: 'CONNECTION_CUTOVER_DATABASE_CONNECTION_LOST' })
+    expect(connectionCutoverRefusal(Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01', severity: 'FATAL' })))
+      .toEqual({ code: 'CONNECTION_CUTOVER_DATABASE_CONNECTION_LOST', sqlstate: '57P01' })
+    expect(connectionCutoverRefusal(new Error('something else'))).toEqual({ code: 'CONNECTION_CUTOVER_FAILED' })
+  })
+})
+
+// A scripted database for the per-account flow: heads, credential custody and the cutover write.
+function scripted({ mode = 'legacy', credentials }: { mode?: 'legacy' | 'owner'; credentials: number[] | null }) {
+  let head = mode === 'owner' ? { mode: 'owner', epoch: '1', phase: 'stable', prepared: false, initialized: true } : null
+  const counts = credentials && [...credentials]
+  const query = async (sql: string) => {
+    if (/^(BEGIN|COMMIT|ROLLBACK|SET LOCAL|SAVEPOINT|RELEASE)/.test(sql)) return { rows: [] }
+    if (sql.includes("to_regclass('integrations.credentials')")) return { rows: [{ present: counts !== null }] }
+    if (sql.includes('FROM integrations.credentials')) return { rows: [{ n: counts!.length > 1 ? counts!.shift() : counts![0] }] }
+    if (sql.includes('FROM identity.connection_heads')) return { rows: head ? [head] : [] }
+    if (sql.includes('FROM identity.users')) return { rows: [{ available: true }] }
+    if (sql.includes('connection_has_legacy_data')) return { rows: [{ value: false }] }
+    if (sql.includes('identity.gugu_devices')) return { rows: [] }
+    if (sql.includes('connection_legacy_inventory')) return { rows: [{ value: { identityState: 'none' } }] }
+    if (sql.includes('connection_authority_cutover')) {
+      head = { mode: 'owner', epoch: '1', phase: 'stable', prepared: false, initialized: true }
+      return { rows: [{ result: {} }] }
+    }
+    throw new Error(`unexpected query: ${sql}`)
+  }
+  return { query }
+}
+
+describe('cutover tool platform credential custody', () => {
+  const owner = '6f1c2b9e-1b7e-4f3e-9d43-0a7b8c9d0e1f'
+  const run = (db: ReturnType<typeof scripted>, apply = false) => cutoverConnectionAccounts(db, [owner], { apply, operator: 'ops.alice' })
+
+  it('counts credentials of already-owner accounts and exits 2 when any remain', async () => {
+    const held = await run(scripted({ mode: 'owner', credentials: [2] }))
+    expect(held.accounts[0]).toMatchObject({ result: 'already-owner', code: 'CONNECTION_CUTOVER_STRANDED_PLATFORM_CREDENTIAL', platformCredentials: 2 })
+    expect(held.summary).toMatchObject({ 'already-owner': 1, stranded: 1 })
+    expect(connectionCutoverExitCode(held.summary)).toBe(2)
+    const clear = await run(scripted({ mode: 'owner', credentials: [0] }))
+    expect(clear.accounts[0]).toMatchObject({ result: 'already-owner', platformCredentials: 0 })
+    expect(clear.accounts[0].code).toBeUndefined()
+    expect(connectionCutoverExitCode(clear.summary)).toBe(0)
+    // Community installs have no custody table: nothing to count, nothing reported.
+    const community = await run(scripted({ mode: 'owner', credentials: null }))
+    expect(community.accounts[0]).not.toHaveProperty('platformCredentials')
+    expect(connectionCutoverExitCode(community.summary)).toBe(0)
+  })
+
+  it('recounts after a switch, and keeps an account with credentials legacy before it', async () => {
+    const appeared = await run(scripted({ credentials: [0, 1] }), true)
+    expect(appeared.accounts[0]).toMatchObject({ plan: 'native', result: 'switched', platformCredentials: 1,
+      code: 'CONNECTION_CUTOVER_STRANDED_PLATFORM_CREDENTIAL' })
+    expect(appeared.accounts[0].switchedAt).toMatch(/Z$/)
+    expect(connectionCutoverExitCode(appeared.summary)).toBe(2)
+    const held = await run(scripted({ credentials: [3] }), true)
+    expect(held.accounts[0]).toMatchObject({ result: 'kept-legacy', code: 'CONNECTION_CUTOVER_PLATFORM_CREDENTIAL', platformCredentials: 3 })
+    const switched = await run(scripted({ credentials: [0] }), true)
+    expect(switched.accounts[0]).toMatchObject({ result: 'switched', platformCredentials: 0 })
+    expect(connectionCutoverExitCode(switched.summary)).toBe(0)
+  })
+
+  it('stops the run on a lost session and reports when', async () => {
+    const lost = { query: async () => { throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) } }
+    const report = await cutoverConnectionAccounts(lost, [owner, '0e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b'], {})
+    expect(report.accounts).toMatchObject([{ result: 'failed', code: 'CONNECTION_CUTOVER_DATABASE_CONNECTION_LOST', failedAt: expect.stringMatching(/Z$/) },
+      { result: 'not-attempted' }])
+    expect(connectionCutoverExitCode(report.summary)).toBe(2)
   })
 })

@@ -59,14 +59,24 @@ export async function auditConnectionInventory(source, { readBody } = {}) {
     fail('CONNECTION_AUDIT_INVALID_IDENTITY')
   if (source.items.length > connectionAuditLimits.items || source.operations.length > connectionAuditLimits.operations)
     fail('CONNECTION_AUDIT_TOO_MANY_RECORDS')
+  // Tombstones of removed (reinstalled) assistants are imported; the source lists
+  // those assistants. A prepared candidate keeps each row's assistant but no list.
+  const removedAssistants = source.removedAssistants === undefined ? null : source.removedAssistants
+  if (removedAssistants !== null && (!record(removedAssistants) || !Array.isArray(removedAssistants.assistantIds)
+    || removedAssistants.assistantIds.some(id => !uuid.test(id) || id === source.assistantId))) fail('CONNECTION_AUDIT_INCOMPLETE_SOURCE')
   if (Buffer.byteLength(stableConnectionJson(source)) > connectionAuditLimits.inventoryBytes) fail('CONNECTION_AUDIT_INVENTORY_TOO_LARGE')
 
   const keys = new Set(), operationIds = new Set(), normalizedItems = [], normalizedOperations = [], markers = []
   const groups = new Map(), bodyCache = new Map()
   let totalBodyBytes = 0, verifiedBodies = 0
   for (const item of source.items) {
+    const removedTombstone = record(item) && item.assistant_user_id !== source.assistantId
+    if (removedTombstone && (!uuid.test(item.assistant_user_id ?? '') || !item.deleted_at || item.body_item_id !== null
+      || typeof item.resource_key !== 'string' || item.resource_key.startsWith('catalog:') || item.resource_key === '__collection__'
+      || item.resource_key.startsWith('__collection__:')
+      || removedAssistants !== null && !removedAssistants.assistantIds.includes(item.assistant_user_id))) fail('CONNECTION_AUDIT_INVALID_ITEM')
     if (!record(item) || item.domain !== 'integrations' || item.owner_user_id !== source.ownerId
-      || item.assistant_user_id !== source.assistantId || typeof item.resource_key !== 'string' || !item.resource_key
+      || typeof item.resource_key !== 'string' || !item.resource_key
       || item.resource_key.length > 512 || !decimal(item.revision) || BigInt(item.revision) > BigInt(source.headRevision)
       || !nullableText(item.device_id) || !nullableText(item.deleted_at) || !nullableText(item.stale_at ?? null)
       || !nullableText(item.body_item_id) || !nullableText(item.body_sha256)) fail('CONNECTION_AUDIT_INVALID_ITEM')

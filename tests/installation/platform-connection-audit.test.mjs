@@ -85,6 +85,32 @@ test('rejects unprepared/error collections, wrong counts, duplicate keys and for
   }
 })
 
+test('accepts only bare account tombstones of listed removed assistants, without changing the manifest identity', async () => {
+  const removed = randomUUID()
+  const withTombstone = (f, item = {}) => {
+    f.source.removedAssistants = { assistantIds: [removed], importedTombstones: 1, supersededTombstones: 0, excludedRows: 0, excludedOperations: 0 }
+    f.source.items.push({ ...f.source.items[2], assistant_user_id: removed, resource_key: '["github","before-reinstall"]', ...item })
+    return f
+  }
+  const f = withTombstone(fixture()), audit = await auditConnectionInventory(f.source, f)
+  assert.equal(audit.counts.find(row => row.scope[2] === 'revoked').count, 2)
+  // A prepared candidate carries each row's assistant but no list; it audits to the same manifest.
+  delete f.source.removedAssistants
+  assert.equal((await auditConnectionInventory(f.source, f)).hash, audit.hash)
+  for (const [label, mutate] of [
+    ['unlisted assistant', f => { f.source.removedAssistants.assistantIds = [] }],
+    ['the source assistant listed as removed', f => { f.source.removedAssistants.assistantIds.push(f.source.assistantId) }],
+    ['a live row', f => { f.source.items.at(-1).deleted_at = null; f.source.items.at(-1).data = { providerId: 'github', accountId: 'before-reinstall' } }],
+    ['a catalog row', f => { f.source.items.at(-1).resource_key = 'catalog:gitlab' }],
+    ['a collection marker', f => { f.source.items.at(-1).resource_key = '__collection__' }],
+    ['a body reference', f => { f.source.items.at(-1).body_item_id = randomUUID(); f.source.items.at(-1).body_sha256 = 'c'.repeat(64) }],
+    ['not an assistant id', f => { f.source.items.at(-1).assistant_user_id = 'not-a-uuid' }],
+  ]) {
+    const g = withTombstone(fixture()); mutate(g)
+    await assert.rejects(auditConnectionInventory(g.source, g), /CONNECTION_AUDIT_/, label)
+  }
+})
+
 test('detects a dropped tombstone, changed route and changed source revision', async () => {
   for (const mutate of [
     f => { f.source.items = f.source.items.filter(item => !item.deleted_at); f.source.operations = [] },

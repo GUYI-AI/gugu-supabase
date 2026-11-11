@@ -23,8 +23,9 @@ const storage = { SUPABASE_URL: endpoint, SUPABASE_SERVICE_ROLE_KEY: serviceKey 
 // Declare a current client so a concurrently enabled version policy never refuses this fixture.
 const headers = JSON.stringify({ 'x-gugu-connection-client-version': '999.0.0', 'x-gugu-connection-client-platform': 'desktop' })
 type Legacy = { owner: string; assistant: string; device: string; instance: string; chat: string; provision: string; operation: string }
-const legacy: Legacy[] = [], humans: string[] = [], objects: string[] = []
-let db: pg.Client, imported: Legacy, unfinished: Legacy, several: Legacy, fresh: string, orphaned: string
+const legacy: Legacy[] = [], humans: string[] = [], objects: string[] = [], provisions: { id: string; operation: string }[] = []
+let db: pg.Client, imported: Legacy, unfinished: Legacy, reinstalled: Legacy, reinstalledLive: Legacy, twoLive: Legacy, doubled: Legacy
+let fresh: string, orphaned: string, earlier: string
 const operator = 'ci-operator'
 
 async function as<T>(owner: string, action: () => Promise<T>): Promise<T> {
@@ -78,6 +79,30 @@ async function body(account: Legacy, data: object) {
   return { id, hash }
 }
 
+// Another agent of the same owner. Removed agents have no execution device; a provisioned
+// one also has a completed assistant provision (a double provision when the account has one).
+async function agent(account: Legacy, { removed, provisioned = false }: { removed: boolean; provisioned?: boolean }) {
+  const id = randomUUID()
+  await db.query(`INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id,removed_at)
+    VALUES($1,'agent','Other assistant',$2,$3,CASE WHEN $4::boolean THEN now() END)`, [id, account.owner, removed ? null : account.device, removed])
+  if (provisioned) {
+    const provision = { id: randomUUID(), operation: randomUUID() }
+    await db.query(`INSERT INTO identity.agent_provision_operations(id,owner_user_id,device_id,kind,payload_hash,blueprint,phase)
+      VALUES($1,$2,$3,'single','fixture','{}','completed')`, [provision.operation, account.owner, account.device])
+    await db.query(`INSERT INTO identity.agent_provisions(id,owner_user_id,operation_id,member_key,device_id,display_name,agent_type,
+      inherit_memory,history_import_required,payload_hash,agent_user_id,provisioned_agent_user_id,phase)
+      VALUES($1,$2,$3,'assistant',$4,'Other assistant','claude-code',false,false,'fixture',$5::text,$5::text::uuid,'completed')`,
+    [provision.id, account.owner, provision.operation, account.device, id])
+    provisions.push(provision)
+  }
+  return id
+}
+
+const panelRow = (assistant: string, account: Legacy, key: string, deleted: boolean) => db.query(`INSERT INTO identity.assistant_panel_items(
+  assistant_user_id,owner_user_id,domain,resource_key,device_id,revision,data,deleted_at)
+  VALUES($1,$2,'integrations',$3,$4,1,$5,CASE WHEN $6::boolean THEN now() END)`,
+[assistant, account.owner, key, account.device, deleted ? {} : { providerId: 'github', accountId: JSON.parse(key)[1], configured: true }, deleted])
+
 const commit = (account: Legacy, key: string, data: object, file: { id: string; hash: string } | null,
   revision = '0', action = 'save', runtime: string | null = account.instance, domain = 'integrations') =>
   as(account.owner, async () => (await db.query(`SELECT identity.assistant_panel_commit($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) AS receipt`,
@@ -112,12 +137,24 @@ beforeAll(async () => {
   await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,removed_at) VALUES($1,'agent','Removed assistant',$2,now())", [agent, orphaned])
   await db.query(`INSERT INTO identity.assistant_panel_items(assistant_user_id,owner_user_id,domain,resource_key,revision,data,deleted_at)
     VALUES($1,$2,'integrations','["github","orphan"]',1,'{}',now())`, [agent, orphaned])
-  // A reinstalled assistant: tombstones stay under the earlier one, which the import would drop.
-  several = await withAssistant()
-  const earlier = randomUUID()
-  await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,removed_at) VALUES($1,'agent','Earlier assistant',$2,now())", [earlier, several.owner])
-  await db.query(`INSERT INTO identity.assistant_panel_items(assistant_user_id,owner_user_id,domain,resource_key,device_id,revision,data,deleted_at)
-    VALUES($1,$2,'integrations','["github","before-reinstall"]',$3,1,'{}',now())`, [earlier, several.owner, several.device])
+  // Reinstalled assistants: the removed earlier one's tombstone is imported, its live row is not.
+  const ready = (account: Legacy) => commit(account, `__collection__:${account.device}`, { state: 'ready', schemaVersion: 1, itemCount: 0 }, null, '0', 'prepared')
+  reinstalled = await withAssistant()
+  await ready(reinstalled)
+  earlier = await agent(reinstalled, { removed: true })
+  await panelRow(earlier, reinstalled, '["github","before-reinstall"]', true)
+  reinstalledLive = await withAssistant()
+  await ready(reinstalledLive)
+  await panelRow(await agent(reinstalledLive, { removed: true }), reinstalledLive, '["github","old-live"]', false)
+  // A second assistant that is not removed could keep using its rows: refused.
+  twoLive = await withAssistant()
+  await ready(twoLive)
+  await panelRow(await agent(twoLive, { removed: false }), twoLive, '["github","other-live"]', true)
+  // Two completed assistant provisions, one of them removed: the live one is the source.
+  doubled = await withAssistant()
+  await ready(doubled)
+  await agent(doubled, { removed: true, provisioned: true })
+  await panelRow(doubled.assistant, doubled, '["github","revoked-here"]', true)
 }, 60_000)
 
 afterAll(async () => {
@@ -128,6 +165,11 @@ afterAll(async () => {
     await db.query('DELETE FROM identity.connection_heads WHERE owner_user_id=ANY($1)', [owners])
     await db.query('DELETE FROM identity.assistant_panel_changes WHERE owner_user_id=ANY($1)', [owners])
     await db.query('DELETE FROM identity.assistant_panel_items WHERE owner_user_id=ANY($1)', [owners])
+    for (const provision of provisions) {
+      await db.query('DELETE FROM identity.agent_provisions WHERE id=$1', [provision.id])
+      await db.query('DELETE FROM identity.agent_provision_operations WHERE id=$1', [provision.operation])
+    }
+    await db.query("DELETE FROM identity.users WHERE owner_user_id=ANY($1) AND type='agent' AND id<>ALL($2)", [owners, legacy.map(account => account.assistant)])
     for (const account of legacy) {
       await db.query('DELETE FROM chat.chats WHERE id=$1', [account.chat])
       await db.query('DELETE FROM identity.agent_provisions WHERE id=$1', [account.provision])
@@ -142,55 +184,85 @@ afterAll(async () => {
   } finally { await db.end() }
 })
 
+
 const heads = async () => (await db.query(`SELECT owner_user_id,authority_mode,authority_epoch::text AS epoch,authority_phase,
   native_initialized_at IS NOT NULL AS initialized FROM identity.connection_heads WHERE owner_user_id=ANY($1) ORDER BY owner_user_id`, [humans])).rows
 const byOwner = (report: { accounts: { ownerId: string }[] }) => new Map(report.accounts.map(account => [account.ownerId, account as Record<string, unknown>]))
+const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const switchable = () => [imported.owner, fresh, reinstalled.owner, reinstalledLive.owner, doubled.owner]
+const everyone = () => [imported.owner, fresh, unfinished.owner, orphaned, reinstalled.owner, reinstalledLive.owner, twoLive.owner, doubled.owner]
+const keys = async (owner: string) => (await as(owner, async () => (await db.query('SELECT identity.connection_snapshot(NULL) AS v')).rows[0].v))
+  .items.map((item: { resourceKey: string; deletedAt: string | null }) => [item.resourceKey, item.deletedAt !== null]).sort()
 
 it('dry-runs every account without writing and classifies native, import and kept-legacy accounts', async () => {
   const readBody = (_id: string, location: unknown, limit: number) => connectionBodyStore(storage)(location, limit)
-  const report = await cutoverConnectionAccounts(db, [imported.owner, fresh, unfinished.owner, orphaned, several.owner], { readBody })
+  const report = await cutoverConnectionAccounts(db, everyone(), { readBody })
   expect(await heads()).toEqual([])
   const accounts = byOwner(report)
-  expect(report).toMatchObject({ dryRun: true, summary: { accounts: 5, eligible: 2, 'kept-legacy': 3, switched: 0 } })
-  expect(accounts.get(imported.owner)).toMatchObject({ plan: 'import', result: 'eligible', inventory: { items: 4, operations: 0, verifiedBodies: 2 } })
+  expect(report).toMatchObject({ dryRun: true, summary: { accounts: 8, eligible: 5, 'kept-legacy': 3, switched: 0, stranded: 0 } })
+  expect(report.startedAt).toMatch(iso); expect(report.finishedAt).toMatch(iso)
+  expect(report.startedAt <= report.finishedAt).toBe(true)
+  for (const account of report.accounts) expect(account.readAt).toMatch(iso)
+  // Connections apart from provider catalogs and collection markers.
+  expect(accounts.get(imported.owner)).toMatchObject({ plan: 'import', result: 'eligible', inventory: {
+    connections: { live: 1, retired: 0, revoked: 1 }, catalogs: 1, markers: 1, operations: 0, verifiedBodies: 2 } })
   expect(accounts.get(fresh)).toMatchObject({ plan: 'native', result: 'eligible', before: { mode: 'legacy', epoch: '0', legacyData: false } })
   expect(accounts.get(unfinished.owner)).toMatchObject({ plan: 'import', result: 'kept-legacy', code: 'CONNECTION_CUTOVER_UNFINISHED_OPERATIONS' })
   expect(accounts.get(orphaned)).toMatchObject({ plan: 'import', result: 'kept-legacy', code: 'CONNECTION_CUTOVER_NO_LEGACY_ASSISTANT' })
-  expect(accounts.get(several.owner)).toMatchObject({ plan: 'import', result: 'kept-legacy', code: 'CONNECTION_CUTOVER_SEVERAL_ASSISTANTS' })
+  expect(accounts.get(reinstalled.owner)).toMatchObject({ plan: 'import', result: 'eligible',
+    removedAssistants: { importedTombstones: 1, supersededTombstones: 0, excludedRows: 0, excludedOperations: 0 },
+    inventory: { connections: { live: 0, retired: 0, revoked: 1 }, catalogs: 0, markers: 1 } })
+  expect(accounts.get(reinstalledLive.owner)).toMatchObject({ plan: 'import', result: 'eligible',
+    removedAssistants: { importedTombstones: 0, supersededTombstones: 0, excludedRows: 1, excludedOperations: 0 },
+    inventory: { connections: { live: 0, retired: 0, revoked: 0 }, markers: 1 } })
+  expect(accounts.get(twoLive.owner)).toMatchObject({ plan: 'import', result: 'kept-legacy', code: 'CONNECTION_CUTOVER_SEVERAL_ASSISTANTS' })
+  expect(accounts.get(doubled.owner)).toMatchObject({ plan: 'import', result: 'eligible', inventory: { connections: { revoked: 1 } } })
   await expect(cutoverConnectionAccounts(db, [fresh], { readBody, apply: true })).rejects.toMatchObject({ code: 'CONNECTION_CUTOVER_OPERATOR_REQUIRED' })
   expect(await heads()).toEqual([])
   expect(JSON.stringify(report)).not.toContain(sentinel)
+  expect(JSON.stringify(report)).not.toContain(earlier)
   const missing = await cutoverConnectionAccounts(db, [imported.owner], {})
   expect(missing.accounts[0]).toMatchObject({ result: 'kept-legacy', code: 'CONNECTION_CUTOVER_BODY_SOURCE_REQUIRED' })
 })
 
 it('applies per account, hands over the audited candidate, refuses old integration writes and reruns as a no-op', async () => {
   const readBody = (_id: string, location: unknown, limit: number) => connectionBodyStore(storage)(location, limit)
-  const owners = [imported.owner, fresh, unfinished.owner, orphaned, several.owner]
+  const owners = everyone()
   const report = await cutoverConnectionAccounts(db, owners, { readBody, apply: true, operator })
-  expect(report).toMatchObject({ dryRun: false, operator, summary: { switched: 2, 'kept-legacy': 3 } })
-  expect(byOwner(report).get(several.owner)).toMatchObject({ result: 'kept-legacy', code: 'CONNECTION_CUTOVER_SEVERAL_ASSISTANTS' })
+  expect(report).toMatchObject({ dryRun: false, operator, summary: { switched: 5, 'kept-legacy': 3, stranded: 0 } })
+  expect(byOwner(report).get(twoLive.owner)).toMatchObject({ result: 'kept-legacy', code: 'CONNECTION_CUTOVER_SEVERAL_ASSISTANTS' })
   const recorded = (await db.query(`SELECT owner_user_id,path,operator_id FROM identity.connection_authority_switches
     WHERE owner_user_id=ANY($1)`, [owners])).rows
-  expect(new Map(recorded.map((row: { owner_user_id: string }) => [row.owner_user_id, row]))).toEqual(new Map([
-    [imported.owner, { owner_user_id: imported.owner, path: 'import', operator_id: operator }],
-    [fresh, { owner_user_id: fresh, path: 'native', operator_id: operator }]]))
-  for (const owner of [imported.owner, fresh]) {
-    expect(byOwner(report).get(owner)).toMatchObject({ result: 'switched',
-      after: { mode: 'owner', epoch: '1', phase: 'stable', initialized: true } })
+  expect(new Map(recorded.map((row: { owner_user_id: string }) => [row.owner_user_id, row]))).toEqual(new Map(switchable().map(owner =>
+    [owner, { owner_user_id: owner, path: owner === fresh ? 'native' : 'import', operator_id: operator }])))
+  for (const owner of switchable()) {
+    const account = byOwner(report).get(owner)
+    expect(account).toMatchObject({ result: 'switched', after: { mode: 'owner', epoch: '1', phase: 'stable', initialized: true } })
+    expect(account?.switchedAt).toMatch(iso)
+    expect(account?.code).toBeUndefined()
     expect(await as(owner, async () => (await db.query('SELECT identity.connection_authority() AS v')).rows[0].v))
       .toEqual({ version: 1, mode: 'owner', epoch: '1', phase: 'stable', acceptingNewOperations: true })
   }
-  expect((await heads()).map(row => row.owner_user_id).sort()).toEqual([imported.owner, fresh].sort())
-  const snapshot = await as(imported.owner, async () => (await db.query('SELECT identity.connection_snapshot(NULL) AS v')).rows[0].v)
-  expect(snapshot.state).toBe('ready')
-  expect(snapshot.items.map((item: { resourceKey: string }) => item.resourceKey).sort())
-    .toEqual(['["github","live"]', '["github","removed"]', `__collection__:${imported.device}`, 'catalog:github'].sort())
-  await expect(commit(imported, JSON.stringify(['github', 'late']), { providerId: 'github', accountId: 'late', configured: true }, null))
-    .rejects.toMatchObject({ code: 'PT409' })
+  expect((await heads()).map(row => row.owner_user_id).sort()).toEqual(switchable().sort())
+  expect(await keys(imported.owner)).toEqual([['["github","live"]', false], ['["github","removed"]', true],
+    [`__collection__:${imported.device}`, false], ['catalog:github', false]].sort())
+  // Reinstalled: the removed assistant's tombstone is present; its live row is not imported.
+  expect(await keys(reinstalled.owner)).toEqual([['["github","before-reinstall"]', true], [`__collection__:${reinstalled.device}`, false]].sort())
+  expect(await keys(reinstalledLive.owner)).toEqual([[`__collection__:${reinstalledLive.device}`, false]])
+  expect(await keys(doubled.owner)).toEqual([['["github","revoked-here"]', true], [`__collection__:${doubled.device}`, false]].sort())
+  // The imported revocation still blocks a plain re-add through the owner API.
+  await db.query('UPDATE identity.runtime_instances SET last_heartbeat_at=now() WHERE instance_id=$1', [reinstalled.instance])
+  await expect(as(reinstalled.owner, () => db.query('SELECT identity.connection_commit($1,$2,$3,$4,$5,$6,$7,$8,$9)', [randomUUID(),
+    `device:${reinstalled.device}`, '["github","before-reinstall"]', 1, 'save', { providerId: 'github', accountId: 'before-reinstall', configured: true },
+    JSON.stringify({ version: 1, providerId: 'github', accountId: 'before-reinstall' }), reinstalled.device, reinstalled.instance])))
+    .rejects.toMatchObject({ code: 'PT409', message: 'Connection observation cannot clear a revocation' })
+  const late = await commit(imported, JSON.stringify(['github', 'late']), { providerId: 'github', accountId: 'late', configured: true }, null)
+    .catch(error => error)
+  expect(late).toMatchObject({ code: 'PT409', message: 'Connection authority was switched to owner' })
+  expect(JSON.parse(late.detail)).toEqual({ errorCode: 'CONNECTION_AUTHORITY_SWITCHED', feature: 'connection-management' })
   const before = await heads()
   const rerun = await cutoverConnectionAccounts(db, owners, { readBody, apply: true, operator })
-  expect(rerun.summary).toMatchObject({ 'already-owner': 2, 'kept-legacy': 3, switched: 0 })
+  expect(rerun.summary).toMatchObject({ 'already-owner': 5, 'kept-legacy': 3, switched: 0, stranded: 0 })
   expect(await heads()).toEqual(before)
 })
 
@@ -210,15 +282,22 @@ it('CLI writes a private report, prints only counts and never credentials or bod
     expect(failure.code).toBe(2)
     expect(failure.stderr).toBe('')
     expect(JSON.parse(failure.stdout)).toEqual({ dryRun: true, accounts: 2, switched: 0, 'already-owner': 1, eligible: 0,
-      'kept-legacy': 1, failed: 0, 'not-attempted': 0 })
+      'kept-legacy': 1, failed: 0, 'not-attempted': 0, stranded: 0 })
     expect((await stat(output)).mode & 0o777).toBe(0o600)
     const text = await readFile(output, 'utf8')
-    expect(JSON.parse(text)).toMatchObject({ version: 1, dryRun: true, operator })
+    expect(JSON.parse(text)).toMatchObject({ version: 1, dryRun: true, operator, startedAt: expect.stringMatching(iso), finishedAt: expect.stringMatching(iso) })
     for (const secret of [serviceKey, sentinel, url]) expect(text).not.toContain(secret)
     // The report is claimed before the database is touched; an existing one is never replaced.
     await expect(execute(process.execPath, args, { env })).rejects.toMatchObject({ code: 1, stderr: 'CONNECTION_CUTOVER_REPORT_EXISTS\n' })
     expect(await readFile(output, 'utf8')).toBe(text)
     await expect(execute(process.execPath, [...base, '--output', join(directory, 'x.json'), '--operator', operator, '--bodies-dir', directory],
       { env })).rejects.toMatchObject({ code: 1, stderr: 'CONNECTION_CUTOVER_INVALID_ARGUMENTS\n' })
+    // An unreachable database has its own code, on stderr and in the claimed report.
+    const unreachable = join(directory, 'unreachable.json')
+    await expect(execute(process.execPath, [cli, '--owners', ownersFile, '--database-url-env', 'GUGU_UNREACHABLE_DATABASE_URL',
+      '--output', unreachable, '--operator', operator], { env: { ...env, GUGU_UNREACHABLE_DATABASE_URL: 'postgresql://postgres:postgres@127.0.0.1:1/postgres' } }))
+      .rejects.toMatchObject({ code: 1, stderr: 'CONNECTION_CUTOVER_DATABASE_UNREACHABLE\n' })
+    expect(JSON.parse(await readFile(unreachable, 'utf8'))).toMatchObject({ version: 1, dryRun: true, operator,
+      startedAt: expect.stringMatching(iso), finishedAt: expect.stringMatching(iso), error: { code: 'CONNECTION_CUTOVER_DATABASE_UNREACHABLE' } })
   } finally { await rm(directory, { recursive: true, force: true }) }
 })

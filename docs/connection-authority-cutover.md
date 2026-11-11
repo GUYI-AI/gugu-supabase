@@ -3,18 +3,23 @@
 Tracking: #238, GUYI-AI/gugu#1922. Release `20261111100000_connection_authority_cutover`
 adds the only legacy-to-owner writer, opens the owner RPCs to signed-in owners and
 makes them refuse every account it has not switched. Legacy tables, rows, policies,
-function definitions and ACLs are unchanged. The version policy stays OFF.
+function definitions and ACLs are unchanged. The version policy stays OFF. Release
+`20261111130000_connection_cutover_rehearsal_followups` makes reinstalled owners
+switchable and gives the refusals stable codes. Operator steps: `connection-cutover-runbook.md`.
 
 ## Owner RPC access
 
 The eight owner RPCs (snapshot, resource, recreate_begin, commit, commit_batch,
 pending, admit, ack) are granted EXECUTE to `authenticated` only, in the same
 transaction as the guard. Writes, admission, acknowledgement and platform revocation
-go through `connection_owner_lock`, which refuses (`55000`) any account without an
-owner head: no head, a legacy head or a prepared candidate. Owner writes never
-initialize an account, so nobody switches themselves by calling them directly.
-Snapshot/resource return `not-ready` for those accounts and pending refuses them
-(installed definitions patched in place, one anchored condition each).
+go through `connection_owner_lock`, which refuses any account without an owner head
+(no head, a legacy head or a prepared candidate). Owner writes never initialize an
+account, so nobody switches themselves by calling them directly. Snapshot/resource
+return `not-ready` for those accounts and pending refuses them (installed
+definitions patched in place, one anchored condition each). Expected refusals are
+`PT409` (HTTP 409) with DETAIL `{errorCode, feature:"connection-management"}`:
+`CONNECTION_AUTHORITY_NOT_OWNER` (not switched), `CONNECTION_AUTHORITY_QUIESCING`,
+and `CONNECTION_AUTHORITY_SWITCHED` for a legacy integrations write after the switch.
 
 `connection_prepare_import` is patched the same way: it now takes the policy and
 authority locks before the head, assistant and control rows (the cutover's order),
@@ -32,10 +37,16 @@ sets `statement_timeout`/`transaction_timeout` ≤ 2 s and `lock_timeout` ≤ 25
   operations under any assistant; catalogs and collection markers do not count).
 - Import: the prepared, not yet handed-over candidate with that digest and manifest; a
   live inventory with the same digest and source revision; zero unfinished legacy
-  operations; no legacy rows under any other assistant (`55000`, e.g. tombstones kept
-  from before a reinstall); every staged row in `platform` or `device:<a device the
-  owner owns>` (`55000`; `legacy:unknown` could never be written again); staged rows
-  equal to the live legacy rows, tombstones included.
+  operations; every staged row in `platform` or `device:<a device the owner owns>`
+  (`55000`; `legacy:unknown` could never be written again); staged rows equal, both
+  ways and with each row's assistant, to the rows the import rule selects.
+- Import rule: the source is the owner's single provisioned assistant that is not
+  removed (two: `55000` ambiguous). Its rows are imported, plus account tombstones of
+  removed assistants for keys the source lacks (the latest wins), so revocations
+  survive a reinstall. Removed assistants' live rows and unfinished changes are not
+  imported, only counted (`removedAssistants`). Another live agent with account rows
+  or unfinished changes keeps the account legacy (`55000`). The head revision is the
+  higher of the control revision and the newest imported row.
 - Both: mode legacy, the expected epoch, phase stable. One UPDATE writes owner,
   epoch + 1, stable and `native_initialized_at`, and one row goes into
   `identity.connection_authority_switches` (path, digest, manifest, operator,
@@ -67,12 +78,11 @@ node scripts/platform-connection-cutover.mjs --database-url-env NAME --operator 
 The owner list is a JSON array or one UUID per line (`#` comments), at most 500, run
 one account at a time. Per account: read state and the complete legacy inventory,
 fetch referenced bodies server-side, audit, then with `--apply` prepare and cut over
-in a bounded transaction. Reports `kept-legacy` with a code, never forced: platform-
-held credentials with no platform mapping yet (`PLATFORM_CREDENTIAL`; the official
-overlay also refuses the switch), unfinished operations, no or several provisioned
-assistants, rows under several assistants, rows outside an owned scope, a collection
-that is not ready, or a body that cannot be fetched or verified. Switched accounts
-report `already-owner`, so rerunning is safe.
+in a bounded transaction. Anything not eligible stays legacy with a code, never
+forced. Switched and already-owner accounts with `integrations.credentials` rows
+(an old client can still save there, outside the owner snapshot) are reported as
+stranded and exit 2. Codes, exit status and the production order:
+`connection-cutover-runbook.md`.
 
 `--bodies-from-storage` reads only files in the owner's private DM with their
 assistant (the legacy commit's rule): Storage via `SUPABASE_URL` +
@@ -82,17 +92,9 @@ assistant (the legacy commit's rule): Storage via `SUPABASE_URL` +
 Every byte is checked against the recorded SHA-256.
 
 The report is claimed (exclusive create, mode 0600) before the database is touched;
-an existing file is refused. It holds the operator, owner IDs, before/after
-mode/epoch, counts, manifest hashes and stable codes; never credentials, body text,
-object names or raw database messages. Stdout has counts only. Exit 0: every account
-switched, already owner or eligible; 2: some stayed legacy; 1: the tool failed.
-
-## Order, checks and rollback
-
-Deploy with the backend while the version policy stays OFF, then the gugu-cloud
-grant and guard. Drain legacy HTTP/OAuth effects, dry-run the list, switch the test
-account and verify it on a real device, then apply the named list. After each run,
-count `integrations.credentials` rows of switched owners: an old client can still
-save a platform credential there, outside the owner snapshot. `ops/rollback-owner-
-connection-api.sql` closes the eight RPCs; switched accounts then cannot manage
-connections, and nothing returns them to legacy. No data is deleted by either.
+an existing file is refused. It holds the operator, owner IDs, timestamps,
+before/after heads, counts, manifest hashes and stable codes; never credentials, body
+text, object names or raw database messages. Stdout has counts only.
+`ops/rollback-owner-connection-api.sql` (dry run by default) closes the eight RPCs and
+`ops/regrant-owner-connection-api.sql` reopens them; nothing returns an account to
+legacy and no data is deleted.
