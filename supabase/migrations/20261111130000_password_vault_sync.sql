@@ -211,10 +211,9 @@ DECLARE owner_id text := identity.password_vault_owner(p_device_id); prior ident
 BEGIN
     PERFORM identity.password_vault_write(owner_id);
     SELECT * INTO prior FROM identity.password_vault_devices WHERE owner_user_id = owner_id AND device_id = p_device_id FOR UPDATE;
-    IF FOUND AND prior.status = 'approved' THEN
-        IF prior.public_key = p_public_key THEN RETURN jsonb_build_object('status', 'approved'); END IF;
-        RAISE EXCEPTION 'PASSWORD_VAULT_STATE: device is approved with another key' USING ERRCODE = '55000';
-    END IF;
+    -- Same key: already a member. Another key (the app was reinstalled and lost its device key): the device asks again
+    -- like a new one, its old shares go with the old row, and deleting an approved row marks the vault for re-keying.
+    IF FOUND AND prior.status = 'approved' AND prior.public_key = p_public_key THEN RETURN jsonb_build_object('status', 'approved'); END IF;
     IF p_commitment IS NULL THEN RAISE EXCEPTION 'PASSWORD_VAULT_INPUT: commitment' USING ERRCODE = '22023'; END IF;
     DELETE FROM identity.password_vault_devices WHERE owner_user_id = owner_id AND device_id = p_device_id;
     INSERT INTO identity.password_vault_devices(owner_user_id, device_id, public_key, commitment, status)

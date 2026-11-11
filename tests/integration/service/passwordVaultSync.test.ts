@@ -92,9 +92,14 @@ it('a new device joins only through challenge, reveal and approval by a full dev
   const joined = await state(laptop)
   expect(joined.shares).toHaveLength(1)
   expect(joined.items.map((i: any) => i.itemId)).toEqual([item])
-  // Asking again with the same key is a no-op; an approved device is never replaced by a new key from the account.
+  // Asking again with the same key is a no-op. With another key (reinstalled) the device is pending again: it holds no
+  // share, and the vault is marked for re-keying because the old key may still exist somewhere.
   expect(await call('identity.password_vault_request($1,$2,$3)', [laptop, publicKey, commit()])).toEqual({ status: 'approved' })
-  await refused(/approved with another key/, 'identity.password_vault_request($1,$2,$3)', [laptop, key(), commit()])
+  expect(await call('identity.password_vault_request($1,$2,$3)', [laptop, key(), commit()])).toEqual({ status: 'pending' })
+  const again = await state(laptop)
+  expect(again.devices.find((d: any) => d.deviceId === laptop)).toMatchObject({ status: 'pending' })
+  expect(again.shares).toHaveLength(0)
+  expect(again.rotationRequired).toBe(true)
 })
 
 it('saves are versioned; a stale write is refused and nothing changes', async () => {
