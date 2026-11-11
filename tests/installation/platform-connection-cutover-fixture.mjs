@@ -132,7 +132,11 @@ export async function installConnectionCutoverWithEvidence({ db, query, sql, url
         assert.deepEqual(await cutover(id, 0), ownerShape)
         assert.deepEqual(await head(id), { ...ownerHead, prepared: false, revision: '0' })
         assert.deepEqual(await reader(id), ownerShape)
-        assert.deepEqual(await events(id), [{ revision: '0', scopeKey: null, resourceKey: null, authorityEpoch: '1' }])
+        // Realtime delivery adds its own message id to the hint payload.
+        const [event, ...more] = await events(id)
+        assert.equal(more.length, 0)
+        assert.match(event.id, /^[0-9a-f-]{36}$/)
+        assert.deepEqual({ ...event, id: undefined }, { id: undefined, revision: '0', scopeKey: null, resourceKey: null, authorityEpoch: '1' })
         const snapshot = await rpc(id, 'connection_snapshot', 'NULL')
         assert.deepEqual(snapshot, { version: 1, state: 'ready', revision: '0', items: [], application: [] })
       })
