@@ -24,7 +24,8 @@ const unbounded = 'SET LOCAL statement_timeout=0; SET LOCAL lock_timeout=0; SET 
 
 /** Installs the rehearsal follow-up release, then exercises it in one transaction that rolls back every fixture row. */
 export async function installConnectionFollowupsWithEvidence({ db, query, sql, test }) {
-  const definitions = async () => (await db.query(`SELECT s.signature,p.oid,p.prosrc,p.proowner,p.prosecdef,p.provolatile,p.proconfig,p.proacl::text AS acl
+  const definitions = async () => (await db.query(`SELECT s.signature,p.oid,p.prosrc,p.proowner,p.prosecdef,p.provolatile,p.proconfig,
+      (SELECT array_agg(x::text ORDER BY x::text) FROM unnest(p.proacl) x) AS acl
     FROM unnest($1::text[]) s(signature) JOIN pg_proc p ON p.oid=to_regprocedure(s.signature) ORDER BY s.signature`,
   [[prepareImport, pending, fence, ...replaced]])).rows
   const before = await definitions()
@@ -164,7 +165,7 @@ export async function installConnectionFollowupsWithEvidence({ db, query, sql, t
       assert.equal((await auditConnectionInventory(candidate)).hash, audited.hash, 'the candidate keeps each row and its assistant')
       for (const [label, drift, message] of [
         ['removed tombstone drift', `UPDATE identity.assistant_panel_items SET updated_at=updated_at+interval '1 second'
-          WHERE owner_user_id=$1 AND resource_key='["github","before-reinstall"]'`, 'Connection source changed after preparation'],
+          WHERE owner_user_id=$1 AND resource_key='["github","before-reinstall"]' AND $2::text IS NOT NULL`, 'Connection source changed after preparation'],
         ['staged tombstone attributed to another assistant', `UPDATE identity.connection_items SET legacy_assistant_user_id=$2
           WHERE owner_user_id=$1 AND resource_key='["github","before-reinstall"]'`, 'Connection candidate differs from its legacy source'],
         ['staged tombstone missing', `DELETE FROM identity.connection_items
