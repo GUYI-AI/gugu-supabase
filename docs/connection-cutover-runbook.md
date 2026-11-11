@@ -2,7 +2,7 @@
 
 Operator procedure for `scripts/platform-connection-cutover.mjs`; the design is in
 `connection-authority-cutover.md`. Needs releases `20261111100000_connection_authority_cutover`,
-`20261111130000_connection_cutover_rehearsal_followups` and `20261111160000_integration_catalog_metadata`.
+`20261111140000_connection_cutover_rehearsal_followups` and `20261111160000_integration_catalog_metadata`.
 
 ## Production order
 

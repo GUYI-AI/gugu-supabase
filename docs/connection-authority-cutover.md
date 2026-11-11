@@ -4,7 +4,7 @@ Tracking: #238, GUYI-AI/gugu#1922. Release `20261111100000_connection_authority_
 adds the only legacy-to-owner writer, opens the owner RPCs to signed-in owners and
 makes them refuse every account it has not switched. Legacy tables, rows, policies,
 function definitions and ACLs are unchanged. The version policy stays OFF. Release
-`20261111130000_connection_cutover_rehearsal_followups` makes reinstalled owners
+`20261111140000_connection_cutover_rehearsal_followups` makes reinstalled owners
 switchable and gives the refusals stable codes. Release
 `20261111160000_integration_catalog_metadata` accepts the provider directory `catalog`
 that clients since 0.3.2 send; without it their integrations collection stays in `error`
