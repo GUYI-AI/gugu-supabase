@@ -239,3 +239,44 @@ describe('identity.list_my_projects', () => {
     expect(rows[0]).toEqual({ anon: false, table: false, helper: false })
   }))
 })
+
+// 20261112120000: one id, the same answer list_my_projects gives for it.
+describe('identity.is_my_project', () => {
+  async function isMine(chatId: string, account: string): Promise<boolean> {
+    return as(account, async () => (await database.query<{ m: boolean }>('SELECT identity.is_my_project($1) AS m', [chatId])).rows[0]!.m)
+  }
+  async function agrees(chatId: string, account: string): Promise<boolean> {
+    const mine = await isMine(chatId, account)
+    expect(mine).toBe((await listAs(account)).some((p) => p.chat_id === chatId))
+    return mine
+  }
+
+  it('is true for my project group, my reserved id and my archived project; false for an ordinary group, a DM and others', () => inRollback(async () => {
+    const work = randomUUID()
+    const plain = randomUUID()
+    const reserved = randomUUID()
+    const dm = randomUUID()
+    await createGroup(work, owner)
+    await createGroup(plain, owner, 'chat')
+    await database.query(`INSERT INTO chat.chats (id, kind, name) VALUES ($1,'dm',NULL)`, [dm])
+    await publish(owner, 'a', [{ local: 'p1', chat: work }, { local: 'early', chat: reserved, path: '/early' }])
+    expect(await agrees(work, owner)).toBe(true)
+    expect(await agrees(reserved, owner)).toBe(true)
+    expect(await agrees(plain, owner)).toBe(false)
+    expect(await agrees(dm, owner)).toBe(false)
+    expect(await agrees(randomUUID(), owner)).toBe(false)
+    // A member of my project group, and an account that knows the reserved id: not theirs.
+    await database.query(`INSERT INTO chat.chat_members (chat_id, user_id, role) VALUES ($1,$2,'member')`, [work, colleague])
+    expect(await agrees(work, colleague)).toBe(false)
+    expect(await agrees(reserved, colleague)).toBe(false)
+    await database.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [work])
+    expect(await agrees(work, owner)).toBe(true)
+  }))
+
+  it('needs a signed-in caller and is not callable by anon', () => inRollback(async () => {
+    const { rows } = await database.query<{ anon: boolean; authed: boolean }>(`SELECT
+      has_function_privilege('anon','identity.is_my_project(text)','EXECUTE') AS anon,
+      has_function_privilege('authenticated','identity.is_my_project(text)','EXECUTE') AS authed`)
+    expect(rows[0]).toEqual({ anon: false, authed: true })
+  }))
+})
