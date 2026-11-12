@@ -13,6 +13,7 @@ import {
   handleGc,
   handleUpload,
   handleUrls,
+  principalOf,
   Refusal,
 } from '../_shared/attachments-core.ts'
 
@@ -106,12 +107,12 @@ function depsFor(authorization: string, storage: AttachmentStorageConfig): Attac
       }),
     fetch: (input, init) => fetch(input, init),
     userRpc: async (fn, args) => {
-      const { data, error } = await asUser.rpc(fn, args)
-      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code } : null }
+      const { data, error, status } = await asUser.rpc(fn, args)
+      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code, status } : null }
     },
     serviceRpc: async (fn, args) => {
-      const { data, error } = await asService.rpc(fn, args)
-      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code } : null }
+      const { data, error, status } = await asService.rpc(fn, args)
+      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code, status } : null }
     },
     storageSignedUrl:signStorage,
     storageRemove: async (bucket, object) => {
@@ -170,12 +171,9 @@ Deno.serve(async (request) => {
       }
       return json({ ...result, staging_deleted: names.length })
     }
-    const asUser = createClient(env('SUPABASE_URL'), env('SUPABASE_ANON_KEY'), {
-      global: { headers: { Authorization: authorization } },
-      auth: { persistSession: false, autoRefreshToken: false },
-    })
-    const { data: who, error: whoError } = await asUser.auth.getUser()
-    if (whoError || !who?.user?.id) return json({ error: 'denied', message: 'sign in first' }, 401)
+    // PostgREST checks the JWT's signature and expiry; the RPC checks that its session still exists and the account is
+    // neither banned nor deleted. That is what Auth's getUser answered, without a second server round trip per call.
+    const who = { user: { id: await principalOf(deps.userRpc) } }
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
     if(route.startsWith('file-')&&route!=='file-resolve') return json(await handleProjectFiles(deps,who.user.id,route,body))
     switch (route) {
@@ -203,7 +201,9 @@ Deno.serve(async (request) => {
         return json({ error: 'invalid', message: `no route ${route}` }, 404)
     }
   } catch (error) {
-    if (error instanceof Refusal) return json({ error: error.code, message: error.message }, error.status)
+    if (error instanceof Refusal) {
+      return json({ error: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) }, error.status)
+    }
     log('failed', { route, error_type:error instanceof Error?error.name:'unknown' })
     return json({ error: 'failed', message: 'attachments failed; try again' }, 500)
   }

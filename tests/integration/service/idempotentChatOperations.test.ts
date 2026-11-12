@@ -98,7 +98,7 @@ it.each([false, true])('attachment forward replay publishes only one message and
   await db.query('INSERT INTO chat.file_blob_uploads(staging_key,uploader,blob_id) VALUES($1,$2,$3)', [key, owner, blob])
   await as(owner, 'SELECT * FROM chat.attachment_commit($1,$2,$3,$4,$5,$6,NULL,NULL,false,false)', [key, source, origin, owner, 'proof.txt', []])
   const values = [source, id, destination, owner, whisper ? [reader] : [], whisper]
-  const sql = 'SELECT * FROM chat.attachment_forward($1,$2,$3,$4,$5,NULL,false,$6,NULL)'
+  const sql = 'SELECT * FROM chat.attachment_forward($1,$2,$3,$4,$5,NULL,false,$6)'
   const first = (await as(owner, sql, values))[0]
   const files = (await db.query('SELECT id,version,source_message_ids FROM chat.workspace_items WHERE chat_id=$1 ORDER BY id', [destination])).rows
   await db.query('UPDATE chat.messages SET retracted_at=now() WHERE id=$1', [source])
@@ -148,7 +148,7 @@ it('concurrent attachment forwards place one file for the same message id', asyn
       await client.query("SELECT set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: owner, role: 'authenticated' })])
     }))
     const results = await Promise.all(clients.map(async client => {
-      const result = await client.query('SELECT * FROM chat.attachment_forward($1,$2,$3,$4,ARRAY[]::text[],NULL,false,false,NULL)', [source, id, destination, owner])
+      const result = await client.query('SELECT * FROM chat.attachment_forward($1,$2,$3,$4,ARRAY[]::text[],NULL,false,false)', [source, id, destination, owner])
       await client.query('COMMIT')
       return result.rows[0]
     }))
@@ -169,7 +169,7 @@ it('replaced outbox writers retain authenticated execution and stay closed to an
   for (const signature of [
     'chat.create_topic(text,text,text,text[],text,text)',
     'chat.send_message_idempotent(text,text,text,text[],text,text,text,text,boolean,boolean,text,uuid,integer,text,uuid)',
-    'chat.attachment_forward(text,text,text,text,text[],text,boolean,boolean,text)',
+    'chat.attachment_forward(text,text,text,text,text[],text,boolean,boolean,uuid,integer)',
   ]) {
     expect((await db.query("SELECT has_function_privilege('authenticated',$1,'EXECUTE') AS allowed", [signature])).rows[0].allowed).toBe(true)
     expect((await db.query("SELECT has_function_privilege('anon',$1,'EXECUTE') AS allowed", [signature])).rows[0].allowed).toBe(false)

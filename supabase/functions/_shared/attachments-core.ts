@@ -20,7 +20,6 @@ import {
   type CdnConfig,
   type FetchLike,
   IMMUTABLE,
-  MAX_ATTACHMENT_BYTES,
   type OssConfig,
 } from './oss.ts'
 
@@ -28,6 +27,9 @@ export interface DbError {
   message: string
   hint?: string | null
   code?: string | null
+  details?: string | null
+  /** The HTTP status PostgREST answered with; 0 when the request never reached it. */
+  status?: number
 }
 export type Rpc = (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: DbError | null }>
 
@@ -68,7 +70,7 @@ export function objectStorage(deps: AttachmentsDeps): AttachmentObjectStorage {
 
 /** 说给调用者听的拒绝:HTTP 状态 + 机读的 code + 一句话。 */
 export class Refusal extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) {
+  constructor(readonly status: number, readonly code: string, message: string, readonly details?: string) {
     super(message)
   }
 }
@@ -104,6 +106,11 @@ export function refusalFromDb(error: DbError): Refusal {
     attachment_forward_needs_bytes: [400, 'needs_bytes'],
     workspace_version_conflict: [409, 'version_conflict'],
   }
+  // #2383: a recipient that never sat in the chat. A permanent refusal (400, never retried); details carries
+  // the offending ids from the database, comma-separated, so the caller can name them.
+  if (error.hint === 'recipient_not_member') {
+    return new Refusal(400, 'recipient_not_member', error.message, error.details ?? undefined)
+  }
   const hit = error.hint ? byHint[error.hint] : undefined
   if (hit) return new Refusal(hit[0], hit[1], error.message)
   if (error.hint?.startsWith('workspace_')) return new Refusal(400, error.hint, error.message)
@@ -113,6 +120,17 @@ export function refusalFromDb(error: DbError): Refusal {
   if (error.code === 'PT429') return new Refusal(429, 'rate_limited', error.message)
   if (error.code === '23505' || error.code === 'check_violation' || error.code === '23514') return new Refusal(400, 'invalid', error.message)
   return new Refusal(500, 'failed', error.message)
+}
+
+/**
+ * Who is calling (chat.attachments_principal): the id, or the refusal to answer with. Only PostgREST's 401 (no, bad or expired
+ * token) and a null principal (deleted, banned, session gone) mean signed out; anything else is the service failing.
+ */
+export async function principalOf(rpc: Rpc): Promise<string> {
+  const { data, error } = await rpc('attachments_principal', {})
+  if (error && error.status !== 401) throw new Refusal(503, 'unavailable', 'could not check your sign-in; try again')
+  if (error || typeof data !== 'string') throw new Refusal(401, 'denied', 'sign in first')
+  return data
 }
 
 export async function call(rpc: Rpc, fn: string, args: Record<string, unknown>): Promise<unknown> {
@@ -226,6 +244,7 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
   }
   const caption = str(body, 'caption', false)
   const itemId = str(body, 'item_id', false)
+  const sendGroupId = str(body, 'send_group_id', false)
   const commitArgs = {
     p_staging_key: stagingKey,
     p_message_id: str(body, 'message_id'),
@@ -243,6 +262,8 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
     ...(caption != null ? { p_caption: caption } : {}),
     // 这份字节是群文件夹里一个文件的下一版(item_id + 它基于的 expected_version);同上,不给就不带这两个键。
     ...(itemId != null ? { p_item_id: itemId, p_expected_version: int(body, 'expected_version') } : {}),
+    // 一次发出的几个文件(gugu#2581):同一个 send_group_id + 这次一共几个;同上,不给就不带这两个键。
+    ...(sendGroupId != null ? { p_send_group_id: sendGroupId, p_send_group_size: int(body, 'send_group_size') } : {}),
   }
   await registerStaged(deps, userId, stagingKey, str(body, 'content_type', false), str(body, 'file_name')!)
   const rows = (await writeFile(deps, 'attachment_commit', commitArgs)) as unknown[]
@@ -368,54 +389,20 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
 }
 
 // ── forward ──────────────────────────────────────────────────────────────────────
-/** 老式附件的字节所在的桶(Supabase 存储,只读);它的一条消息由 chat.attachment_legacy_source 说出对象名。 */
-const LEGACY_BUCKET = 'chat-media'
-interface LegacySource { object_name: string; file_name: string; content_type: string | null }
-
-export async function handleForward(deps: AttachmentsDeps, userId: string, body: Record<string, unknown>) {
-  const sourceId = str(body, 'source_message_id')!
-  const messageId = str(body, 'message_id')!
-  const forward = (stagingKey: string | null) => call(deps.userRpc, 'attachment_forward', {
-    p_source_message_id: sourceId,
-    p_message_id: messageId,
+export async function handleForward(deps: AttachmentsDeps, _userId: string, body: Record<string, unknown>) {
+  const forwardGroup = str(body, 'send_group_id', false)
+  const rows = await call(deps.userRpc, 'attachment_forward', {
+    p_source_message_id: str(body, 'source_message_id'),
+    p_message_id: str(body, 'message_id'),
     p_chat_id: str(body, 'chat_id'),
     p_sender_user_id: str(body, 'sender_user_id'),
     p_to_user_ids: strings(body, 'to_user_ids'),
     p_thread_root_id: str(body, 'thread_root_id', false),
     p_is_thread_root: bool(body, 'is_thread_root'),
     p_is_whisper: bool(body, 'is_whisper'),
-    ...(stagingKey ? { p_staging_key: stagingKey } : {}),
-  }) as Promise<unknown[]>
-  let rows: unknown[]
-  try {
-    rows = await forward(null)
-  } catch (error) {
-    if (!(error instanceof Refusal && error.code === 'needs_bytes')) throw error
-    // 老式附件(字节在 chat-media,只读):库说出它的对象(以调用者的身份读,对象名只从那一行来),把字节读出来放进暂存,
-    // 登记成 blob —— 和提交同一步(registerStaged),再转一次、带上这次上传。暂存按这条新消息起名:重试同一条转发,
-    // 登记和放进「附件」都回上一次的结果。新式的一次就转完,不多问一次库。
-    const legacy = ((await call(deps.userRpc, 'attachment_legacy_source', { p_source_message_id: sourceId })) as LegacySource[])[0]
-    if (!legacy) throw error
-    const stagingKey = `staging/${userId}/${messageId}`
-    if (!STAGING.test(stagingKey)) throw new Refusal(400, 'invalid', 'message_id is a uuid')
-    const download=await handleFileDownload(deps,userId,{ref:{message_id:sourceId},as:str(body,'sender_user_id'),request_id:deps.uuid()}) as {
-      status:string;url?:string;size_bytes?:number
-    }
-    if (download.status!=='ready'||!download.url) throw new Refusal(410,'source_gone','The source file is no longer available')
-    if (!Number.isSafeInteger(Number(download.size_bytes))||Number(download.size_bytes)>MAX_ATTACHMENT_BYTES) {
-      throw new Refusal(413,'too_large','Historical attachment exceeds the promotion limit')
-    }
-    const res = await deps.fetch(download.url)
-    if (res.status === 400 || res.status === 404) throw new Refusal(410, 'source_gone', `the file of message ${sourceId} is not in ${LEGACY_BUCKET} any more`)
-    if (!res.ok) throw new Error(`reading ${LEGACY_BUCKET}/${legacy.object_name}: ${res.status}`)
-    const bytes = new Uint8Array(await res.arrayBuffer())
-    if (bytes.length > MAX_ATTACHMENT_BYTES) throw new Refusal(413, 'too_large', 'an attachment is at most 25 MiB')
-    await call(deps.userRpc,'file_managed_upload_as',{p_id:messageId,p_chat:str(body,'chat_id'),
-      p_as:str(body,'sender_user_id'),p_bytes:bytes.length})
-    await objectStorage(deps).put(stagingKey, bytes)
-    await registerStaged(deps, userId, stagingKey, legacy.content_type, legacy.file_name)
-    rows = await forward(stagingKey)
-  }
+    // Files forwarded together stay one send where they land (gugu#2581); not given, the key is not sent (older database).
+    ...(forwardGroup != null ? { p_send_group_id: forwardGroup, p_send_group_size: int(body, 'send_group_size') } : {}),
+  }) as unknown[]
   return rows[0] ?? null
 }
 
@@ -467,7 +454,7 @@ async function documentSnapshot(deps: AttachmentsDeps, userId: string, sender: s
   } catch (error) {
     if (!(error instanceof Refusal && error.code === 'needs_bytes')) throw error
   }
-  // As a legacy attachment's forward does: the bytes go into staging named by the new message, registered as any upload.
+  // The bytes go into staging named by the new message, registered as any upload.
   const stagingKey = `staging/${userId}/${messageId}`
   if (!STAGING.test(stagingKey)) throw new Refusal(400, 'invalid', 'message_id is a uuid')
   const bytes = new TextEncoder().encode(text)
