@@ -146,6 +146,31 @@ describe('within one transaction', () => {
   })
 
   describe('文件夹与路径', () => {
+    it('a listed folder says how many items are directly in it (20261112030000); files and documents say nothing', async () => {
+      const group = await newGroup(owner, [member])
+      const docs = await put(group, owner, 'Docs', { kind: 'folder' })
+      const year = await put(group, member, '2026', { kind: 'folder', parent: docs.id })
+      await put(group, member, 'plan.md', { parent: year.id })
+      await put(group, member, 'notes.md', { parent: year.id })
+      await put(group, owner, 'readme.md', { parent: docs.id })
+      await put(group, owner, 'Empty', { kind: 'folder' })
+      await put(group, owner, 'root.md')
+      const counts = async (folder: string) => Object.fromEntries((await rpc<{ path: string; child_count: string | null }>(owner,
+        'SELECT path, child_count FROM chat.workspace_list_as($1,$2,p_folder => $3)', [group, owner, folder])).map((row) => [row.path, row.child_count]))
+
+      // Only the items directly in it: Docs holds 2026 and readme.md, not what 2026 holds.
+      expect(await counts('')).toEqual({ Docs: '2', Empty: '0', 'root.md': null })
+      expect(await counts('Docs')).toEqual({ 'Docs/2026': '2', 'Docs/readme.md': null })
+      // Nothing is stored: a change is counted on the next read, without touching the folder's row.
+      const before = (await database.query<{ version: number; updated_at: Date }>('SELECT version, updated_at FROM chat.workspace_items WHERE id = $1', [docs.id])).rows[0]
+      await put(group, member, 'more.md', { parent: docs.id })
+      expect((await counts(''))['Docs']).toBe('3')
+      expect((await database.query('SELECT version, updated_at FROM chat.workspace_items WHERE id = $1', [docs.id])).rows[0]).toEqual(before)
+      // The whole tree read (no folder) counts the same.
+      const whole = await rpc<{ path: string; child_count: string | null }>(owner, 'SELECT path, child_count FROM chat.workspace_list_as($1,$2)', [group, owner])
+      expect(whole.find((row) => row.path === 'Docs/2026')?.child_count).toBe('2')
+    })
+
     it('人直接往表里建文件夹、往文件夹里放东西;list_as 按路径列,路径从根拼起', async () => {
       const group = await newGroup(owner, [member])
       const docs = await put(group, owner, 'Docs', { kind: 'folder' })
