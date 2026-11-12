@@ -113,7 +113,7 @@ it.each(['restore','remove-owner'])('serializes deletion against a competing %s 
   try {
     await restoring.query('BEGIN')
     // Match lifecycle's complete globally ordered head set; locking only owner could manufacture an inverse order.
-    await restoring.query('SELECT chat.lock_chat_revision_recipients($1,$2)',[dm,owner])
+    await restoring.query('SELECT chat.lock_chat_revision_recipients($1,$2)',[dm,[owner]])
     await db.query('BEGIN')
     const pid = (await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
     const blocker = (await restoring.query('SELECT pg_backend_pid() AS pid')).rows[0].pid

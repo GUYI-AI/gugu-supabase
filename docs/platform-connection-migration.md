@@ -36,13 +36,15 @@ and compared by the migration and rollback verification.
 
 ## Audit the complete legacy inventory
 
-Run `ops/audit-platform-connections.sql` with the authenticated owner's existing
-read permissions. It opens a repeatable-read, read-only transaction and always
-rolls it back. The export includes collection markers, retired rows, permanent
-tombstones, and pending/failed cleanup operations. The regular visible panel
-snapshot omits some of those records and is not a valid migration input.
+The inventory is `identity.connection_legacy_inventory(owner)`, read in
+maintenance scope by the operator through the cutover tool's dry run
+(`connection-cutover-runbook.md`). There is no owner-run export: an earlier one
+copied the import rule and drifted from this function. The inventory includes
+collection markers, retired rows, permanent tombstones, and pending/failed cleanup
+operations. The regular visible panel snapshot omits some of those records and is
+not a valid migration input.
 
-The export includes `databaseDigest`, computed by PostgreSQL over its exact
+The inventory includes `databaseDigest`, computed by PostgreSQL over its exact
 `jsonb::text` representation. This is separate from the normalized manifest hash;
 JavaScript JSON serialization and PostgreSQL JSON serialization are not assumed
 to have identical bytes. A handoff must recheck the database digest while holding

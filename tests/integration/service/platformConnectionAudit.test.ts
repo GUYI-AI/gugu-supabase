@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
 import pg from 'pg'
 import { afterAll, beforeAll, expect, it } from 'vitest'
 import { auditConnectionInventory, compareConnectionInventories } from '../../../scripts/platform-connection-audit.mjs'
-import { prepareConnectionCandidate } from '../../../scripts/platform-connection-prepare.mjs'
+import { cutoverConnectionAccount } from '../../../scripts/platform-connection-cutover.mjs'
+import { prepareConnectionCandidate, readConnectionInventory } from '../../../scripts/platform-connection-prepare.mjs'
 
 const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
 const owner = randomUUID(), assistant = randomUUID(), chat = randomUUID(), provision = randomUUID(), operation = randomUUID()
@@ -88,15 +88,8 @@ afterAll(async () => {
   } finally { await db.end() }
 })
 
-async function inventory() {
-  const sql = await readFile(new URL('../../../ops/audit-platform-connections.sql', import.meta.url), 'utf8')
-  return asOwner(async () => {
-    try {
-      const results = await db.query(sql) as unknown as pg.QueryResult[]
-      return results.find(result => result.rows[0]?.inventory)?.rows[0].inventory
-    } catch (error) { await db.query('ROLLBACK'); throw error }
-  })
-}
+// The inventory exactly as the cutover tool reads it and preparation rechecks it: one reader, maintenance scope.
+const inventory = () => readConnectionInventory(db, owner)
 
 it('exports the installed legacy schema read-only, including revoked rows and unapplied cleanup', async () => {
   const source = await inventory()
@@ -117,6 +110,9 @@ it('exports the installed legacy schema read-only, including revoked rows and un
 
 it('dry-runs without a candidate and atomically verifies stored bodies, tombstones and original operation identities', async () => {
   const source = await inventory()
+  // The digest the tool's dry run records is the one preparation accepts below and rechecks under its locks.
+  const dryRun = await cutoverConnectionAccount(db, owner)
+  expect(dryRun).toMatchObject({ result: 'kept-legacy', code: 'CONNECTION_CUTOVER_UNFINISHED_OPERATIONS', databaseDigest: source.databaseDigest })
   const options = { readBody: async (id: string) => bodies.get(id) }
   expect(await prepareConnectionCandidate(db, source, options)).toMatchObject({ dryRun: true, prepared: false, activated: false })
   expect((await db.query('SELECT count(*)::int AS n FROM identity.connection_heads WHERE owner_user_id=$1', [owner])).rows[0].n).toBe(0)
