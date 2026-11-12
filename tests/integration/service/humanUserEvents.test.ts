@@ -63,48 +63,10 @@ async function events(user: string, event: string) {
 
 const sources: { name: string; event: string; run: () => Promise<void> }[] = [
   {
-    name: 'chat.broadcast_main_stream_read_changed', event: 'member_stream_read_changed',
-    run: async () => {
-      await triggerProbe('main_stream_probe', 'chat.chat_members', 'chat.broadcast_main_stream_read_changed', 'AFTER UPDATE')
-      await db.query('INSERT INTO main_stream_probe(chat_id,user_id,joined_ingest_seq) VALUES ($1,$2,0),($1,$3,0)', [chat, human, agent])
-      await db.query('UPDATE main_stream_probe SET last_read_seq=1,version=1')
-    },
-  },
-  {
-    name: 'chat.broadcast_member_stream_read_changed', event: 'member_stream_read_changed',
-    run: async () => {
-      await triggerProbe('member_stream_probe', 'chat.chat_member_stream_read_state', 'chat.broadcast_member_stream_read_changed', 'AFTER UPDATE')
-      await db.query("INSERT INTO member_stream_probe(chat_id,user_id,stream_id,stream_kind) VALUES ($1,$2,'main:'||$1,'main'),($1,$3,'main:'||$1,'main')", [chat, human, agent])
-      await db.query('UPDATE member_stream_probe SET last_read_seq=1,version=1')
-    },
-  },
-  {
-    name: 'chat.broadcast_to_chat_member_user_events', event: 'chat_changed',
-    run: async () => {
-      // Source-line legacy payload accompanies its journal edge; both must
-      // retain the human recipient while excluding agent co-members.
-      await db.query("SELECT chat.broadcast_to_chat_member_user_events($1,'chat_changed',jsonb_build_object('op','update','topic_of_source_chat',$1::text,'chat_id',$1::text))", [chat])
-    },
-  },
-  {
-    name: 'chat.chat_members_broadcast', event: 'chat_members_changed',
-    run: async () => {
-      await triggerProbe('membership_probe', 'chat.chat_members', 'chat.chat_members_broadcast')
-      await db.query('INSERT INTO membership_probe(chat_id,user_id,joined_ingest_seq) VALUES ($1,$2,0)', [chat, agent])
-    },
-  },
-  {
     name: 'chat.publish_user_revision', event: 'im_revision_advanced',
     run: async () => {
       await db.query("SELECT chat.publish_user_revision($1,'chat_changed','{}'::jsonb,false)", [human])
       await db.query("SELECT chat.publish_user_revision($1,'chat_changed','{}'::jsonb,false)", [agent])
-    },
-  },
-  {
-    name: 'identity.broadcast_friend_request_changed', event: 'friend_requests_changed',
-    run: async () => {
-      await triggerProbe('friend_request_probe', 'identity.friend_requests', 'identity.broadcast_friend_request_changed')
-      await db.query('INSERT INTO friend_request_probe(sender_id,receiver_id) VALUES ($1,$2)', [human, agent])
     },
   },
   {
@@ -137,18 +99,26 @@ const sources: { name: string; event: string; run: () => Promise<void> }[] = [
       await db.query("UPDATE outcome_probe SET status='error'")
     },
   },
-  {
-    name: 'public.forum_points_apply', event: 'forum_points_changed',
-    run: async () => {
-      await triggerProbe('points_probe', 'public.forum_community_points', 'public.forum_points_apply', 'AFTER INSERT')
-      // Isolate the AFTER transport contract. Real forum writes already reject
-      // agent awards in BEFORE; delta 0 keeps the agent's real balance at 0.
-      await db.query("INSERT INTO points_probe(user_id,delta,source,ref) VALUES ($1,1,'signup','test'),($2,0,'signup','test')", [human, agent])
-    },
-  },
 ]
 
-describe('all eleven community user-event producers', () => {
+describe('retained community user-event producers', () => {
+  it.each(['anon', 'authenticated'])('keeps replaced internal producers private from %s with SQLSTATE 42501', async (role) => {
+    const calls = [
+      ['chat.broadcast_to_chat_member_user_events(text,text,jsonb)', "SELECT chat.broadcast_to_chat_member_user_events('acl-probe'::text,'chat_changed'::text,'{}'::jsonb)", true],
+      ['public.forum_points_apply()', 'SELECT public.forum_points_apply()', false],
+      ['chat.publish_membership_revision()', 'SELECT chat.publish_membership_revision()', true],
+    ] as const
+    for (const [signature, sql, service] of calls) {
+      const { rows } = await db.query(
+        "SELECT has_function_privilege('anon',$1,'EXECUTE') AS anon,has_function_privilege('authenticated',$1,'EXECUTE') AS human,has_function_privilege('service_role',$1,'EXECUTE') AS service", [signature])
+      expect(rows).toEqual([{ anon: false, human: false, service }])
+      await db.query('SAVEPOINT denied_internal_producer')
+      await db.query(`SET LOCAL ROLE ${role}`)
+      await expect(db.query(sql)).rejects.toMatchObject({ code: '42501' })
+      await db.query('ROLLBACK TO SAVEPOINT denied_internal_producer')
+    }
+  })
+
   it.each(sources)('$name preserves the human event and sends nothing to agents', async ({ run, event }) => {
     await run()
     const received = await events(human, event)
@@ -160,6 +130,41 @@ describe('all eleven community user-event producers', () => {
     const { rows } = await db.query<{ n: string }>(
       "SELECT count(*) AS n FROM chat.account_revisions WHERE user_id=ANY($1::text[])", [[agent, sourceAgent]])
     expect(rows).toEqual([{ n: '0' }])
+  })
+
+  it('publishes a topic-source journal fact without the redundant direct payload', async () => {
+    await db.query("SELECT chat.broadcast_to_chat_member_user_events($1,'chat_changed',jsonb_build_object('topic_of_source_chat',$1::text,'chat_id',$1::text))", [chat])
+    expect(await events(human, 'chat_changed')).toEqual([])
+    const { rows } = await db.query("SELECT resource_key FROM chat.account_revisions WHERE user_id=$1 AND event='chat_changed' AND resource_key->>'entity_id'=$2", [human, chat])
+    expect(rows).toHaveLength(1)
+    expect(await events(human, 'im_revision_advanced')).toHaveLength(1)
+  })
+
+  it('keeps member and read facts in the journal without duplicate direct events', async () => {
+    const before = (await db.query<{ revision: string }>('SELECT revision::text FROM chat.account_revision_heads WHERE user_id=$1', [human])).rows[0]!.revision
+    await db.query('UPDATE chat.chat_members SET is_pinned=true,last_read_seq=1,version=version+1 WHERE chat_id=$1 AND user_id=$2', [chat, human])
+    expect(await events(human, 'chat_members_changed')).toEqual([])
+    expect(await events(human, 'member_stream_read_changed')).toEqual([])
+    const { rows } = await db.query("SELECT event FROM chat.account_revisions WHERE user_id=$1 AND resource_key->>'chat_id'=$2 AND event=ANY($3::text[]) AND revision>$4::bigint ORDER BY event", [human, chat, ['chat_members_changed','member_read_changed'], before])
+    expect(rows.map(row => row.event)).toEqual(['chat_members_changed','member_read_changed'])
+  })
+
+  it('keeps friend requests in the journal without their redundant direct event', async () => {
+    const peer = randomUUID()
+    await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Request peer')", [peer])
+    await db.query('INSERT INTO identity.friend_requests(sender_id,receiver_id) VALUES($1,$2)', [human, peer])
+    expect(await events(human, 'friend_requests_changed')).toEqual([])
+    expect(await events(peer, 'friend_requests_changed')).toEqual([])
+    const { rows } = await db.query("SELECT user_id FROM chat.account_revisions WHERE user_id=ANY($1::text[]) AND event='friend_requests_changed' ORDER BY user_id", [[human,peer]])
+    expect(rows.map(row => row.user_id)).toEqual([human,peer].sort())
+  })
+
+  it('applies the points delta without the obsolete user-event payload', async () => {
+    const before = (await db.query<{ balance: string }>('SELECT community_points::text AS balance FROM identity.users WHERE id=$1', [human])).rows[0]!.balance
+    await triggerProbe('points_probe', 'public.forum_community_points', 'public.forum_points_apply', 'AFTER INSERT')
+    await db.query("INSERT INTO points_probe(user_id,delta,source,ref) VALUES($1,1,'signup','test')", [human])
+    expect((await db.query<{ balance: string }>('SELECT community_points::text AS balance FROM identity.users WHERE id=$1', [human])).rows[0]!.balance).toBe(String(BigInt(before)+1n))
+    expect(await events(human, 'forum_points_changed')).toEqual([])
   })
 
   it('the community catalog has one journal INSERT and one direct user-events transport', async () => {

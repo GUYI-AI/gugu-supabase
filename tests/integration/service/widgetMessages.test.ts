@@ -35,10 +35,10 @@ async function post(content: string | null, type = 'widget') {
   return id
 }
 
-async function rejected(sql: string, values: unknown[] = []) {
+async function rejected(sql: string, values: unknown[] = [], error: Record<string, unknown> = { code: '23514', constraint: 'messages_widget_shape' }) {
   await database.query('SAVEPOINT invalid_widget')
   try {
-    await expect(database.query(sql, values)).rejects.toMatchObject({ code: '23514', constraint: 'messages_widget_shape' })
+    await expect(database.query(sql, values)).rejects.toMatchObject(error)
   } finally {
     await database.query('ROLLBACK TO SAVEPOINT invalid_widget')
     await database.query('RELEASE SAVEPOINT invalid_widget')
@@ -124,15 +124,15 @@ describe('widget message SQL contract', () => {
     await post(encode())
   })
 
-  it('enforces direct member writes and updates even when RLS permits them', async () => {
+  it('enforces shape on inserts and immutable widget content even when RLS permits updates', async () => {
     await database.query('SET LOCAL ROLE authenticated')
     await database.query("SELECT set_config('request.jwt.claim.sub',$1,true)", [owner])
     const id = await post(encode())
-    await rejected('UPDATE chat.messages SET content=$1 WHERE id=$2', [encode({ text: '' }), id])
+    await rejected('UPDATE chat.messages SET content=$1 WHERE id=$2', [encode({ text: '' }), id], { code: '42501' })
     await rejected("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type) VALUES($1,$2,$3,$4,'widget')", [randomUUID(), chat, owner, '{"v":2}'])
-    await database.query('UPDATE chat.messages SET content=$1 WHERE id=$2', [encode({ text: 'Updated text' }), id])
+    await rejected('UPDATE chat.messages SET content=$1 WHERE id=$2', [encode({ text: 'Updated text' }), id], { code: '42501' })
     await database.query('RESET ROLE')
-    expect((await database.query('SELECT content FROM chat.messages WHERE id=$1', [id])).rows[0].content).toBe(encode({ text: 'Updated text' }))
+    expect((await database.query('SELECT content FROM chat.messages WHERE id=$1', [id])).rows[0].content).toBe(encode())
     await database.query('SET LOCAL ROLE service_role')
     await rejected("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type) VALUES($1,$2,$3,$4,'widget')", [randomUUID(), chat, owner, encode({ title: 'legacy' })])
   })

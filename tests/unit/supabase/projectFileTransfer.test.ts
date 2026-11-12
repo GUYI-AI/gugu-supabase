@@ -96,4 +96,33 @@ describe('temporary file HTTP protocol',()=>{
     }
     expect(f.objects.sign).not.toHaveBeenCalled()
   })
+  it('signs a ready copy in the request when the reader names its download, and only then',async()=>{
+    const f=fixture(),ref={item_id:transfer,version:1},lease={status:'ready',bucket_id:'temporary',object_name:object,transfer_id:transfer,download_id:download,
+      signed_at:'2026-10-24T00:00:00Z',expires_at:'2026-10-24T00:01:00Z',content_type:'application/octet-stream'}
+    f.userRpc.mockResolvedValueOnce({data:{status:'ready',transfer_status:'ready'},error:null})
+    expect(await handleProjectFiles(f.deps,host,'file-request',{ref,request_id:transfer})).toEqual({status:'ready',transfer_status:'ready'})
+    expect(f.userRpc).toHaveBeenCalledTimes(1)
+    f.userRpc.mockResolvedValueOnce({data:{status:'ready',transfer_status:'requested'},error:null})
+    expect(await handleProjectFiles(f.deps,host,'file-request',{ref,request_id:transfer,download_request_id:download})).toEqual({status:'ready',transfer_status:'requested',download:null})
+    expect(f.objects.sign).not.toHaveBeenCalled()
+    f.userRpc.mockResolvedValueOnce({data:{status:'ready',transfer_status:'ready'},error:null}).mockResolvedValueOnce({data:lease,error:null})
+    const state=await handleProjectFiles(f.deps,host,'file-request',{ref,request_id:transfer,download_request_id:download}) as {download:Record<string,unknown>}
+    expect(state.download).toMatchObject({codec:'secretstream-v1',key,url:'https://origin.test/cipher'})
+    expect(f.userRpc).toHaveBeenLastCalledWith('file_transfer_download_as',{p_ref:ref,p_as:host,p_id:download})
+    await expect(handleProjectFiles(f.deps,host,'file-request',{ref,request_id:transfer,download_request_id:'nope'})).rejects.toMatchObject({status:400})
+  })
+  it('acknowledges a read with expect only while the version is still the one read, and returns what it resolved',async()=>{
+    const f=fixture(),ref={item_id:transfer,version:1},expect_={sha256:sha,size_bytes:128}
+    f.userRpc.mockResolvedValueOnce({data:{status:'ready',sha256:sha,size_bytes:128},error:null})
+    expect(await handleProjectFiles(f.deps,host,'file-read-complete',{download_id:download,ref,expect:expect_})).toEqual({acknowledged:true,current:{status:'ready',sha256:sha,size_bytes:128}})
+    expect(f.userRpc.mock.calls.map(([fn])=>fn)).toEqual(['file_resolve_as','file_temporary_read_complete'])
+    f.userRpc.mockClear()
+    f.userRpc.mockResolvedValueOnce({data:{status:'ready',sha256:'cd'.repeat(32),size_bytes:128},error:null})
+    expect(await handleProjectFiles(f.deps,host,'file-read-complete',{download_id:download,ref,expect:expect_})).toMatchObject({acknowledged:false})
+    expect(f.userRpc.mock.calls.map(([fn])=>fn)).toEqual(['file_resolve_as'])
+    f.userRpc.mockClear()
+    expect(await handleProjectFiles(f.deps,host,'file-read-complete',{download_id:download})).toEqual({acknowledged:true})
+    expect(f.userRpc.mock.calls.map(([fn])=>fn)).toEqual(['file_temporary_read_complete'])
+    await expect(handleProjectFiles(f.deps,host,'file-read-complete',{download_id:download,ref,expect:{sha256:sha}})).rejects.toMatchObject({status:400})
+  })
 })

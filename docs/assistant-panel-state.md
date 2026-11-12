@@ -50,7 +50,13 @@ Supported domains are `tasks`, `schedules`, `memory`, `personality`,
 `integrations`, `voice-notes`, `capabilities`, `device-notes`, `files` and `skills`.
 The migration contains each domain's metadata field allowlist. Integration data
 contains account display/authorization metadata, never credentials or nested
-configuration. Credentials stay in the existing encrypted store.
+configuration. Credentials stay in the existing encrypted store. The one
+structured integration field is `catalog` on a provider directory row
+(`catalog:<provider>`): the provider's public `{categoryId, aliases?}` (an
+identifier and at most 32 non-empty aliases of at most 128 characters, or
+`null`), sent by clients since 0.3.2 and stored as sent
+(`20261111160000_integration_catalog_metadata`). Account rows and markers
+cannot carry it; the cutover audit applies the same rule.
 
 Collection markers use `__collection__`, or `__collection__:<device ID>` for an
 individual device. Only the actual runtime publisher can submit `prepared` or

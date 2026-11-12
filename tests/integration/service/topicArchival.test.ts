@@ -106,6 +106,8 @@ describe('human topic archival within the source conversation', () => {
     })).toContain('human_group_owner_required')
   })
   it('removes archived topics from all listings and notifies nonparticipant source members', async () => {
+    expect((await db.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=ANY($2::text[])',
+      [topic, [owner, manager]])).rows).toEqual([])
     await db.query('DELETE FROM chat.account_revisions WHERE user_id=ANY($1::text[])', [[owner, creator, manager, reader]])
     await db.query('DELETE FROM realtime.messages WHERE topic=ANY($1::text[])', [[owner, creator, manager, reader].map((id) => `gugu:user:${id}:events`)])
     await archive(manager)
@@ -114,10 +116,7 @@ describe('human topic archival within the source conversation', () => {
       expect((await db.query('SELECT * FROM chat.list_topics_of_chat($1)', [source])).rows).toEqual([])
       await db.query('RESET ROLE')
       expect((await db.query(`SELECT user_id FROM chat.account_revisions WHERE user_id=$1 AND event='chat_changed'
-        AND resource_key->>'chat_id'=$2`, [account, source])).rows).toHaveLength(1)
-      expect((await db.query(`SELECT payload FROM realtime.messages WHERE topic=$1 AND event='chat_changed'
-        AND payload->>'topic_of_source_chat'=$2`, [`gugu:user:${account}:events`, source])).rows)
-        .toEqual([{ payload: expect.objectContaining({ chat: expect.objectContaining({ id: topic, status: 'archived' }) }) }])
+        AND resource_key->>'chat_id'=$2 AND resource_key->>'entity_id'=$3`, [account, source, topic])).rows).toHaveLength(1)
     }
   })
   it('does not grant anonymous execution', async () => {
@@ -144,5 +143,51 @@ describe('human topic archival within the source conversation', () => {
     await db.query('UPDATE identity.users SET owner_user_id=$1 WHERE id=$2', [owner, agent])
     expect(await denied(() => archive(owner, agent, topic, 'Topic'))).toContain('Source conversation management required')
     expect(await topicState()).toBe('active')
+  })
+})
+
+describe('archiving the source conversation', () => {
+  it('archives its live topics and leaves other sources\' topics alone', async () => {
+    const other = randomUUID(), otherAnchor = randomUUID(), otherTopic = randomUUID()
+    await db.query(`INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES ($1,'group','Other',$2)`, [other, owner])
+    await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES ($1,$2,'owner'),($1,$3,'member')`, [other, owner, creator])
+    await db.query(`INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES ($1,$2,$3,'Other message')`, [otherAnchor, other, creator])
+    await db.query(`INSERT INTO chat.chats(id,kind,name,creator_user_id,source_chat_id,source_message_id) VALUES ($1,'topic','Other topic',$2,$3,$4)`, [otherTopic, creator, other, otherAnchor])
+    await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES ($1,$2,'owner')`, [otherTopic, creator])
+    await asUser(owner)
+    await db.query('SELECT chat.archive_group_as($1,$2)', [source, owner])
+    await db.query('RESET ROLE')
+    expect(await topicState()).toBe('archived')
+    expect((await db.query('SELECT status FROM chat.chats WHERE id=$1', [otherTopic])).rows[0].status).toBe('active')
+  })
+  it('archives topics whichever path archives the source', async () => {
+    await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [source])
+    expect(await topicState()).toBe('archived')
+  })
+  it('archives paused and stopped topics too, and refuses to make a topic live while its source is archived', async () => {
+    const anchor = (await db.query('SELECT source_message_id FROM chat.chats WHERE id=$1', [topic])).rows[0].source_message_id
+    const paused = randomUUID()
+    await db.query(`INSERT INTO chat.chats(id,kind,name,status,creator_user_id,source_chat_id,source_message_id) VALUES ($1,'topic','P','paused',$2,$3,$4)`,
+      [paused, creator, source, anchor])
+    await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [source])
+    expect((await db.query('SELECT status FROM chat.chats WHERE id=$1', [paused])).rows[0].status).toBe('archived')
+    expect(await denied(() => db.query("UPDATE chat.chats SET status='active' WHERE id=$1", [topic]))).toContain('is archived')
+    expect(await topicState()).toBe('archived')
+  })
+  it('refuses create_topic under an archived source', async () => {
+    const { source_message_id: anchor } = (await db.query('SELECT source_message_id FROM chat.chats WHERE id=$1', [topic])).rows[0]
+    await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [source])
+    expect(await denied(async () => {
+      await asUser(owner)
+      await db.query('SELECT * FROM chat.create_topic($1,$2,$3)', [source, anchor, 'Late topic'])
+    })).toContain('is archived')
+    expect((await db.query("SELECT count(*)::int AS n FROM chat.chats WHERE source_chat_id=$1 AND status<>'archived'", [source])).rows[0].n).toBe(0)
+  })
+  it('does not expose the cascade or the guard to API roles, service_role included', async () => {
+    for (const role of ['anon', 'authenticated', 'service_role']) {
+      for (const fn of ['chat.archive_topics_with_source()', 'chat.refuse_topic_under_archived_source()']) {
+        expect((await db.query("SELECT has_function_privilege($1,$2,'execute') AS allowed", [role, fn])).rows[0].allowed).toBe(false)
+      }
+    }
   })
 })

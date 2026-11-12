@@ -70,11 +70,11 @@ beforeEach(async () => {
 afterEach(async () => { await db.query('ROLLBACK') })
 
 describe('private member state revision budget', () => {
-  it('marks a human stream read without broadcasting a roster revision to peers', async () => {
+  it('marks a human stream read through its read revision without a redundant own or roster revision', async () => {
     await markPeerRead()
     const rows = await revisions()
-    fanout(rows, [peer])
-    expect(rows[0]!.resource_key.kind).toBe('own')
+    fanout(rows, [])
+    fanout(await revisions('member_read_changed'), [owner, peer, viewer])
   })
 
   it('keeps agent receipts private while preserving the human-only user event transport', async () => {
