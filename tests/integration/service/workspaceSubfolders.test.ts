@@ -1,5 +1,6 @@
 import { createFixtureGroup } from '../../support/groupFixture'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -169,6 +170,40 @@ describe('within one transaction', () => {
       // The whole tree read (no folder) counts the same.
       const whole = await rpc<{ path: string; child_count: string | null }>(owner, 'SELECT path, child_count FROM chat.workspace_list_as($1,$2)', [group, owner])
       expect(whole.find((row) => row.path === 'Docs/2026')?.child_count).toBe('2')
+    })
+
+    it('a folder holding more than 1000 items reads 1000 (20261112030000): one row costs at most 1000 index entries', async () => {
+      const group = await newGroup(owner, [])
+      const many = await put(group, owner, 'Many', { kind: 'folder' })
+      const few = await put(group, owner, 'Few', { kind: 'folder' })
+      const fill = (parent: string, n: number) => database.query(`INSERT INTO chat.workspace_items (chat_id, parent_id, kind, filename, content_type,
+        inline_text, size_bytes, source_message_ids, created_by, version)
+        SELECT $1, $2, 'document', 'f-' || i || '.md', 'text/plain', '', 0, '{}', $3, 1 FROM generate_series(1, $4::int) i`, [group, parent, owner, n])
+      await asService()
+      await fill(many.id, 1005)
+      await fill(few.id, 999)
+      const rows = await rpc<{ filename: string; child_count: string }>(owner,
+        'SELECT filename, child_count FROM chat.workspace_list_as($1,$2,p_folder => $3)', [group, owner, ''])
+      expect(Object.fromEntries(rows.map((row) => [row.filename, row.child_count]))).toEqual({ Many: '1000', Few: '999' })
+    })
+
+    it('the operational rollback restores the exact prior function and its grants (ops/rollback-workspace-list-child-count.sql)', async () => {
+      const signature = 'chat.workspace_list_as(text,text,integer,integer,text,text,text,boolean)'
+      const definition = async () => (await database.query<{ digest: string; columns: string }>(
+        `SELECT md5(pg_get_functiondef($1::regprocedure)) AS digest, pg_get_function_result($1::regprocedure) AS columns`, [signature])).rows[0]!
+      const executable = async (role: string) => (await database.query<{ allowed: boolean }>(
+        'SELECT has_function_privilege($1,$2,$3) AS allowed', [role, signature, 'EXECUTE'])).rows[0]!.allowed
+      await asService()
+      expect((await definition()).columns).toContain('child_count bigint')
+      await database.query('SAVEPOINT operational_rollback')
+      await database.query(readFileSync(new URL('../../../ops/rollback-workspace-list-child-count.sql', import.meta.url), 'utf8')
+        .replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
+      // The definition 20261109150000 left, byte for byte; only authenticated may run it.
+      expect(await definition()).toEqual({ digest: '454cdaa4b0c903b04f9b4dec6c74fdcc', columns: expect.not.stringContaining('child_count') })
+      expect(await executable('authenticated')).toBe(true)
+      for (const role of ['anon', 'service_role']) expect(await executable(role)).toBe(false)
+      await database.query('ROLLBACK TO SAVEPOINT operational_rollback')
+      expect((await definition()).columns).toContain('child_count bigint')
     })
 
     it('人直接往表里建文件夹、往文件夹里放东西;list_as 按路径列,路径从根拼起', async () => {
