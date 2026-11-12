@@ -1,4 +1,4 @@
--- Roll back 20261110040000_project_identity_readers: the two readers derive project-ness from device rows again;
+-- Roll back 20261112011000_project_identity_readers: the two readers derive project-ness from device rows again;
 -- publish_device_projects is its own implementation again and publish_device_projects_v2 goes. Run on that schema only.
 BEGIN;
 SET LOCAL lock_timeout = '5s';

@@ -117,7 +117,7 @@ describe('publishing records the project group', () => {
     expect(await recorded(theirs)).toBe(false)
   }))
 
-  // 20261110040000: v2 is the only implementation and reports the rows whose group was refused; the old name wraps it.
+  // 20261112011000: v2 is the only implementation and reports the rows whose group was refused; the old name wraps it.
   it('publish_device_projects_v2 reports the refused bindings; the old name answers whether anything changed', () => inRollback(async () => {
     const mine = randomUUID()
     const theirs = randomUUID()
@@ -200,7 +200,7 @@ describe('identity.list_my_projects', () => {
     ])
   }))
 
-  // 20261110030000: an id reserved before its group exists is a project too; it is listed by its device row's name.
+  // 20261112010000: an id reserved before its group exists is a project too; it is listed by its device row's name.
   it('lists a reserved project whose group does not exist yet, by the name on my device row', () => inRollback(async () => {
     const reserved = randomUUID()
     await publish(owner, 'a', [{ local: 'early', chat: reserved, path: '/early' }])

@@ -1,4 +1,4 @@
--- Roll back 20261110030000_list_reserved_projects: list_my_projects lists only project groups that exist (its
+-- Roll back 20261112010000_list_reserved_projects: list_my_projects lists only project groups that exist (its
 -- 20261109210000 definition). Run on the release's own schema only.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
