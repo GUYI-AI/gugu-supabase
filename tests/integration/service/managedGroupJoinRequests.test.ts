@@ -1,11 +1,13 @@
 import { createFixtureGroup } from '../../support/groupFixture'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 /**
  * `list_managed_group_join_requests` = `list_group_join_requests` over every group the actor manages, in one read.
- * The rows, their order and the authority are the per-group function's: the equality case compares them directly.
+ * The rows, their order and the authority are the per-group function's: the equality case compares them directly; each
+ * row also carries its group's name and avatar.
  * Each case runs in BEGIN…ROLLBACK; every exclusion has a positive control.
  */
 interface DatabaseClient {
@@ -16,7 +18,7 @@ interface DatabaseClient {
 const { Client } = createRequire(import.meta.url)('pg') as {
   Client: new (config: { connectionString: string }) => DatabaseClient
 }
-type Request = { id: string; chat_id: string; created_at: Date; requester_user_id: string; status: string; requester_type: string; requested_by_user_id: string | null; requested_by_name: string | null }
+type Request = { id: string; chat_id: string; chat_name?: string | null; chat_avatar_url?: string | null; created_at: Date; requester_user_id: string; status: string; requester_type: string; requested_by_user_id: string | null; requested_by_name: string | null }
 let database: DatabaseClient
 let owner: string
 let admin: string
@@ -105,7 +107,10 @@ describe('join requests of every managed group in one read', () => {
     for (const actor of [owner, admin]) for (const includeDecided of [false, true]) {
       const union = [...await perGroup(actor, first, includeDecided), ...await perGroup(actor, second, includeDecided)]
       union.sort((a, b) => Number(b.status === 'pending') - Number(a.status === 'pending') || b.created_at.getTime() - a.created_at.getTime())
-      expect(await managed(actor, includeDecided)).toEqual(union)
+      const rows = await managed(actor, includeDecided)
+      expect(rows.map(({ chat_name: _name, chat_avatar_url: _avatar, ...row }) => row)).toEqual(union)
+      // The row names its group: the client needs nothing else to say who asks to join which group.
+      expect(rows.map(row => [row.chat_id, row.chat_name])).toEqual(union.map(row => [row.chat_id, row.chat_id === first ? 'First' : 'Second']))
     }
     expect((await managed(owner, false)).map(row => row.chat_id)).toEqual([second, first])
     expect((await managed(owner, true)).map(row => row.status)).toEqual(['pending', 'pending', 'rejected'])
@@ -139,5 +144,26 @@ describe('join requests of every managed group in one read', () => {
     await asService()
     await database.query('SET LOCAL role TO anon')
     expect(await fails('SELECT * FROM chat.list_managed_group_join_requests(false,$1)', [owner])).toMatch(/permission denied/)
+  })
+
+  it('the operational rollback restores the 20261112050000 shape and its grants (ops/rollback-managed-group-join-requests-group-row.sql)', async () => {
+    const signature = 'chat.list_managed_group_join_requests(boolean,text)'
+    const columns = async () => (await database.query<{ columns: string }>('SELECT pg_get_function_result($1::regprocedure) AS columns', [signature])).rows[0]!.columns
+    const executable = async (role: string) => (await database.query<{ allowed: boolean }>(
+      'SELECT has_function_privilege($1,$2,$3) AS allowed', [role, signature, 'EXECUTE'])).rows[0]!.allowed
+    await asService()
+    expect(await columns()).toContain('chat_name text')
+    await database.query('SAVEPOINT operational_rollback')
+    await database.query(readFileSync(new URL('../../../ops/rollback-managed-group-join-requests-group-row.sql', import.meta.url), 'utf8')
+      .replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
+    expect(await columns()).not.toContain('chat_name')
+    expect(await executable('authenticated')).toBe(true)
+    expect(await executable('anon')).toBe(false)
+    const group = await newGroup('Rolled back')
+    await request(group, stranger)
+    expect((await managed(owner, false)).map(row => row.chat_id)).toEqual([group])
+    await asService()
+    await database.query('ROLLBACK TO SAVEPOINT operational_rollback')
+    expect(await columns()).toContain('chat_name text')
   })
 })
