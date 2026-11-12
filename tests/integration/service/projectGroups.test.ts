@@ -117,6 +117,24 @@ describe('publishing records the project group', () => {
     expect(await recorded(theirs)).toBe(false)
   }))
 
+  // 20261112011000: v2 is the only implementation and reports the rows whose group was refused; the old name wraps it.
+  it('publish_device_projects_v2 reports the refused bindings; the old name answers whether anything changed', () => inRollback(async () => {
+    const mine = randomUUID()
+    const theirs = randomUUID()
+    await createGroup(mine, colleague, 'mine')
+    await createGroup(theirs, owner)
+    const payload = (rows: Published[]) => JSON.stringify(rows.map(({ local, chat, path = '/work' }) => ({
+      local_project_id: local, name: 'n', root_path: path, created_at: '2026-11-01T00:00:00.000Z', chat_id: chat,
+      folders: [{ workspace_id: `ws-${local}`, kind: 'root', path, attached_at: null }],
+    })))
+    const v2 = await as(colleague, async () => (await database.query<{ r: { changed: boolean; rejected: string[] } }>(
+      'SELECT identity.publish_device_projects_v2($1,$2::jsonb) AS r', [`dev-a-${colleague}`, payload([{ local: 'own', chat: mine }, { local: 'foreign', chat: theirs }])])).rows[0]!.r)
+    expect(v2).toEqual({ changed: true, rejected: ['foreign'] })
+    const again = await as(colleague, async () => (await database.query<{ r: boolean }>(
+      'SELECT identity.publish_device_projects($1,$2::jsonb) AS r', [`dev-a-${colleague}`, payload([{ local: 'own', chat: mine }, { local: 'foreign', chat: theirs }])])).rows[0]!.r)
+    expect(again).toBe(false)
+  }))
+
   it("in one publish, a row naming someone else's group is kept without it; the other rows are written as sent", () => inRollback(async () => {
     const mine = randomUUID()
     const theirs = randomUUID()
@@ -180,6 +198,21 @@ describe('identity.list_my_projects', () => {
       [`dev-a-${owner}`, 'onA', '/root/work'],
       [`dev-b-${owner}`, 'onB', '/home/me/work'],
     ])
+  }))
+
+  // 20261112010000: an id reserved before its group exists is a project too; it is listed by its device row's name.
+  it('lists a reserved project whose group does not exist yet, by the name on my device row', () => inRollback(async () => {
+    const reserved = randomUUID()
+    await publish(owner, 'a', [{ local: 'early', chat: reserved, path: '/early' }])
+    const listed = await listAs(owner)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]).toMatchObject({ chat_id: reserved, name: 'local-name', status: 'active' })
+    expect(listed[0]!.bindings.map((b) => [b.device_id, b.local_project_id])).toEqual([[`dev-a-${owner}`, 'early']])
+    // Not someone else's: another account sees nothing of it.
+    expect(await listAs(colleague)).toEqual([])
+    // Once the group exists it is listed once, by the group's own name.
+    await createGroup(reserved, owner, 'grown up')
+    expect((await listAs(owner)).map((p) => [p.chat_id, p.name])).toEqual([[reserved, 'grown up']])
   }))
 
   it('shows nothing of my projects to another account, even a member of the group', () => inRollback(async () => {
