@@ -244,6 +244,7 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
   }
   const caption = str(body, 'caption', false)
   const itemId = str(body, 'item_id', false)
+  const sendGroupId = str(body, 'send_group_id', false)
   const commitArgs = {
     p_staging_key: stagingKey,
     p_message_id: str(body, 'message_id'),
@@ -261,6 +262,8 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
     ...(caption != null ? { p_caption: caption } : {}),
     // 这份字节是群文件夹里一个文件的下一版(item_id + 它基于的 expected_version);同上,不给就不带这两个键。
     ...(itemId != null ? { p_item_id: itemId, p_expected_version: int(body, 'expected_version') } : {}),
+    // 一次发出的几个文件(gugu#2581):同一个 send_group_id + 这次一共几个;同上,不给就不带这两个键。
+    ...(sendGroupId != null ? { p_send_group_id: sendGroupId, p_send_group_size: int(body, 'send_group_size') } : {}),
   }
   await registerStaged(deps, userId, stagingKey, str(body, 'content_type', false), str(body, 'file_name')!)
   const rows = (await writeFile(deps, 'attachment_commit', commitArgs)) as unknown[]
@@ -387,6 +390,7 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
 
 // ── forward ──────────────────────────────────────────────────────────────────────
 export async function handleForward(deps: AttachmentsDeps, _userId: string, body: Record<string, unknown>) {
+  const forwardGroup = str(body, 'send_group_id', false)
   const rows = await call(deps.userRpc, 'attachment_forward', {
     p_source_message_id: str(body, 'source_message_id'),
     p_message_id: str(body, 'message_id'),
@@ -396,6 +400,8 @@ export async function handleForward(deps: AttachmentsDeps, _userId: string, body
     p_thread_root_id: str(body, 'thread_root_id', false),
     p_is_thread_root: bool(body, 'is_thread_root'),
     p_is_whisper: bool(body, 'is_whisper'),
+    // Files forwarded together stay one send where they land (gugu#2581); not given, the key is not sent (older database).
+    ...(forwardGroup != null ? { p_send_group_id: forwardGroup, p_send_group_size: int(body, 'send_group_size') } : {}),
   }) as unknown[]
   return rows[0] ?? null
 }

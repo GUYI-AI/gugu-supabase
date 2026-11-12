@@ -169,7 +169,7 @@ it('replaced outbox writers retain authenticated execution and stay closed to an
   for (const signature of [
     'chat.create_topic(text,text,text,text[],text,text)',
     'chat.send_message_idempotent(text,text,text,text[],text,text,text,text,boolean,boolean,text,uuid,integer,text,uuid)',
-    'chat.attachment_forward(text,text,text,text,text[],text,boolean,boolean)',
+    'chat.attachment_forward(text,text,text,text,text[],text,boolean,boolean,uuid,integer)',
   ]) {
     expect((await db.query("SELECT has_function_privilege('authenticated',$1,'EXECUTE') AS allowed", [signature])).rows[0].allowed).toBe(true)
     expect((await db.query("SELECT has_function_privilege('anon',$1,'EXECUTE') AS allowed", [signature])).rows[0].allowed).toBe(false)

@@ -62,5 +62,7 @@ it('the owner-send RPC sends text only, and the readers of the old shape are gon
   expect(await fn('chat.attachment_legacy_source(text)')).toBeNull()
   expect(await fn('chat.legacy_attachment_name(text)')).toBeNull()
   expect(await fn('chat.attachment_forward(text,text,text,text,text[],text,boolean,boolean,text)')).toBeNull()
-  expect(await fn('chat.attachment_forward(text,text,text,text,text[],text,boolean,boolean)')).not.toBeNull()
+  // #2581 gave it the send group the copies land in.
+  expect(await fn('chat.attachment_forward(text,text,text,text,text[],text,boolean,boolean)')).toBeNull()
+  expect(await fn('chat.attachment_forward(text,text,text,text,text[],text,boolean,boolean,uuid,integer)')).not.toBeNull()
 })
