@@ -445,6 +445,14 @@ describe('提交', () => {
     await handleCommit(captioned.deps, USER, commitBody({ caption: '看这张' }))
     expectManagedCommit(captioned, 'attachment_commit')
     expect(captioned.rpcs[1]!.args).toMatchObject({ p_caption: '看这张' })
+    // 一次发出的几个文件(gugu#2581):组和张数照传;不在一组里就不带这两个键(同上,老库没有这两个参数)。
+    expect(rpcs[1]!.args).not.toHaveProperty('p_send_group_id')
+    expect(rpcs[1]!.args).not.toHaveProperty('p_send_group_size')
+    const grouped = fakes({ object: bytes })
+    const group = '6f1c2b1e-4a7d-4c3e-9b8a-2d5e7f9a1b3c'
+    await handleCommit(grouped.deps, USER, commitBody({ send_group_id: group, send_group_size: 3 }))
+    expectManagedCommit(grouped, 'attachment_commit')
+    expect(grouped.rpcs[1]!.args).toMatchObject({ p_send_group_id: group, p_send_group_size: 3 })
   })
 
   it('不是图片:客户端报的类型像 MIME 就记它,对象上当附件下载;报的是 image/* 却不是图片 ⇒ octet-stream', async () => {
