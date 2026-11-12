@@ -9,6 +9,7 @@
 -- Measured as `authenticated` (10 managed groups, median of 7): 100 / 1000 / 5000 seats → 3.3 / 16.0 / 73.1 ms before,
 -- 1.7 / 2.0 / 2.1 ms after. No released client calls this function yet, so its result shape can change.
 -- Rollback: ops/rollback-managed-group-join-requests-group-row.sql.
+SET LOCAL lock_timeout = '5s';
 
 DROP FUNCTION chat.list_managed_group_join_requests(BOOLEAN, TEXT);
 

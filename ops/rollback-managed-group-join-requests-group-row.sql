@@ -1,4 +1,4 @@
--- Roll back 20261112080000_managed_group_join_requests_group_row: list_managed_group_join_requests exactly as
+-- Roll back 20261112130000_managed_group_join_requests_group_row: list_managed_group_join_requests exactly as
 -- 20261112050000 created it (no group name/avatar, every membership checked). Run on that schema only.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
