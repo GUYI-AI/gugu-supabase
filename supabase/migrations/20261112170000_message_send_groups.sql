@@ -3,7 +3,8 @@
 -- Each file still commits as its own row, so upload, failure and resend stay per file. The rows of one send share
 -- send_group_id; send_group_size is how many files that send holds, so a reader knows when it has all of them. Clients
 -- draw a group as one message, and an agent's host hands a complete group over as one turn.
---   * chat.attachment_commit takes p_send_group_id + p_send_group_size; the row it inserts carries both.
+--   * chat.attachment_commit and chat.attachment_forward take p_send_group_id + p_send_group_size; the row they insert
+--     carries both (files forwarded together stay one message where they land).
 --   * chat.messages_view, chat.list_chat_previews (and the previews in chat.sync_snapshot) and
 --     identity.pull_agent_inbox_v2 return the two columns; existing columns keep their names, types and order.
 --   * Unread counts count a group once (chat.list_unread_locators_for_chats, which chat.list_unread_locators reads).
@@ -87,6 +88,61 @@ END;
 $$;
 REVOKE ALL ON FUNCTION chat.attachment_commit(text, text, text, text, text, text[], text, text, boolean, boolean, text, text, uuid, integer, uuid, integer) FROM PUBLIC, anon;
 GRANT ALL ON FUNCTION chat.attachment_commit(text, text, text, text, text, text[], text, text, boolean, boolean, text, text, uuid, integer, uuid, integer) TO authenticated;
+
+-- ── forward: the copies of a send forwarded together are one send where they land ─────────
+-- 20261110053000's definition, plus p_send_group_id / p_send_group_size (the new row joins that send, as in commit).
+DROP FUNCTION chat.attachment_forward(text,text,text,text,text[],text,boolean,boolean);
+CREATE FUNCTION chat.attachment_forward(p_source_message_id text, p_message_id text, p_chat_id text, p_sender_user_id text, p_to_user_ids text[] DEFAULT '{}'::text[], p_thread_root_id text DEFAULT NULL::text, p_is_thread_root boolean DEFAULT false, p_is_whisper boolean DEFAULT false, p_send_group_id uuid DEFAULT NULL::uuid, p_send_group_size integer DEFAULT NULL::integer)
+ RETURNS SETOF chat.messages_view
+ LANGUAGE plpgsql
+ SET search_path TO ''
+AS $function$
+DECLARE
+    v_existing chat.messages%ROWTYPE;
+    v_placed RECORD;
+    v_source_text TEXT;
+    v_caption TEXT;
+BEGIN
+    IF (p_send_group_id IS NULL) <> (p_send_group_size IS NULL) OR p_send_group_size NOT BETWEEN 2 AND 10 THEN
+        RAISE EXCEPTION USING HINT = 'send_group_invalid',
+            MESSAGE = 'a send of several files names its group and how many files it holds (2 to 10), or neither';
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('chat.attachment_forward:' || p_message_id, 0));
+    SELECT * INTO v_existing FROM chat.messages m WHERE m.id = p_message_id;
+    IF FOUND THEN
+        RETURN QUERY SELECT * FROM chat.send_message_idempotent(
+            p_message_id, p_chat_id, p_sender_user_id, COALESCE(p_to_user_ids, '{}'), v_existing.content, 'attachment',
+            NULL, p_thread_root_id, COALESCE(p_is_thread_root, false), COALESCE(p_is_whisper, false), NULL,
+            v_existing.file_item_id, v_existing.file_version, p_source_message_id, v_existing.file_blob_id);
+        RETURN;
+    END IF;
+    -- 先以调用者的身份读原消息(消息表的 RLS:看不到的历史、没发给你的悄悄话都读不到),与客户端 forwardCanonicalMessage
+    -- 同一条判据(gugu apps/desktop/src/lib/chatCanonicalStorage.ts):读的是登录的那个人,以自己的 agent 转也一样。
+    -- 撤回的由 definer 那一半拒。
+    SELECT m.content INTO v_source_text FROM chat.messages m WHERE m.id = p_source_message_id AND m.deleted_at IS NULL;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING HINT = 'attachment_source_not_found',
+            MESSAGE = format('message %s is not one you can read', p_source_message_id);
+    END IF;
+    SELECT * INTO v_placed FROM chat.attachment_place_forward(p_source_message_id, p_chat_id, p_sender_user_id, p_message_id, COALESCE(p_is_whisper, false));
+    v_caption := chat.attachment_caption_of(v_source_text);
+    IF p_send_group_id IS NOT NULL THEN
+        PERFORM pg_catalog.set_config('chat.send_group_message', p_message_id, true);
+        PERFORM pg_catalog.set_config('chat.send_group', p_send_group_id::text || ':' || p_send_group_size::text, true);
+    END IF;
+    RETURN QUERY
+    SELECT * FROM chat.send_message_idempotent(
+        p_message_id, p_chat_id, p_sender_user_id, COALESCE(p_to_user_ids, '{}'), v_placed.envelope || v_caption, 'attachment',
+        NULL, p_thread_root_id, COALESCE(p_is_thread_root, false), COALESCE(p_is_whisper, false), NULL,
+        v_placed.item_id, v_placed.item_version, p_source_message_id, v_placed.file_blob_id);
+    IF p_send_group_id IS NOT NULL THEN
+        PERFORM pg_catalog.set_config('chat.send_group_message', '', true);
+        PERFORM pg_catalog.set_config('chat.send_group', '', true);
+    END IF;
+END;
+$function$;
+REVOKE ALL ON FUNCTION chat.attachment_forward(text,text,text,text,text[],text,boolean,boolean,uuid,integer) FROM PUBLIC, anon, service_role;
+GRANT EXECUTE ON FUNCTION chat.attachment_forward(text,text,text,text,text[],text,boolean,boolean,uuid,integer) TO authenticated;
 
 -- ── messages_view: the two columns at the end ────────────────────────────────────────────
 -- 20261104103000's definition, every published column in place; the outer list is spelled out so the new columns

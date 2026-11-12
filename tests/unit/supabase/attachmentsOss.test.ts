@@ -810,6 +810,11 @@ describe('转发', () => {
     expect(calls).toEqual([])
     expect(rpcs.map((r) => `${r.as} ${r.fn}`)).toEqual(['user attachment_forward'])
     expect(rpcs[0]!.args).not.toHaveProperty('p_staging_key')
+    // gugu#2581: files forwarded together keep one send where they land; the keys only when given (older database).
+    expect(rpcs[0]!.args).not.toHaveProperty('p_send_group_id')
+    const grouped = fakes()
+    await handleForward(grouped.deps, USER, { ...forwardBody, send_group_id: '6f1c2b1e-4a7d-4c3e-9b8a-2d5e7f9a1b3c', send_group_size: 2 })
+    expect(grouped.rpcs[0]!.args).toMatchObject({ p_send_group_id: '6f1c2b1e-4a7d-4c3e-9b8a-2d5e7f9a1b3c', p_send_group_size: 2 })
   })
 
 })

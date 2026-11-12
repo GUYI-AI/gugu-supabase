@@ -390,6 +390,7 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
 
 // ── forward ──────────────────────────────────────────────────────────────────────
 export async function handleForward(deps: AttachmentsDeps, _userId: string, body: Record<string, unknown>) {
+  const forwardGroup = str(body, 'send_group_id', false)
   const rows = await call(deps.userRpc, 'attachment_forward', {
     p_source_message_id: str(body, 'source_message_id'),
     p_message_id: str(body, 'message_id'),
@@ -399,6 +400,8 @@ export async function handleForward(deps: AttachmentsDeps, _userId: string, body
     p_thread_root_id: str(body, 'thread_root_id', false),
     p_is_thread_root: bool(body, 'is_thread_root'),
     p_is_whisper: bool(body, 'is_whisper'),
+    // Files forwarded together stay one send where they land (gugu#2581); not given, the key is not sent (older database).
+    ...(forwardGroup != null ? { p_send_group_id: forwardGroup, p_send_group_size: int(body, 'send_group_size') } : {}),
   }) as unknown[]
   return rows[0] ?? null
 }

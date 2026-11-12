@@ -165,6 +165,24 @@ describe('#2581 a send of several files', () => {
     await asOwner()
   })
 
+  it('files forwarded together are one send where they land; a file forwarded on its own is not', async () => {
+    const send = { id: randomUUID(), size: 2 }
+    const sources = [await commit('a.png', send), await commit('b.png', send, { caption: 'both' })]
+    const target = randomUUID()
+    await asUser(sender)
+    await createFixtureGroup(database, [target, 'Forwarded to', sender, JSON.stringify([{ user_id: reader, role: 'member' }])])
+    const FORWARD = 'SELECT * FROM chat.attachment_forward($1,$2,$3,$4,$5,NULL,false,false,$6,$7)'
+    const landed = { id: randomUUID(), size: 2 }
+    const copies: Sent[] = []
+    for (const source of sources) copies.push((await database.query<Sent>(FORWARD, [source.id, randomUUID(), target, sender, [], landed.id, landed.size])).rows[0]!)
+    const alone = (await database.query<Sent>(FORWARD, [sources[0]!.id, randomUUID(), target, sender, [], null, null])).rows[0]!
+    expect(await fails(FORWARD, [sources[0]!.id, randomUUID(), target, sender, [], landed.id, null])).toMatch(/hint: send_group_invalid/)
+    await asOwner()
+    expect(copies.map((row) => [row.send_group_id, row.send_group_size])).toEqual([[landed.id, 2], [landed.id, 2]])
+    expect(copies[1]!.content).toContain('both')
+    expect([alone.send_group_id, alone.send_group_size]).toEqual([null, null])
+  })
+
   it('the agent inbox hands each row over with its send', async () => {
     const send = { id: randomUUID(), size: 2 }
     await commit('a.png', send, { to: [agent] })
