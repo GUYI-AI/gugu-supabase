@@ -4,7 +4,7 @@ CREATE TABLE chat.file_staging_cleanup (
     staging_key text PRIMARY KEY REFERENCES chat.file_transfer_uploads(staging_key) ON DELETE CASCADE,
     reservation_id uuid NOT NULL,
     registered_blob_id uuid NOT NULL,
-    committed_at timestamptz NOT NULL,
+    committed_at timestamptz,
     publication_evidence text NOT NULL CHECK(publication_evidence='database-commit' OR publication_evidence ~ '^[0-9a-f]{64}$'),
     terminal_evidence_sha256 text CHECK(terminal_evidence_sha256 ~ '^[0-9a-f]{64}$'),
     terminal_at timestamptz,
@@ -60,7 +60,9 @@ CREATE TRIGGER file_staging_cleanup_committed AFTER INSERT OR UPDATE ON chat.fil
 FOR EACH ROW EXECUTE FUNCTION chat.file_staging_cleanup_record_commit();
 
 INSERT INTO chat.file_staging_cleanup(staging_key,reservation_id,registered_blob_id,committed_at,publication_evidence)
-SELECT r.staging_key,u.reservation_id,r.blob_id,r.created_at,'database-commit'
+-- A consumed historical receipt proves publication, but its creation time is
+-- registration time, not the unknown commit time. Preserve that distinction.
+SELECT r.staging_key,u.reservation_id,r.blob_id,NULL::timestamptz,'database-commit'
   FROM chat.file_blob_uploads r JOIN chat.file_transfer_uploads u
     ON u.staging_key=r.staging_key AND u.account_id=r.uploader AND u.blob_id=r.blob_id
  WHERE (r.message_id IS NOT NULL OR r.item_id IS NOT NULL OR r.session_attachment_id IS NOT NULL)
