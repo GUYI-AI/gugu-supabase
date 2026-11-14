@@ -29,7 +29,7 @@ it('never invokes the reference predicate for unrelated owners during real Auth 
         RETURN identity.storage_object_is_referenced_test_original(p_bucket_id,p_name);
       END; $$`)
     for (let n = 0; n < 20; n++) await db.query(`INSERT INTO storage.objects(id,bucket_id,name,owner,owner_id)
-      VALUES($1,'workspace',$2,$3,$3::text)`, [randomUUID(), `${room}/${peer}/foreign-erasure-fixture-${n}`, peer])
+      VALUES($1,'workspace',$2,$3::uuid,$4::text)`, [randomUUID(), `${room}/${peer}/foreign-erasure-fixture-${n}`, peer, peer])
     await db.query('DELETE FROM auth.users WHERE id=$1', [owner])
     expect((await db.query('SELECT 1 FROM auth.users WHERE id=$1', [owner])).rows).toHaveLength(0)
     expect((await db.query(`SELECT count(*)::int AS n FROM storage.objects WHERE bucket_id='workspace' AND name LIKE $1`, [`${room}/${peer}/foreign-erasure-fixture-%`])).rows[0].n).toBe(20)
