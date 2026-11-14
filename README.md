@@ -44,6 +44,10 @@ Collaborative file editing needs the long-running Node service in `services/file
 
 ## Local verification
 
+Optional visible iOS notifications use the existing account revision stream;
+see the [APNs transport](services/push/README.md) for registration, permissions,
+configuration and the separate physical-device acceptance requirements.
+
 For a self-managed Kong gateway, the versioned [gateway policies](deploy/kong/README.md)
 define REST preflight caching, Storage range-response header exposure, and the
 admin routes that only the service-role key may use.
