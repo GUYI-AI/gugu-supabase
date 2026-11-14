@@ -36,6 +36,11 @@ export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:
     if(same) await call(deps.userRpc,'file_temporary_read_complete',{p_download:download,p_as:actor})
     return {acknowledged:same,current}
   }
+  // The holder could not send this copy: the reader is told why on its next poll instead of waiting out its bound.
+  if(route==='file-decline') {
+    await call(deps.userRpc,'file_temporary_decline',{p_id:id(body,'transfer_id'),p_reason:text(body,'reason')})
+    return {transfer_id:body.transfer_id,status:'retired'}
+  }
   const transfer=id(body,'transfer_id'),bytes=body.ciphertext_bytes
   if(typeof bytes!=='number'||!Number.isSafeInteger(bytes)||bytes<1) throw new Refusal(400,'invalid','ciphertext_bytes must be a positive integer')
   const store=objectStorage(deps)
