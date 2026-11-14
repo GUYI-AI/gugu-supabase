@@ -1,11 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { assetRecipient, authorizeMemberChange, parseTeamWrite, TeamRefusal, type TeamMember, type TeamRole } from '../../../supabase/functions/_shared/team-accounts-contract'
+import { assetRecipient, authorizeEmailConfirmation, authorizeMemberChange, parseTeamWrite, TeamRefusal, type TeamMember, type TeamRole } from '../../../supabase/functions/_shared/team-accounts-contract'
 
 const team = randomUUID()
 const member = (role: TeamRole = 'member', extra: Partial<TeamMember> = {}): TeamMember => ({ id: randomUUID(), team_id: team, identity_id: randomUUID(), role, state: 'active', revision: 3, ...extra })
 const receipt = 'a'.repeat(43), key = randomUUID()
 describe('team identity wire contract', () => {
+  it('accepts Google exchange without a client-selected email and keeps invitation tokens in POST bodies', () => {
+    expect(parseTeamWrite({ action: 'google_sign_in', team_id: team })).toEqual({ action: 'google_sign_in', team_id: team })
+    expect(() => parseTeamWrite({ action: 'google_sign_in', email: 'forged@example.invalid' })).toThrow(TeamRefusal)
+    expect(parseTeamWrite({ action: 'invitation_info', invitation_token: receipt }).invitation_token).toBe(receipt)
+    expect(parseTeamWrite({ action: 'confirm_email_change', challenge_id: key, code: '123456', idempotency_key: key }).code).toBe('123456')
+  })
   it('accepts the email, creation, invitation and explicit handoff contracts', () => {
     expect(parseTeamWrite({ action: 'email_challenge', email: ' Person@Example.Invalid ', purpose: 'create' }).email).toBe('person@example.invalid')
     expect(parseTeamWrite({ action: 'create', name: ' Team ', verification_receipt: receipt, idempotency_key: key }).name).toBe('Team')
@@ -31,6 +37,14 @@ describe('team identity wire contract', () => {
   })
 })
 describe('team membership boundaries with server-derived snapshots', () => {
+  it('allows only the original active member to confirm an email change at the expected revision', () => {
+    const target = member()
+    expect(() => authorizeEmailConfirmation(target, target, 3)).not.toThrow()
+    expect(() => authorizeEmailConfirmation(member('superadmin'), target, 3)).toThrow('original_member_required')
+    expect(() => authorizeEmailConfirmation({ ...target, identity_id: randomUUID() }, target, 3)).toThrow('original_member_required')
+    expect(() => authorizeEmailConfirmation(target, target, 2)).toThrow('version_conflict')
+    expect(() => authorizeEmailConfirmation({ ...target, state: 'disabled' }, target, 3)).toThrow('membership_disabled')
+  })
   it.each([
     ['superadmin', 'member', true], ['superadmin', 'admin', true], ['superadmin', 'superadmin', false],
     ['admin', 'member', true], ['admin', 'admin', false], ['admin', 'superadmin', false],
