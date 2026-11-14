@@ -74,4 +74,11 @@ describe('service-only team identity context', () => {
     await db.query('DELETE FROM auth.users WHERE id=$1', [personal])
     expect(await context(m.principal)).toMatchObject({ kind: 'team', team_id: organization })
   })
+  it('does not let a provisioning bug bind the personal account or abandon an existing team principal', async () => {
+    const organization = await team(), personal = await auth(), m = await seat(organization), replacement = await auth('team_member')
+    expect((await refusal("INSERT INTO team_private.members(team_id,principal_user_id,email_normalized,state) VALUES($1,$2,'new@member.invalid','active')", [organization, personal])).message).toBe('team_requires_separate_member_principal')
+    expect((await refusal('UPDATE team_private.members SET principal_user_id=$1 WHERE id=$2', [replacement, m.id])).message).toBe('team_principal_rebinding_requires_team_workflow')
+    expect(await context(personal)).toMatchObject({ kind: 'personal' })
+    expect(await context(m.principal)).toMatchObject({ kind: 'team', member_id: m.id })
+  })
 })

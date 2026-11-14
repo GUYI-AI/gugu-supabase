@@ -30,6 +30,23 @@ ALTER TABLE team_private.teams ENABLE ROW LEVEL SECURITY;
 ALTER TABLE team_private.members ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON ALL TABLES IN SCHEMA team_private FROM PUBLIC,anon,authenticated,service_role;
 
+CREATE FUNCTION team_private.validate_member_principal() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+BEGIN
+    IF TG_OP='UPDATE' AND OLD.principal_user_id IS NOT NULL
+       AND NEW.principal_user_id IS DISTINCT FROM OLD.principal_user_id THEN
+        RAISE EXCEPTION 'team_principal_rebinding_requires_team_workflow' USING ERRCODE='55000';
+    END IF;
+    IF NEW.principal_user_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM auth.users u
+       WHERE u.id=NEW.principal_user_id AND u.raw_app_meta_data->>'gugu_account_kind'='team_member') THEN
+        RAISE EXCEPTION 'team_requires_separate_member_principal' USING ERRCODE='22023';
+    END IF;
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION team_private.validate_member_principal() FROM PUBLIC,anon,authenticated,service_role;
+CREATE TRIGGER team_member_principal_guard BEFORE INSERT OR UPDATE OF principal_user_id ON team_private.members
+    FOR EACH ROW EXECUTE FUNCTION team_private.validate_member_principal();
+
 -- A member has a separate Auth principal. Personal erasure must not reach the
 -- organization's assets through that principal's ordinary owner cascades.
 CREATE FUNCTION team_private.prevent_principal_erasure() RETURNS trigger
