@@ -63,3 +63,5 @@ pnpm test:db:stop
 `GUGU_TEST_DB_PORT` selects a free port. The script manages only the test project tagged for this checkout and binds the database to loopback; `stop` deletes this disposable database's volume. Installation tests require an empty database.
 
 The client repository's `supabase-contract` test project connects to this test database to verify the client–backend contract.
+
+Self-service account deletion is an opt-in identity channel with fresh email verification. Configure an approved policy and, for delayed deletion, a healthy scheduled consumer before enabling it. See [the API and operator contract](docs/self-account-deletion.md).
