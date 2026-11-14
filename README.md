@@ -64,4 +64,4 @@ pnpm test:db:stop
 
 The client repository's `supabase-contract` test project connects to this test database to verify the client–backend contract.
 
-Self-service account deletion is an opt-in identity channel with fresh email verification. Configure an approved policy and, for delayed deletion, a healthy scheduled consumer before enabling it. See [the API and operator contract](docs/self-account-deletion.md).
+Self-service account deletion is an opt-in identity channel with fresh email verification. Final confirmation immediately deletes the account and forfeits remaining usable credits; there is no cooling-off period. See [the API and operator contract](docs/self-account-deletion.md).

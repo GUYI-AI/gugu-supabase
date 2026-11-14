@@ -1,111 +1,103 @@
 # Self-service account deletion
 
-`account-deletion` is a community identity Edge function. It verifies the current
-login and a new email OTP, then calls Auth Admin hard deletion. Existing Auth
-triggers own erasure, shared-data attribution, agents, projects and groups. The
-feature is disabled until an operator configures an approved product policy.
+Final confirmation immediately hard-deletes the current account and forfeits
+remaining usable credits. There is no cooldown, scheduled deletion or cancellation.
+The generic identity channel belongs to this community backend; official billing
+and its retained records remain outside this repository.
 
-## Client contract
+## HTTP contract
 
-All requests use JSON and responses have `Cache-Control: no-store`. User routes
-require the current user's Bearer token. Body fields never select a target user,
-email, deletion mode or delay. Callers use the policy version returned by status.
+Prefix: `/functions/v1/account-deletion`. JSON responses use `Cache-Control: no-store`.
+User routes require the current Bearer and a live matching Auth session. The
+current confirmed email is read from Auth; body fields never select an identity.
 
-| Method/path suffix | Body | Result |
+| Method/suffix | Input | Result |
 | --- | --- | --- |
-| GET `/status` | none | Server policy and the caller's active request |
-| POST `/challenge` | `policy_version` | 201: request, one-time returned `receipt_token`, expiration; sends OTP to the current confirmed email |
-| POST `/confirm` | `request_id`, `receipt_token`, `policy_version`, `code` | 200 only when deletion is read back; 202 for pending/unknown; 503 on definite deletion failure |
-| POST `/retry` | `request_id`, `receipt_token` | Reuses an already verified request within its original authorization window; never re-verifies a consumed OTP |
-| POST `/cancel` | `request_id` | Authenticated cancellation of an owned pending request before its due time |
-| POST `/result` | `request_id`, `receipt_token` | Minimal result capability for a lost response after deletion has removed the original session |
-| POST `/process-due` | none | Server-only, at most five claims and one active consumer; returns only counts |
+| GET `/status` | Bearer | Availability, fixed immediate/forfeit consent version and active attempt |
+| POST `/challenge` | Bearer, `consent_version: "immediate-forfeit-v1"` | Sends a fresh official email OTP; returns request and a secret receipt once |
+| POST `/confirm` | Bearer, `request_id`, `receipt_token`, `consent_version`, `code`, `acknowledge_forfeit: true` | Immediately calls Auth Admin hard deletion; 200 only after absence readback |
+| POST `/retry` | Bearer, same request/receipt | Bound retry of an already verified attempt within its original five-minute window |
+| POST `/result` | Request/receipt capability, no login required | Minimal readback after deletion has removed the original session |
 
-The full prefix is `/functions/v1/account-deletion`. Store the receipt as a secret;
-do not put it or an OTP in a URL, analytics or logs. Results omit account identity,
-email, verification sessions and internal leases. A caller that loses its session
-after successful deletion can still read its receipt result. A 202 response is not
-proof of deletion: inspect `request.state`, and poll/retry only as indicated.
+A receipt is random 256-bit capability material, stored only as its hash. Keep it
+out of URLs, telemetry and logs. A 202 response means an uncertain in-flight
+outcome, not a waiting period or completed deletion. A definite Auth failure is
+503 with retry state; overlapping retries are refused and limited to three
+attempts. Expired authorization requires a new code. Unsupported routes return404.
 
-Errors include `unauthorized` (401), `invalid_request` (400), `invalid_proof` (403),
-`not_found` (404), state/policy conflicts (409), `expired` (410), verification
-failure (422), rate limiting (429) and unavailable dependencies (503). Failures
-never expose raw SQL/Auth errors or imply that an account was erased.
+Official Auth `/otp` (`create_user=false`) sends a new code; `/verify` (`type=email`)
+consumes it. The verified identity/email must match the original user and request.
+The temporary verification session is immediately signed out locally and never
+returned. A challenge expires five minutes after sending begins. Limits are one
+send/minute, three/15min/user, five code attempts/request and ten/15min/user.
+Changed emails, revoked sessions, stale consent and reused proofs fail closed.
+Reauthentication nonce is not used because its installed verification contract is
+part of password updates. No password is changed and no custom OTP is generated.
 
-## Fresh verification
+## Retained messages and references
 
-The Edge verifies the original token through Auth `/user`; the private RPC also
-checks its live `auth.sessions` row. A code is sent using official Auth `/otp`
-with `create_user=false`, then consumed using `/verify` with type `email`. The
-verified user and email must equal the original caller and challenge. The temporary
-verification session is signed out locally and never returned to the client.
+The existing Auth → identity erasure chain is reused. The following are its
+existing physical-table effects; this PR does not add message or group deletion.
 
-The workflow expires five minutes after the new send begins, independently of
-the installation's global OTP expiry. It serializes attempts and bounds sends to
-one/minute and three/15 minutes per user, verification to five/request and ten/15
-minutes per user. A changed email, session or policy requires a fresh challenge.
-Reauthentication nonces are not used: the installed Auth contract consumes them
-inside password changes, which this operation must not perform.
+| Table | Existing erasure effect |
+| --- | --- |
+| `chat.messages` | Preserve rows, body, timestamps, replies, threads and file grouping; FK clears sender; remove erased IDs from recipients and per-user hidden markers |
+| `chat.chats` | Preserve group rows; transfer owner to a surviving human or archive; creator becomes successor/NULL. Existing DM is renamed for the deleted peer |
+| `chat.chat_members` | Cascade-delete erased human/owned-agent memberships; other memberships stay |
+| `chat.message_agent_sends` | Delete erased owner's attribution rows; otherwise agent FK can become NULL; no message deletion |
+| `chat.message_agent_wakes` | Cascade-delete erased agent's wake records; retain other recipients |
+| `chat.message_agent_delivery_blocks` | Delete erased agent's blocks |
+| `chat.message_deliveries` | Delete delivery records for erased agents' device identifiers; retain other receipts |
+| `chat.message_reactions` | Cascade-delete erased identities' reactions; message stays |
+| `chat.widgets` | Keep widget/message; clear `created_by` FK |
+| `chat.session_attachments` | Private session delivery owned/sent by erased identities cascades; dead recipient-only grants are deleted, otherwise recipients are filtered. These are separate from group message attachments |
+| `chat.workspace_items` | Shared file rows stay; clear creator/updater attribution under the existing erasure guard |
+| `chat.workspace_item_versions` | Shared version history stays; maker FK becomes NULL |
+| `chat.file_transfer_uploads` | Irreversibly anonymize actor/account attributes |
+| `chat.file_transfer_storage` | Clear owner attribution |
+| `chat.file_transfer_reservations` | Anonymize account reference |
+| `chat.file_transfer_storage_refs` | Anonymize account reference |
+| `chat.file_temporary_transfers` | Anonymize reader actor/account |
+| `chat.group_tasks` | Keep task; erased owner/reviewer agent FK becomes NULL |
+| `chat.group_outputs` | Keep output; producer FK becomes NULL |
+| `chat.gugu_decision_events` | Remove erased per-user JSON keys and clear creator attribution |
+| `chat.account_revisions` | Delete erased user's personal revision feed |
+| `chat.account_revision_heads` | Delete erased user's revision head |
+| `chat.presence_wake_throttles` | Delete erased viewer's throttles |
+| `identity.gugu_device_commands` | Delete erased owner's/sender's commands; redact quoted sender IDs/names and filter recipient IDs on surviving commands |
 
-## Policy and pending mode
+The sender FK already anonymizes the author. A second forward release makes
+`messages_view`, history, search and the agent inbox consistently say
+“已注销用户” for a NULL sender; reply previews already do. It preserves all reader
+columns, ACLs, invoker RLS, paging and authorization. Client rendering must also
+show that label for a NULL author rather than suppressing the name/profile row.
 
-Only an operator can configure `account_deletion_private.policy`. Set an explicit
-mode, delay, approved `credit_treatment_key` and a new policy version before
-enabling. No product choice is inferred from defaults. Test-only activation can
-be restricted to one synthetic account; its deletion clears the allowlist FK and
-leaves the feature closed to all other accounts.
+Forfeiture means the removed account cannot consume its old balance. Historical
+amounts remain anonymously retained under the existing accounting chain, so
+revenue/consumption reconciliation does not change. No balance is transferred or
+rewritten here. The UI reads its existing own-user `billing.user_credits` view,
+selecting `balance_credits,credit_unit_version` with header
+`x-gugu-credit-unit-version:2`; no new service-role financial read is added.
 
-In pending mode, login and existing search visibility remain unchanged until
-hard deletion. Logging in does not cancel. Cancellation is explicit and closes
-at the due time; a row lock serializes it with final consumption. Existing erasure
-does not run partially during the pending period. These semantics must be included
-in the selected product design before enabling the feature.
+## Rollout, audit and verification
 
-The credit key is a policy contract, not a financial action. This PR does not
-refund, transfer, convert or spend credits. A policy requiring another financial
-action must have that official implementation validated before activation. The
-existing client can show its balance with its own authenticated JWT using the
-official `billing.user_credits` view, selecting `balance_credits,credit_unit_version`
-with `x-gugu-credit-unit-version: 2`. Community installations without official
-billing must present that feature as unavailable, never invent a zero balance.
-No service-role financial-table read is added.
+`account_deletion_private.access` is only a pre-release dedicated-account gate,
+not a product-mode switch. It defaults to a closed test allowlist. Hard deletion
+clears the allowlist FK, leaving other accounts closed; an authorized rollout can
+remove that restriction. No cooldown/worker configuration exists.
 
-## Due execution and failures
+The new workflow/audit state is private. Only the server role can execute its
+RPC, not read/write its tables directly. Auth hard deletion and existing triggers
+are one transaction. Trigger failure rolls them back; unknown HTTP outcomes are
+reconciled before retrying. Original identity FKs, email digest and authorization
+metadata are cleared on success. No original-to-accounting-tombstone map, OTP,
+JWT, receipt or raw Auth/SQL error is logged.
 
-Schedule `node scripts/account-deletion-worker.mjs` once/minute on a protected
-server using its existing `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` environment.
-Never place credentials in cron text or arguments. The script reports booleans
-and counts only. Pending mode refuses new confirmations unless the consumer has
-contacted the workflow within two minutes. No Vault or `pg_net` secret is needed.
-
-The consumer uses a global lease, one row per claim, a bounded batch/runtime,
-`SKIP LOCKED` and retry backoff. It calls the same Auth Admin hard-delete path as
-immediate mode. Turning off new requests does not abandon already scheduled work.
-Worker outages leave pending requests visible and overdue; deferred/error counts
-need operator attention rather than being presented as deletion success.
-
-Auth performs the actual deletion and triggers in one transaction. A trigger
-failure rolls that transaction back. Workflow proof/attempt state is durable and
-separate. An uncertain HTTP outcome stays in progress; readback and the Auth FK
-reconcile a committed deletion without an overlapping retry. An expired immediate
-authorization cannot authorize a later fresh deletion.
-
-New workflow/audit identity links are Auth foreign keys cleared at hard deletion;
-email digest and authorization/session metadata are cleared too. No original-user
-to accounting-tombstone mapping is created. Receipts remain hashed capabilities.
-Do not log codes, tokens, raw Auth replies or identity-bearing SQL diagnostics.
-
-## Validation and deployment
-
-Run the targeted unit/integration tests on a disposable loopback installation.
-`GUGU_TEST_EMAIL_OTP=1` enables that checkout's own mail catcher and OTP template;
-it does not send real email. `node scripts/test-account-deletion-http.mjs` exercises
-the exact handler over loopback HTTP against real Auth, email and installed
-triggers, including pending cancellation, due execution and rollback/retry.
-It reports only counts/booleans/times and is not a deployed Edge smoke test.
-
-Use forward releases and the normal backend deployment path. Real Auth HTTP
-deletion must be tested with the installed trigger owners and financial privileges;
-a successful SQL deletion by a stronger role is not a substitute. Shared branch
-validation needs explicit approval and an isolated test-account allowlist. Do not
-change a deployment pin or activate an undecided product policy during development.
+Use an owned loopback fixture for installed-schema tests. Opt-in
+`GUGU_TEST_EMAIL_OTP=1` enables only its local mail catcher/template.
+`node scripts/test-account-deletion-http.mjs` exercises the exact handler over
+loopback HTTP against real Auth/email/triggers, including failure rollback/retry;
+it reports booleans/counts/times and is not a deployed Edge smoke test. Real
+release acceptance must use Auth HTTP with the actual trigger owners/financial
+grants. A SQL delete by a stronger role is insufficient. Shared branch testing
+requires explicit approval; do not alter deployment pins during development.

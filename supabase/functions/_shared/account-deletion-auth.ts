@@ -28,7 +28,6 @@ export function accountDeletionDependencies(settings: Settings): DeletionDepende
     } catch { return 'unknown'; }
   }
   return {
-    isWorker(token) { return token === settings.serviceKey; },
     async currentUser(token): Promise<Caller | null> {
       const found = await call('/auth/v1/user', 'GET', settings.anonKey, token, undefined, 5_000);
       if (found.status >= 500) throw new Error('authentication_unavailable');

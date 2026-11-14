@@ -4,16 +4,16 @@ import { createAccountDeletionHandler, sha256, type DeletionDependencies, type W
 import { accountDeletionDependencies } from '../../../supabase/functions/_shared/account-deletion-auth'
 
 const user = { id: randomUUID(), email: 'person@fixture.invalid', sessionId: randomUUID() }
-const policy = randomUUID(), requestId = randomUUID(), lease = randomUUID(), receipt = 'a'.repeat(64)
-const workflow = (state: string, mode: 'immediate' | 'pending' = 'immediate'): Workflow => ({
-  request_id: requestId, state, mode, expires_at: '2030-01-01T00:00:00Z', delete_after: null,
-  last_error: null, can_cancel: false, can_retry: false,
+const consent = 'immediate-forfeit-v1', requestId = randomUUID(), lease = randomUUID(), receipt = 'a'.repeat(64)
+const workflow = (state: string): Workflow => ({
+  request_id: requestId, state, expires_at: '2030-01-01T00:00:00Z',
+  last_error: null, can_retry: false,
 })
 function fixture() {
   const deps: DeletionDependencies = {
     currentUser: vi.fn(async () => user), sendCode: vi.fn(async () => true),
     verifyCode: vi.fn(async () => ({ id: user.id, email: user.email })), hardDelete: vi.fn(async () => 'absent' as const),
-    isWorker: vi.fn(token => token === 'server-only'), flow: vi.fn(async args => {
+    flow: vi.fn(async args => {
       if (args.p_action === 'attempt') return { ok: true, lease_token: lease, request: workflow('verifying') }
       if (args.p_action === 'verified' || args.p_action === 'retry') return { ok: true, request: workflow('processing'), user_id: user.id, lease_token: lease }
       if (args.p_action === 'finish') return { ok: true, request: workflow(args.p_error_code === null ? 'deleted' : args.p_error_code === 'outcome_unknown' ? 'processing' : 'retry_wait') }
@@ -28,7 +28,7 @@ function fixture() {
   }))
   return { deps, handler, call }
 }
-const confirm = { request_id: requestId, receipt_token: receipt, code: '123456', policy_version: policy }
+const confirm = { request_id: requestId, receipt_token: receipt, code: '123456', consent_version: consent, acknowledge_forfeit: true }
 
 describe('self deletion HTTP boundary', () => {
   it('never selects the request-body identity or exposes server-side lease/identity', async () => {
@@ -46,7 +46,7 @@ describe('self deletion HTTP boundary', () => {
     expect((await f.call('confirm', confirm, bearer)).status).toBe(401)
     expect(f.deps.verifyCode).not.toHaveBeenCalled(); expect(f.deps.hardDelete).not.toHaveBeenCalled()
   })
-  it.each(['expired', 'rate_limited', 'policy_changed', 'invalid_proof', 'state_conflict'])('does not consume OTP if workflow rejects %s', async error => {
+  it.each(['expired', 'rate_limited', 'consent_changed', 'invalid_proof', 'state_conflict'])('does not consume OTP if workflow rejects %s', async error => {
     const f = fixture(); vi.mocked(f.deps.flow).mockResolvedValue({ ok: false, error, status: 409 })
     expect((await f.call('confirm', confirm)).status).toBe(409)
     expect(f.deps.verifyCode).not.toHaveBeenCalled(); expect(f.deps.hardDelete).not.toHaveBeenCalled()
@@ -56,14 +56,6 @@ describe('self deletion HTTP boundary', () => {
     expect((await f.call('confirm', confirm)).status).toBe(422)
     expect(f.deps.hardDelete).not.toHaveBeenCalled()
     expect(f.deps.flow).toHaveBeenCalledWith(expect.objectContaining({ p_action: 'verification_failed', p_lease_token: lease }))
-  })
-  it('commits pending mode without invoking deletion', async () => {
-    const f = fixture(), base = f.deps.flow
-    vi.mocked(f.deps.flow).mockImplementation(async args => args.p_action === 'attempt'
-      ? { ok: true, lease_token: lease, request: workflow('verifying') }
-      : { ok: true, request: workflow('pending', 'pending') })
-    expect((await f.call('confirm', confirm)).status).toBe(202)
-    expect(base).toHaveBeenCalled(); expect(f.deps.hardDelete).not.toHaveBeenCalled()
   })
   it('returns failure for a definite Auth failure and in-progress for an unknown outcome', async () => {
     const f = fixture(); vi.mocked(f.deps.hardDelete).mockResolvedValue('failed')
@@ -86,12 +78,12 @@ describe('self deletion HTTP boundary', () => {
   })
   it('never sends an OTP for another email or when the workflow is disabled', async () => {
     const f = fixture()
-    const response = await f.call('challenge', { policy_version: policy, email: 'other@fixture.invalid' })
+    const response = await f.call('challenge', { consent_version: consent, acknowledge_forfeit: true, email: 'other@fixture.invalid' })
     expect(response.status).toBe(201); expect(f.deps.sendCode).toHaveBeenCalledWith(user.email)
     expect((await response.json()).receipt_token).toMatch(/^[a-f0-9]{64}$/)
     vi.mocked(f.deps.flow).mockResolvedValue({ ok: false, error: 'disabled', status: 503 })
     vi.mocked(f.deps.sendCode).mockClear()
-    expect((await f.call('challenge', { policy_version: policy })).status).toBe(503)
+    expect((await f.call('challenge', { consent_version: consent, acknowledge_forfeit: true })).status).toBe(503)
     expect(f.deps.sendCode).not.toHaveBeenCalled()
   })
   it('contains raw Auth/SQL errors and bounds body size', async () => {
@@ -100,17 +92,13 @@ describe('self deletion HTTP boundary', () => {
     expect(response.status).toBe(503); expect(await response.text()).toBe('{"error":"unavailable"}')
     expect((await f.call('confirm', { data: 'x'.repeat(5000) })).status).toBe(400)
   })
-  it('serializes a bounded worker batch and refuses a user JWT', async () => {
+  it('requires explicit credit-forfeiture acknowledgment and exposes no delayed/cancel/worker route', async () => {
     const f = fixture()
-    expect((await f.call('process-due')).status).toBe(401)
-    vi.mocked(f.deps.flow).mockImplementation(async args => args.p_action === 'claim_due'
-      ? { ok: true, claims: [{ request_id: requestId, user_id: user.id, lease_token: lease }] }
-      : args.p_action === 'finish' ? { ok: true, request: workflow('deleted') } : { ok: true })
-    const response = await f.call('process-due', {}, 'server-only')
-    expect(await response.json()).toEqual({ processed: 5, deleted: 5, deferred: 0 })
-    expect(f.deps.hardDelete).toHaveBeenCalledTimes(5)
-    expect(f.deps.flow).toHaveBeenLastCalledWith(expect.objectContaining({ p_action: 'worker_release' }))
+    expect((await f.call('confirm', { ...confirm, acknowledge_forfeit: false })).status).toBe(400)
+    expect(f.deps.verifyCode).not.toHaveBeenCalled()
+    for (const route of ['cancel', 'process-due', 'schedule']) expect((await f.call(route)).status).toBe(404)
   })
+
 })
 
 describe('official Auth adapter', () => {
