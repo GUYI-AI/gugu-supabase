@@ -35,7 +35,7 @@ verify_jwt = false
 [functions.attachments]
 verify_jwt = false
 
-# The handler verifies live user sessions; result receipts and the worker have
-# separate, narrower authorization. No browser receives the server credential.
+# The handler verifies live user sessions; result receipts have narrower
+# authorization after deletion. No browser receives the server credential.
 [functions.account-deletion]
 verify_jwt = false

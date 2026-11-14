@@ -189,6 +189,9 @@ BEGIN
             RETURN jsonb_build_object('ok',true,'request',account_deletion_private.view_request(r),'user_id',r.user_id,'lease_token',r.lease_token);
         END IF;
     ELSIF p_action='retry' THEN
+        IF c.test_only AND c.test_user_id IS DISTINCT FROM p_user_id THEN
+            RETURN jsonb_build_object('ok',false,'error','rollout_unavailable','status',503);
+        END IF;
         IF NOT(r.state='retry_wait' OR (r.state='processing' AND r.lease_until<now_at)) OR r.expires_at<=now_at THEN
             RETURN jsonb_build_object('ok',false,'error','new_verification_required','status',409);
         END IF;

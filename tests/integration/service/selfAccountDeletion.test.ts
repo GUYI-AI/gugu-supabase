@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -34,6 +35,13 @@ async function challenge(f: Awaited<ReturnType<typeof fixture>>) {
 async function verify(args: Args) {
   const attempt = await flow('attempt', args); expect(attempt.ok).toBe(true)
   return flow('verified', { p_request_id: args.p_request_id, p_lease_token: attempt.lease_token })
+}
+async function gateScript(name: 'open' | 'close') {
+  const body = readFileSync(`ops/${name}-account-deletion-test-gate.sql`, 'utf8')
+    .replace(/^BEGIN;\s*/, '').replace(/COMMIT;\s*$/, '')
+  await db.query('SAVEPOINT gate_script')
+  try { return await db.query(body) }
+  catch (error) { await db.query('ROLLBACK TO SAVEPOINT gate_script'); throw error }
 }
 
 describe('self deletion workflow on the installed schema', () => {
@@ -118,6 +126,33 @@ describe('self deletion workflow on the installed schema', () => {
     await db.query("UPDATE account_deletion_private.requests SET lease_until=clock_timestamp()-interval '1 second',expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [args.p_request_id])
     expect((await flow('retry', args)).error).toBe('new_verification_required')
     expect(ready.request.state).toBe('processing')
+  })
+  it('closes already-verified retries when the dedicated-account gate is closed', async () => {
+    const f = await fixture(), args = await challenge(f), ready = await verify(args)
+    await flow('finish', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token!, p_error_code: 'auth_delete_failed' })
+    await db.query('UPDATE account_deletion_private.access SET test_user_id=NULL')
+    expect((await flow('retry', args)).error).toBe('rollout_unavailable')
+    expect((await db.query('SELECT count(*)::int n FROM auth.users WHERE id=$1', [f.user])).rows[0].n).toBe(1)
+  })
+  it('opens only one new server-marked verified fixture and never lifts the restriction', async () => {
+    const f = await fixture()
+    await db.query('UPDATE account_deletion_private.access SET test_user_id=NULL')
+    await db.query("UPDATE auth.users SET raw_user_meta_data=jsonb_build_object('gugu_self_deletion_fixture','v1') WHERE id=$1", [f.user])
+    await expect(gateScript('open')).rejects.toThrow('Exactly one new verified fixture')
+    await db.query("UPDATE auth.users SET raw_app_meta_data=jsonb_build_object('gugu_self_deletion_fixture','v1') WHERE id=$1", [f.user])
+    await gateScript('open')
+    expect((await db.query('SELECT test_only,test_user_id FROM account_deletion_private.access')).rows[0]).toEqual({ test_only: true, test_user_id: f.user })
+    const second = randomUUID()
+    await db.query("INSERT INTO auth.users(id,aud,role,email,email_confirmed_at,created_at,raw_app_meta_data) VALUES($1,'authenticated','authenticated',$2,now(),now(),'{\"gugu_self_deletion_fixture\":\"v1\"}')", [second, `${second}@deletion.invalid`])
+    await expect(gateScript('open')).rejects.toThrow('Exactly one new verified fixture')
+  })
+  it('refuses closure with an unreconciled deletion and expires other capabilities on closure', async () => {
+    const f = await fixture(), args = await challenge(f), ready = await verify(args)
+    await expect(gateScript('close')).rejects.toThrow('Deletion outcome must be reconciled')
+    await flow('finish', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token!, p_error_code: 'auth_delete_failed' })
+    await gateScript('close')
+    expect((await db.query('SELECT test_only,test_user_id FROM account_deletion_private.access')).rows[0]).toEqual({ test_only: true, test_user_id: null })
+    expect((await db.query('SELECT state FROM account_deletion_private.requests WHERE id=$1', [args.p_request_id])).rows[0].state).toBe('expired')
   })
   it('keeps group message bodies and replies while anonymizing the deleted author in view/history/search', async () => {
     const f = await fixture(), peer = randomUUID(), room = randomUUID(), message = randomUUID(), reply = randomUUID()

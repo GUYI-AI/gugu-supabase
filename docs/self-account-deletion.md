@@ -101,3 +101,66 @@ it reports booleans/counts/times and is not a deployed Edge smoke test. Real
 release acceptance must use Auth HTTP with the actual trigger owners/financial
 grants. A SQL delete by a stronger role is insufficient. Shared branch testing
 requires explicit approval; do not alter deployment pins during development.
+
+## Review entry points
+
+| Source | What to inspect |
+| --- | --- |
+| `_shared/account-deletion-auth.ts:31` | Auth `/user` validates the exact Bearer token before its session ID is decoded; SQL separately requires the live session. |
+| `_shared/account-deletion-core.ts:74` | All mutating routes require that caller. `result` alone uses a hashed, unguessable receipt to read minimal status after login is deleted. |
+| `_shared/account-deletion-core.ts:88` | Fresh challenge bound to the current confirmed email; consent and explicit forfeiture acknowledgment; official OTP identity comparison before execution. |
+| `_shared/account-deletion-auth.ts:43` | Official `/otp` and `/verify`, with the temporary verification session revoked locally. No custom OTP implementation. |
+| `20261115033000_self_account_deletion.sql:84` | Live Auth session, confirmed email, dedicated-account gate, five-minute authorization, rate limits, leases and bounded retries. Closing the gate also rejects already-verified retries. |
+| `20261115033000_self_account_deletion.sql:48` | Clear workflow identity metadata on hard deletion. The final EXECUTE ACL is server-role-only; the private tables have no API-role grants. |
+| `_shared/account-deletion-auth.ts:57` | The only account deletion call: server Auth Admin HTTP DELETE with `should_soft_delete:false`, followed by absence readback. The existing Auth trigger chain defines erasure scope. |
+| `20261115033100_deleted_message_sender_label.sql:7` | Display projection only. No message/body/resource deletion is added; non-system NULL authors receive the deleted-user label. Original reader ACLs and senderless system behavior are preserved. |
+| `config.toml:38` | This five-line entry disables the gateway's automatic JWT check for this function only, so post-deletion receipt readback can work. It does not disable the handler's live Auth checks or grant client service-role access. No worker route exists. |
+
+The first migration adds workflow state, not a second erasure engine. The second
+changes display text, not physical deletion scope. The physical table inventory
+above describes the existing deletion chain reused by Auth.
+
+## Controlled deployment and recovery
+
+1. Merge reviewed, green sources to `dev`, then use the approved paired CD flow
+   after the erasure-performance and financial-owner/permission prerequisites.
+   The official deployment guard does not support an unmerged branch here. Only
+   CD writes successful staging source pins; this validation does not edit pins.
+2. Installation leaves `test_only=true,test_user_id=NULL`: every ordinary user is
+   closed. An authorized synthetic-account operator creates one new confirmed
+   fixture through Auth Admin, with server-only app metadata
+   `gugu_self_deletion_fixture=v1`. The email must be a disposable approved test
+   inbox; no address, code or credential goes into reports or logs. User metadata
+   supplied by a client is insufficient to mark a fixture.
+3. The matching reviewed CD data-repair control `account-deletion-test:count`
+   reads counts, `:rehearse` rolls the open script back, `:apply` permits exactly
+   that one fresh verified server-marked account, and `:rollback` closes it.
+   This control must be staging-only at both the dispatch and host boundaries.
+   Until that control is available, keep the gate closed; do not substitute
+   manual staging SQL, configuration edits or a general rollout activation.
+4. Run the real deployed Edge challenge → receive the new email code → confirm
+   with forfeiture acknowledgment → Auth Admin absence readback. Also check
+   receipt idempotency, original-session refusal, the erased ID scan and the
+   other-account negative control. Emit only booleans, counts and elapsed times.
+5. Successful deletion removes the fixture and automatically clears its allowlist
+   FK. Then execute CD `:rollback`, followed by `:count`: restricted gates must
+   be 1, allowed accounts 0, live requests/active deletions 0, fixture candidates
+   0. Confirm an ordinary account remains unavailable. Complete the mailbox
+   claim and permanently remove that claimed account from its pool.
+6. If validation fails while the account remains, reconcile any processing
+   request first; closure refuses an unresolved deletion. CD `:rollback` then
+   clears the allowlist and expires outstanding challenges/retries. Delete only
+   the dedicated fixture through the authorized Auth path after the failure is
+   understood; if that path is blocked, report it and keep the closed gate.
+   Do not delete unrelated or pre-existing fixtures, bypass triggers or use
+   stronger-role SQL as a substitute. Remove the mailbox from the pool on either
+   outcome, and report any retained synthetic-account count without its email.
+
+These are forward-installable additions; recovery closes the new entry rather
+than rewriting installed migrations or rolling an old source tree over a newer
+ledger. A staging deployment/pin change does not deploy production. Production
+remains on its separately approved source pair. A later production deployment
+would install the same default-closed gate; opening self-service for real users
+requires a separately reviewed production rollout, not this staging-only test
+control. No new Vault, SMTP, billing-rate or client financial permission is
+introduced here.
