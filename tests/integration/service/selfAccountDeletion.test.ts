@@ -44,6 +44,10 @@ describe('self deletion workflow on the installed schema', () => {
     }
     expect((await db.query(`SELECT has_function_privilege('service_role','public.account_deletion_flow(text,uuid,uuid,uuid,text,text,text,uuid,text)','EXECUTE') allowed`)).rows[0].allowed).toBe(true)
     expect((await db.query(`SELECT has_table_privilege('service_role','account_deletion_private.requests','UPDATE') allowed`)).rows[0].allowed).toBe(false)
+    for (const signature of ['chat.message_history_as(text,text,text,bigint,integer)', 'chat.message_search_as(text,text,text,bigint,integer)', 'identity.pull_agent_inbox_v2(text,text,bigint,integer,jsonb,bigint)']) {
+      expect((await db.query(`SELECT has_function_privilege('authenticated',$1,'EXECUTE') allowed`, [signature])).rows[0].allowed).toBe(true)
+      expect((await db.query(`SELECT has_function_privilege('anon',$1,'EXECUTE') allowed`, [signature])).rows[0].allowed).toBe(false)
+    }
   })
   it('rejects an unavailable rollout, stale consent and the wrong live session', async () => {
     const f = await fixture()
@@ -128,6 +132,7 @@ describe('self deletion workflow on the installed schema', () => {
     expect((await db.query('SELECT role FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [room, peer])).rows[0].role).toBe('owner')
     expect((await db.query('SELECT count(*)::int n FROM chat.message_reactions WHERE message_id=$1', [message])).rows[0].n).toBe(0)
     await db.query("SELECT set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: peer, role: 'authenticated' })])
+    await db.query('SET LOCAL ROLE authenticated')
     expect((await db.query('SELECT sender_name FROM chat.messages_view WHERE id=$1', [message])).rows[0].sender_name).toBe('已注销用户')
     expect((await db.query('SELECT sender_name FROM chat.message_history_as($1,$2) WHERE id=$3', [room, peer, message])).rows[0].sender_name).toBe('已注销用户')
     expect((await db.query("SELECT sender_name FROM chat.message_search_as($1,'Retained',$2) WHERE id=$3", [room, peer, message])).rows[0].sender_name).toBe('已注销用户')

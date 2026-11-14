@@ -9,6 +9,7 @@ import pg from 'pg'
 import { createAccountDeletionHandler } from '../supabase/functions/_shared/account-deletion-core.ts'
 import { accountDeletionDependencies } from '../supabase/functions/_shared/account-deletion-auth.ts'
 
+async function main() {
 const owner = JSON.parse(readFileSync(new URL('../.local/test-db/owner.json', import.meta.url)))
 const port = owner.port, origin = 'http://127.0.0.1:' + (port - 1), mail = 'http://127.0.0.1:' + (port + 1)
 if (!Number.isInteger(port) || owner.root !== new URL('../', import.meta.url).pathname) throw Error('Owned loopback fixture required')
@@ -91,7 +92,7 @@ try {
   const links = await db.query(`SELECT (SELECT count(*) FROM account_deletion_private.requests WHERE user_id=$1 OR session_id IN(SELECT id FROM auth.sessions WHERE user_id=$1))::int
     +(SELECT count(*) FROM account_deletion_private.events WHERE actor_user_id=$1)::int n`, [immediate.id])
   assert(links.rows[0].n === 0, 'original_identity_erased')
-  evidence.cases.push({ mode: 'immediate', wrong_code_rejected: true, deleted: true, result_idempotent: true, original_links: 0, interface_to_absent_ms: +elapsed.toFixed(3) })
+  evidence.cases.push({ case: 'immediate', wrong_code_rejected: true, deleted: true, result_idempotent: true, original_links: 0, interface_to_absent_ms: +elapsed.toFixed(3) })
 
   const failed = await newUser(), fp = await start(failed)
   await db.query(`CREATE TABLE public.deletion_failure_fixture(id uuid PRIMARY KEY);
@@ -109,7 +110,7 @@ try {
   await db.query('DROP TRIGGER zz_deletion_failure_fixture ON auth.users;DROP FUNCTION public.deletion_failure_fixture();DROP TABLE public.deletion_failure_fixture;')
   const retryBegan = performance.now(), retried = await call('retry', failed.token, fp)
   assert(retried.status === 200 && await gone(failed), 'retry_readback')
-  evidence.cases.push({ mode: 'failure_retry', real_auth_failure: true, rollback_preserved_account: true,
+  evidence.cases.push({ case: 'failure_retry', real_auth_failure: true, rollback_preserved_account: true,
     official_otp_replay_rejected: true, temporary_session_revoked: true, retry_deleted: true,
     retry_to_absent_ms: +(performance.now() - retryBegan).toFixed(3) })
   evidence.ok = true
@@ -121,3 +122,6 @@ try {
   writeFileSync('account-deletion-http-result.json', JSON.stringify(evidence, null, 2) + '\n')
   console.log(JSON.stringify(evidence))
 }
+
+}
+main().catch(() => { console.log(JSON.stringify({ ok: false, failed_stage: 'startup_or_cleanup' })); process.exitCode = 1 })
