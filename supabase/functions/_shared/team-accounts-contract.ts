@@ -1,7 +1,7 @@
 /** Community identity contract. Authorization snapshots must come from the
  * database after Auth validates the caller; request bodies never supply them. */
 export type TeamRole = 'superadmin' | 'admin' | 'member';
-export type MemberState = 'provisioning' | 'active' | 'disabled';
+export type MemberState = 'invited' | 'provisioning' | 'active' | 'disabled';
 export interface TeamMember {
   id: string; team_id: string; identity_id: string;
   role: TeamRole; state: MemberState; revision: number;
