@@ -207,6 +207,31 @@ IDs/outcomes; failures do not dump database or HTTP/2 request objects. The
 worker has no public HTTP endpoint. Supervise it as a separate opt-in process
 with secret mounts and bounded shutdown; no deployment is performed by this PR.
 
+## Owner-supplied APNs authorization and rotation
+
+The owner supplies authorization metadata through the existing secure deployment
+channel: an **APNs token-authentication signing key** (EC P-256 / ES256), its
+Key ID, its Apple Developer Team ID, and confirmation that its scope permits
+`app.gugu.chat` in the selected environment. An App Store Connect upload or
+notarization key is not proof of APNs authorization. Do not send private key
+contents in chat, issues, logs or review evidence. The operator mounts the key
+read-only using the configured path; this document requests no key contents.
+
+For signing-key rotation, securely provision the replacement mount and update
+Key ID/Team ID together, stop the supervised worker gracefully, then restart
+it with the new configuration. The provider reads the key at startup and caches
+its authentication JWT in memory; replacing a file alone does not reload it.
+Retire the old authorization only after the replacement is separately verified
+by the authorized operator. Rotation does not change device registration
+receipts or replay terminal/uncertain attempts. Database-login rotation likewise
+requires a worker restart; never print the connection string during checks.
+
+Run a separate configured worker for each APNs environment. `sandbox` connects
+to `api.sandbox.push.apple.com`; `production` connects to `api.push.apple.com`.
+TestFlight uses `production` even when the business database is staging.
+There is no environment fallback. Signed-build `aps-environment` determines
+the registration environment; the database deployment name does not.
+
 ## Verification boundaries
 
 `pnpm test:push` runs synthetic keys/tokens against real **loopback HTTP/2** and
