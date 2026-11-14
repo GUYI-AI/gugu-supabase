@@ -136,7 +136,7 @@ describe('self deletion workflow on the installed schema', () => {
     expect((await db.query('SELECT sender_name FROM chat.messages_view WHERE id=$1', [message])).rows[0].sender_name).toBe('已注销用户')
     expect((await db.query('SELECT sender_name FROM chat.message_history_as($1,$2) WHERE id=$3', [room, peer, message])).rows[0].sender_name).toBe('已注销用户')
     expect((await db.query("SELECT sender_name FROM chat.message_search_as($1,'Retained',$2) WHERE id=$3", [room, peer, message])).rows[0].sender_name).toBe('已注销用户')
-    expect((await db.query('SELECT reply_to_sender_name FROM chat.message_reply_preview_row($1,$2)', [message, peer])).rows[0].reply_to_sender_name).toBe('已注销用户')
+    expect((await db.query('SELECT reply_to_sender_name FROM chat.message_reply_preview_for($1,$2)', [message, peer])).rows[0].reply_to_sender_name).toBe('已注销用户')
   })
 
 })
