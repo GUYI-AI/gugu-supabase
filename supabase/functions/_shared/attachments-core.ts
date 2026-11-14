@@ -481,18 +481,35 @@ interface Claimed {
   content_type: string
 }
 
-export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-accept' = 'kick') {
+export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-accept' = 'kick',
+  sweepStaging?: (remaining: number, guard: () => Promise<void>) => Promise<void>) {
   const result = { claimed: 0, deleted: 0, failed: 0 }
   let claimedCount: number | null = null
   let removed = 0
   let completed = false
+  let token: string | null = null
   try {
+    const run = await call(deps.serviceRpc, 'file_blob_gc_run_begin', {}) as
+      { acquired: boolean; token?: string; batch_limit: number; concurrency: number }
+    if (!run || typeof run.acquired !== 'boolean' || ![5, 50].includes(run.batch_limit) || run.concurrency !== 1) {
+      throw new Refusal(503, 'not_configured', 'Attachment GC control is unavailable')
+    }
+    if (!run.acquired) { claimedCount = 0; completed = true; return result }
+    if (typeof run.token !== 'string' || !UUID.test(run.token)) throw new Refusal(503, 'not_configured', 'Invalid GC consumer receipt')
+    token = run.token
+    const guard = async () => {
+      if (await call(deps.serviceRpc, 'file_blob_gc_run_renew', { p_token: token }) !== true) {
+        throw new Refusal(503, 'not_configured', 'Attachment GC consumer is no longer permitted')
+      }
+    }
     await call(deps.serviceRpc, 'file_temporary_expire', { p_limit: 500 })
     await call(deps.serviceRpc, 'file_transfer_expire', { p_limit: 500 })
-    const claimed = ((await call(deps.serviceRpc, 'file_blob_gc_claim', { p_limit: 50, p_stale_seconds: 600 })) ?? []) as Claimed[]
+    const claimed = ((await call(deps.serviceRpc, 'file_blob_gc_run_claim', { p_token: token })) ?? []) as Claimed[]
+    if (!Array.isArray(claimed) || claimed.length > run.batch_limit) throw new Refusal(503, 'not_configured', 'Attachment GC claim exceeds its bound')
     result.claimed = claimed.length
     claimedCount = claimed.length
     for (const job of claimed) {
+      await guard()
       try {
         if (job.bucket_id === 'oss' || job.bucket_id === 'temporary') {
           await objectStorage(deps).remove(job.object_name)
@@ -513,9 +530,16 @@ export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-acce
           .catch((e) => deps.log('gc_fail_report_failed', { blob: job.blob_id, error: String(e) }))
       }
     }
+    // Staging cleanup shares the same lease and remaining server-side budget.
+    // A disabled or busy collector cannot delete via this second path either.
+    if (sweepStaging && run.batch_limit > claimed.length) await sweepStaging(run.batch_limit - claimed.length, guard)
     completed = true
     return result
   } finally {
+    if (token) {
+      try { await call(deps.serviceRpc, 'file_blob_gc_run_end', { p_token: token }) }
+      catch { try { deps.log('gc_release_failed', { entry }) } catch { /* Keep the original outcome. */ } }
+    }
     try {
       const at = deps.now().toISOString()
       // Removal may succeed even when its database confirmation fails. Keep both counts without changing the API result.

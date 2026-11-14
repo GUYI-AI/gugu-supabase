@@ -293,6 +293,8 @@ function fakes(opts: {
     },
     serviceRpc: async (fn, args) => {
       order.push('service:' + fn)
+      if (fn === 'file_blob_gc_run_begin') return { data: { acquired: true, token: '11111111-1111-4111-8111-111111111111', batch_limit: 50, concurrency: 1 }, error: null }
+      if (fn === 'file_blob_gc_run_renew' || fn === 'file_blob_gc_run_end') return { data: true, error: null }
       if (fn==='file_managed_upload_for') {controls.push({as:'service',fn,args});return {data:{max_bytes:MAX_ATTACHMENT_BYTES},error:null}}
       if (fn==='file_managed_upload_registered'||fn==='file_transfer_expire'||fn==='file_temporary_expire') {controls.push({as:'service',fn,args});return {data:null,error:null}}
       if (fn==='file_transfer_settings') {controls.push({as:'service',fn,args});return {data:{},error:null}}
@@ -303,7 +305,7 @@ function fakes(opts: {
         opts.afterRegister?.(bucket)
         return { data: [{ blob_id: 'b1', created: opts.registerCreated ?? true }], error: null }
       }
-      if (fn === 'file_blob_gc_claim') return { data: opts.claimed ?? [], error: null }
+      if (fn === 'file_blob_gc_run_claim') return { data: opts.claimed ?? [], error: null }
       if (fn === 'file_blob_gc_finish' || fn === 'file_blob_gc_fail') return { data: null, error: null }
       return { data: null, error: { message: `no fake for ${fn}` } }
     },
@@ -666,7 +668,7 @@ describe('直传表单、签名链接、回收', () => {
     expect(controls.filter(r => r.fn === 'file_temporary_expire')).toEqual([{as:'service',fn:'file_temporary_expire',args:{p_limit:500}}])
     expect(order.indexOf('service:file_temporary_expire')).toBeLessThan(order.indexOf('service:file_transfer_expire'))
     expect(controls.filter(r => r.fn === 'file_transfer_expire')).toEqual([{as:'service',fn:'file_transfer_expire',args:{p_limit:500}}])
-    expect(order.indexOf('service:file_transfer_expire')).toBeLessThan(order.indexOf('service:file_blob_gc_claim'))
+    expect(order.indexOf('service:file_transfer_expire')).toBeLessThan(order.indexOf('service:file_blob_gc_run_claim'))
     expect(order).not.toContain('service:file_transfer_object_gone')
     expect(calls.map((c) => `${c.method} ${c.url.replace(/\?.*$/, '')}`)).toEqual([
       'DELETE https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/ab/x',
@@ -708,7 +710,7 @@ describe('直传表单、签名链接、回收', () => {
     expect(f.events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'file-accept',
       at: '2026-10-16T12:00:00.000Z', day: '2026-10-16', claimed: 1, deleted: 1, finished: 0, failed: 1, outcome: 'completed' }])
   })
-  it.each(['file_temporary_expire', 'file_transfer_expire', 'file_blob_gc_claim'])('gc records unknown claims and rethrows a %s refusal', async failedRpc => {
+  it.each(['file_temporary_expire', 'file_transfer_expire', 'file_blob_gc_run_claim'])('gc records unknown claims and rethrows a %s refusal', async failedRpc => {
     const f = fakes(), rpc = f.deps.serviceRpc
     f.deps.serviceRpc = (fn, args) => fn === failedRpc
       ? Promise.resolve({ data: null, error: { message: 'RPC unavailable' } }) : rpc(fn, args)
@@ -731,7 +733,7 @@ describe('直传表单、签名链接、回收', () => {
   it.each([false, true])('gc preserves the original exception when summary logging throws (stderr unavailable: %s)', async stderrFails => {
     const f = fakes(), original = new Error('claim transport unavailable'), loggingError = new Error('summary logger unavailable')
     const rpc = f.deps.serviceRpc
-    f.deps.serviceRpc = (fn, args) => fn === 'file_blob_gc_claim' ? Promise.reject(original) : rpc(fn, args)
+    f.deps.serviceRpc = (fn, args) => fn === 'file_blob_gc_run_claim' ? Promise.reject(original) : rpc(fn, args)
     f.deps.log = () => { throw loggingError }
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => { if (stderrFails) throw new Error('stderr unavailable') })
     try {
