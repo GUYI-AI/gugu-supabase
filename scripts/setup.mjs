@@ -60,6 +60,7 @@ if (templates.length && !auth.smtp_host) console.warn('WARNING: sign-in emails d
 await api('/secrets', 'POST', [{ name: 'GUGU_PUBLIC_SUPABASE_URL', value: publicUrl }])
 await cli(['functions', 'deploy', 'server-login', '--project-ref', ref, '--use-api'])
 await cli(['functions', 'deploy', 'attachments', '--project-ref', ref, '--use-api'])
+await cli(['functions', 'deploy', 'account-deletion', '--project-ref', ref, '--use-api'])
 const keys = JSON.parse((await cli(['projects', 'api-keys', '--project-ref', ref, '--output', 'json'])).stdout)
 const anon = keys.find((key) => key.name === 'anon' && typeof key.api_key === 'string')?.api_key
 if (!anon) throw new Error('Project has no supported public anon key; no client configuration was written')
