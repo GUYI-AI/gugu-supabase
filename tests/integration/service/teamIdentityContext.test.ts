@@ -47,7 +47,7 @@ describe('service-only team identity context', () => {
   })
   it('resolves a real separate team principal without making a personal actor a member', async () => {
     const organization = await team(), m = await seat(organization), personal = await auth()
-    expect(await context(m.principal, organization)).toMatchObject({ kind: 'team', team_id: organization, member_id: m.id, member_identity_id: m.principal, role: 'member', state: 'active', membership_revision: 1, region: 'cn' })
+    expect(await context(m.principal, organization)).toMatchObject({ kind: 'team', team_id: organization, team_name: 'Fixture team', member_id: m.id, member_identity_id: m.principal, role: 'member', state: 'active', membership_revision: 1, region: 'cn' })
     expect(await context(personal)).toMatchObject({ kind: 'personal', team_id: null, member_id: null })
     expect((await refusal('SELECT identity.team_context_for($1,$2)', [personal, organization])).message).toBe('team_context_required')
   })
