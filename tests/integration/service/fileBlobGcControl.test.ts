@@ -10,7 +10,13 @@ beforeAll(async () => {
   db = new Client({ connectionString: url.href }); await db.connect()
 })
 afterAll(async () => { await db?.end() })
-beforeEach(async () => { await db.query('BEGIN'); await db.query("SELECT pg_advisory_xact_lock(hashtextextended('tests:file_blob_gc',0))") })
+beforeEach(async () => {
+  await db.query('BEGIN')
+  await db.query("SELECT pg_advisory_xact_lock(hashtextextended('tests:file_blob_gc',0))")
+  // The real collector deliberately yields when another fixture holds quota.
+  // Hold its existing lock here so the five-of-six assertion tests the bound.
+  await db.query("SELECT pg_advisory_xact_lock(hashtextextended('gugu:file-transfer:quota',0))")
+})
 afterEach(async () => { await db.query('ROLLBACK') })
 const configure = (enabled: boolean, limit = 5) => scalar('SELECT chat.configure_file_blob_gc($1,$2,$3,$4) AS v',
   ['http://127.0.0.1:1/functions/v1/attachments/gc', 'synthetic-test-capability', enabled, limit])
@@ -34,6 +40,7 @@ it('configures both names without returning their contents and admits one five-c
     const digest=createHash('sha256').update(randomUUID()).digest('hex')
     const blob=await scalar('SELECT blob_id AS v FROM chat.file_blob_register($1,$2,$3,10,$4)', [user,'staging/'+user+'/'+randomUUID(),digest,'image/png'])
     await db.query('DELETE FROM chat.file_blob_uploads WHERE blob_id=$1',[blob])
+    expect(await scalar('SELECT chat.file_blob_held_until($1) IS NULL AS v',[blob])).toBe(true)
     await db.query("INSERT INTO chat.file_blob_gc(blob_id,next_attempt_at) VALUES($1,now()-interval '1 second') ON CONFLICT(blob_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at",[blob])
   }
   const run = await begin()
