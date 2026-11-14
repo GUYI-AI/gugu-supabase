@@ -104,11 +104,11 @@ const revision = async (user: string) =>
   Number((await db.query<{ revision: string }>('SELECT revision FROM chat.account_revision_heads WHERE user_id=$1', [user])).rows[0]?.revision ?? 0)
 
 /** The client's registration write, verbatim in shape: PostgREST on_conflict=device_id sets every column, device_id included. */
-const REGISTER = `INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform,status,capabilities,last_seen_at,updated_at)
-  VALUES ($1,$2,'lock order','isolated','linux','online',$3::jsonb,now(),now())
+const REGISTER = `INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform,status,capabilities,machine_id,last_seen_at,updated_at)
+  VALUES ($1,$2,'lock order','isolated','linux','online',$3::jsonb,'machine-'||$1,now(),now())
   ON CONFLICT (device_id) DO UPDATE SET device_id=EXCLUDED.device_id,user_id=EXCLUDED.user_id,label=EXCLUDED.label,
     hostname=EXCLUDED.hostname,platform=EXCLUDED.platform,status=EXCLUDED.status,capabilities=EXCLUDED.capabilities,
-    last_seen_at=EXCLUDED.last_seen_at,updated_at=EXCLUDED.updated_at`
+    machine_id=EXCLUDED.machine_id,last_seen_at=EXCLUDED.last_seen_at,updated_at=EXCLUDED.updated_at`
 
 describe('device and account-revision lock order', () => {
   it('commits a registration upsert and a message that wakes an agent on that device', async () => fixture(async f => {

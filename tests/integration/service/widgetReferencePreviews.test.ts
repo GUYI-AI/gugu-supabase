@@ -51,18 +51,20 @@ describe('the chat list preview carries reference source only when it may', () =
     expect((await read(owner))[0]?.preview_source).toBeNull()
   })
 
-  it('inherits the messages RLS and personal deletion without opening another read path', async () => {
+  it('inherits the messages RLS; one visibility rule for the whole row (personal deletion, recall)', async () => {
+    const earlier = await post('earlier line')
     const id = await post('gugu-widget://private')
     expect((await read(owner))[0]?.id).toBe(id)
     expect(await read(outsider)).toEqual([])
     expect((await read(owner))[0]?.preview_source).toBe('gugu-widget://private')
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [chat, outsider])
     await db.query('UPDATE chat.messages SET deleted_for_user_ids=$1::jsonb WHERE id=$2', [JSON.stringify([owner]), id])
-    // The list still shows the row's bounded preview. Only the optional full source disappears.
-    expect((await read(owner))[0]?.preview_source).toBeNull()
+    // Deleted for the owner: not the owner's latest message any more (20261110054000), as in the owner's transcript.
+    expect(await read(owner)).toEqual([{ id: earlier, preview: 'earlier line', preview_source: null }])
     expect((await read(outsider))[0]?.preview_source).toBe('gugu-widget://private')
     await db.query('UPDATE chat.messages SET retracted_at=now() WHERE id=$1', [id])
-    expect((await read(outsider))[0]?.preview_source).toBeNull()
+    // Recalled: still the latest message, saying nothing of what it said.
+    expect(await read(outsider)).toEqual([{ id, preview: '[Recalled]', preview_source: null }])
   })
 
   it('keeps the list RPC a stable invoker function for signed-in people only, and adds no messages column', async () => {

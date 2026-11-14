@@ -7,6 +7,14 @@ import { foundationDigest, installFoundation, installReleases, releases } from '
 import { topicResourcesFixture } from './topic-resources-fixture.mjs'
 import { installTopicResourcesConcurrently } from './topic-resource-concurrency.mjs'
 import { assertAllocatedProjectPublisher, assertNoChatFileHost } from './project-publisher-contract.mjs'
+import { installConnectionStateWithEvidence } from './platform-connection-state-fixture.mjs'
+import { assertOwnerConnectionRuntime } from './platform-connection-owner-fixture.mjs'
+import { assertConnectionAuthorityReader } from './platform-connection-authority-fixture.mjs'
+import { installConnectionEntryGateWithEvidence } from './platform-connection-upgrade-entry-fixture.mjs'
+import { assertConnectionManagementGate } from './platform-connection-upgrade-fixture.mjs'
+import { installConnectionCutoverWithEvidence } from './platform-connection-cutover-fixture.mjs'
+import { installConnectionFollowupsWithEvidence } from './platform-connection-followups-fixture.mjs'
+import { installConnectionCatalogWithEvidence, releasedDirectoryRow } from './platform-connection-catalog-fixture.mjs'
 
 // Deliberately requires an empty, disposable Supabase PostgreSQL 17 instance.
 // Never resets schemas, migration history, or user data to make a test pass.
@@ -39,6 +47,50 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     assert.ok(deviceCheckRelease && validationRelease)
     let widgetUpgrade
     const releaseQuery = async (sql) => {
+      const catalogRelease = releases.find(release => release.version.endsWith('_integration_catalog_metadata'))
+      if (catalogRelease && sql.includes(catalogRelease.sql)) {
+        return installConnectionCatalogWithEvidence({ db, query, sql, url: url.href, test: (name, action) => t.test(name, action) })
+      }
+      const followupsRelease = releases.find(release => release.version.endsWith('_connection_cutover_rehearsal_followups'))
+      if (followupsRelease && sql.includes(followupsRelease.sql)) {
+        return installConnectionFollowupsWithEvidence({ db, query, sql, test: (name, action) => t.test(name, action) })
+      }
+      const cutoverRelease = releases.find(release => release.version.endsWith('_connection_authority_cutover'))
+      if (cutoverRelease && sql.includes(cutoverRelease.sql)) {
+        return installConnectionCutoverWithEvidence({ db, query, sql, url: url.href, test: (name, action) => t.test(name, action) })
+      }
+      const entryGateRelease=releases.find(release=>release.version.endsWith('_connection_management_entrypoints'))
+      if(entryGateRelease && sql.includes(entryGateRelease.sql)){
+        return installConnectionEntryGateWithEvidence({db,query,sql,test:(name,action)=>t.test(name,action)})
+      }
+      const upgradeGateRelease = releases.find(release => release.version.endsWith('_connection_management_upgrade_gate'))
+      if (upgradeGateRelease && sql.includes(upgradeGateRelease.sql)) {
+        const result = await query(sql)
+        await query('BEGIN')
+        try { await assertConnectionManagementGate(db, (name, action) => t.test(name, action)) }
+        finally { await query('ROLLBACK') }
+        return result
+      }
+      const authorityRelease = releases.find((release) => release.version.endsWith('_connection_authority_read'))
+      if (authorityRelease && sql.includes(authorityRelease.sql)) {
+        const result = await query(sql)
+        await query('BEGIN')
+        try { await assertConnectionAuthorityReader(db, (name, action) => t.test(name, action)) }
+        finally { await query('ROLLBACK') }
+        return result
+      }
+      const ownerConnectionRelease = releases.find((release) => release.version.endsWith('_owner_connection_runtime'))
+      if (ownerConnectionRelease && sql.includes(ownerConnectionRelease.sql)) {
+        const result = await query(sql)
+        await query('BEGIN')
+        try { await assertOwnerConnectionRuntime(db, (name, action) => t.test(name, action)) }
+        finally { await query('ROLLBACK') }
+        return result
+      }
+      const connectionRelease = releases.find((release) => release.version.endsWith('_platform_connection_state'))
+      if (connectionRelease && sql.includes(connectionRelease.sql)) {
+        return installConnectionStateWithEvidence({ db, query, sql, release: connectionRelease, test: (name, action) => t.test(name, action) })
+      }
       const supportRelease = releases.find(release => release.version.endsWith('_support_agent_boundary'))
       if (supportRelease && sql.includes(supportRelease.sql)) {
         const snapshot = async () => ({
@@ -408,6 +460,9 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
       return result
     }
     assert.deepEqual(await installReleases(releaseQuery), { applied: versions, versions })
+    await t.test('the installed backend accepts what 0.3.2 clients publish for a provider directory row', async () => {
+      await query(`SELECT identity.assistant_panel_validate('integrations','catalog:amap','${JSON.stringify(releasedDirectoryRow)}'::jsonb)`)
+    })
     await t.test('installed publishers retain directory-allocated names and private grants', async () => {
       await assertAllocatedProjectPublisher(query)
     })
@@ -471,7 +526,7 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
       await db.query('ROLLBACK')
     }
     await t.test('project metadata tables are closed and only intended read/publish APIs are granted', async () => {
-      for (const table of ['file_device_revisions','file_temporary_transfers']) {
+      for (const table of ['file_contents','file_temporary_transfers']) {
         assert.equal((await query(`SELECT relrowsecurity AS enabled FROM pg_class WHERE oid='chat.${table}'::regclass`))[0].enabled, true)
         for (const role of ['anon','authenticated']) {
           for (const privilege of ['SELECT','INSERT','UPDATE','DELETE']) {
@@ -480,7 +535,7 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
         }
       }
       for (const signature of ['file_project_policy_as(text,text,text,boolean,boolean,text)','file_project_policy_for(text,text)',
-        'file_device_publish(uuid,text,text,text,text,bigint,text,text,integer,uuid,jsonb,text)','file_resolve_as(jsonb,text)']) {
+        'file_device_publish(uuid,text,text,text,text,bigint,text,text,integer,uuid,jsonb,text,integer,integer)','file_resolve_as(jsonb,text)']) {
         assert.equal((await db.query("SELECT has_function_privilege('authenticated',$1,'EXECUTE') AS allowed", ['chat.'+signature])).rows[0].allowed, true)
         assert.equal((await db.query("SELECT has_function_privilege('anon',$1,'EXECUTE') AS allowed", ['chat.'+signature])).rows[0].allowed, false)
       }

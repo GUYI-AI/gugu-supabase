@@ -145,6 +145,20 @@ describe('one download contract with optional provider throttling',()=>{
     expect('thumb_url'in result&&result.thumb_url!==null).toBe(thumbnail)
     expect(result).toHaveProperty('url','https://bytes.example/file')
   })
+  it.each([
+    {label:'ordinary photo',width:4032,height:3024,thumbnail:true},
+    {label:'long screenshot',width:1170,height:40000,thumbnail:true},
+    {label:'narrow strip',width:100,height:65000,thumbnail:true},
+    {label:'pixels at the documented limit',width:15625,height:16000,thumbnail:true},
+    {label:'pixels above the documented limit',width:20000,height:20000,thumbnail:false},
+    {label:'unknown dimensions',width:null,height:null,thumbnail:true},
+  ])('limits thumbnails by source dimensions for a small-byte $label',async({width,height,thumbnail})=>{
+    const f=fixture('oss',{}, {content_type:'image/png',size_bytes:48_685,width,height})
+    const result=await handleFileDownload(f.deps,'reader',{ref:{message_id:'m'},request_id:request})
+    expect(f.sign.mock.calls[0]?.[1]).toBe(thumbnail)
+    expect('thumb_url'in result&&result.thumb_url!==null).toBe(thumbnail)
+    expect(result).toHaveProperty('url','https://bytes.example/file')
+  })
   it('keeps SVG on the original-only path even when its known size is below the image-processing limit',async()=>{
     const f=fixture('oss',{}, {content_type:'image/svg+xml',size_bytes:1024})
     const result=await handleFileDownload(f.deps,'reader',{ref:{message_id:'m'},request_id:request})

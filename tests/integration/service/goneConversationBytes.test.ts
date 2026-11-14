@@ -150,13 +150,11 @@ describe('all historical reference families retain the same collector protection
     await readable({ item_id: item, version: 2 })
   })
 
-  it.each(['message', 'avatar', 'output'])('keeps an archived group legacy %s object without a blob-id pointer', async kind => {
+  // Messages no longer name Storage objects (old chat-media cards were adopted into files, 20261110053000).
+  it.each(['avatar', 'output'])('keeps an archived group legacy %s object without a blob-id pointer', async kind => {
     const name = `${group}/${owner}/${randomUUID()}.pdf`
     const url = `http://127.0.0.1/storage/v1/object/public/chat-media/${name}`
     await db.query("INSERT INTO storage.objects(bucket_id,name,metadata) VALUES('chat-media',$1,'{\"size\":60,\"mimetype\":\"application/pdf\"}')", [name])
-    const message = randomUUID()
-    if (kind === 'message') await db.query(`INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type,storage_bucket_id,storage_object_name)
-      VALUES($1,$2,$3,$4,'attachment','chat-media',$5)`, [message, group, owner, `[附件] old.pdf (application/pdf)\n[URL] ${url}`, name])
     if (kind === 'avatar') await db.query("UPDATE chat.chats SET avatar_url=$1,avatar_storage_bucket_id='chat-media',avatar_storage_object_name=$2 WHERE id=$3", [url, name, group])
     if (kind === 'output') await db.query("INSERT INTO chat.group_outputs(chat_id,name,url,storage_bucket_id,storage_object_name) VALUES($1,'output.pdf',$2,'chat-media',$3)", [group, url, name])
     const blob = (await db.query("SELECT chat.file_blob_for_object('chat-media',$1) AS id", [name])).rows[0].id
@@ -164,7 +162,6 @@ describe('all historical reference families retain the same collector protection
     await queue(blob)
     expect(await collected(blob)).toEqual([])
     expect((await db.query("SELECT chat.file_blob_held_until($1)='infinity'::timestamptz AS held", [blob])).rows[0].held).toBe(true)
-    if (kind === 'message') await readable({ message_id: message })
   })
 
   it('keeps a direct message blob with no workspace item', async () => {

@@ -141,7 +141,12 @@ describe('#5919 archive preserves the complete conversation', () => {
       for (let i=0;i<statements.length;i++) before.push((await database.query(statements[i], i<2 ? [[GROUP, DM]] : [])).rows)
       expect(before[0]).toHaveLength(5)
       await removeAgentAsOwner()
-      for (let i=0;i<statements.length;i++) expect((await database.query(statements[i], i<2 ? [[GROUP, DM]] : [])).rows).toEqual(before[i])
+      const after = []
+      for (let i=0;i<statements.length;i++) after.push((await database.query(statements[i], i<2 ? [[GROUP, DM]] : [])).rows)
+      // Removal closes the DM for the owner (personal list state only); every seat is otherwise unchanged.
+      expect(after[1].filter(row => row.conversation_deleted_at).map(row => [row.chat_id, row.user_id])).toEqual([[DM, OWNER]])
+      after[1] = after[1].map(row => row.chat_id === DM && row.user_id === OWNER ? { ...row, conversation_deleted_at: null } : row)
+      for (let i=0;i<statements.length;i++) expect(after[i]).toEqual(before[i])
       const identity = await database.query<{ removed_at: Date }>('SELECT removed_at FROM identity.users WHERE id=$1', [AGENT])
       expect(identity.rows).toHaveLength(1)
       expect(identity.rows[0].removed_at).not.toBeNull()

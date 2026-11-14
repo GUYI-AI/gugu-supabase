@@ -27,7 +27,7 @@ export async function handleFileDownload(deps:AttachmentsDeps,user:string,body:R
   if (body.origin!==undefined&&typeof body.origin!=='boolean') throw new Refusal(400,'invalid','origin must be a boolean')
   const row=await call(deps.userRpc,'file_transfer_download_as',{
     p_ref:fileRef(body.ref),p_as:typeof body.as==='string'?body.as:user,p_id:body.request_id,
-  }) as {status:string;bucket_id:string;object_name:string;download_id:string;signed_at:string;expires_at:string;content_type:string;size_bytes:unknown;transfer_id?:string}
+  }) as {status:string;bucket_id:string;object_name:string;download_id:string;signed_at:string;expires_at:string;content_type:string;size_bytes:unknown;width?:unknown;height?:unknown;transfer_id?:string}
   if (row.status!=='ready') return row
   if (body.origin===true&&row.bucket_id!=='oss') throw new Refusal(400,'invalid','Origin downloads require OSS storage')
   const cfg=await call(deps.serviceRpc,'file_transfer_settings',{}) as Record<string,unknown>
@@ -35,7 +35,7 @@ export async function handleFileDownload(deps:AttachmentsDeps,user:string,body:R
   if (traffic!==undefined&&(!Number.isSafeInteger(traffic)||traffic<819200||traffic>838860800)) throw new Refusal(503,'not_configured','Download rate is not configured')
   try {
     const signed=row.bucket_id==='oss'||row.bucket_id==='temporary'
-      ?await objectStorage(deps).sign(row.object_name,canSignThumbnail(row.content_type,row.size_bytes),new Date(row.signed_at),{
+      ?await objectStorage(deps).sign(row.object_name,canSignThumbnail(row.content_type,row.size_bytes,row.width,row.height),new Date(row.signed_at),{
         requestId:row.download_id,expiresSeconds:60,...(traffic===undefined?{}:{trafficBits:traffic}),...(row.bucket_id==='temporary'||body.origin===true?{direct:true}:{}),
       })
       :{url:await deps.storageSignedUrl(row.bucket_id,row.object_name,60,traffic),thumbUrl:null}

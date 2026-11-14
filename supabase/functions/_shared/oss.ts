@@ -13,8 +13,10 @@ import { ObjectStorageError } from './object-storage.ts'
 
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 export const IMMUTABLE = 'public, max-age=31536000, immutable'
-/** 气泡里的缩略图:宽 560、webp(OSS 图片处理现做,CDN 按这个参数各缓存一份)。 */
-export const THUMB_PROCESS = 'image/resize,w_560/format,webp'
+/** 气泡里的缩略图:装进 560 × 16000 的框、webp(OSS 图片处理现做,CDN 按这个参数各缓存一份)。高的上限:OSS 缩放结果
+ * 边长 ≥ 16384 回 400 ZoomSizeInvalid、转 webp 边长 ≥ 16383 回 400 WebpExceedRange —— 只限宽时,长截图(1170×40000)和
+ * 比 560 还窄的长条(不放大,8×30001)都会撞上(devdb 实测)。 */
+export const THUMB_PROCESS = 'image/resize,m_lfit,w_560,h_16000/format,webp'
 /** CDN 鉴权 A 的有效期(在 CDN 上配的;签名只带签发时间,过期由 CDN 判)。 */
 export const CDN_SIGN_TTL_SECONDS = 1800
 

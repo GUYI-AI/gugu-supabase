@@ -54,6 +54,16 @@ describe('runtime instance rows end with their lifecycle', () => {
     expect(await remaining(old)).toEqual([])
   })
 
+  it('the bound holds when the table is nearly empty (the batch is taken once, not once per joined row)', async () => {
+    // Rolled back with the test. Statistics taken on the emptied table say it is empty: the planner then runs a batch
+    // subquery once per outer row of the join, each run locks a different batch, and the sweep deletes past its bound.
+    await db.query('DELETE FROM identity.runtime_instances')
+    await db.query('ANALYZE identity.runtime_instances')
+    const old = [await instance(device, '2 hours'), await instance(device, '3 hours'), await instance(device, '4 hours')]
+    await db.query('SELECT identity.sweep_device_leases(2)')
+    expect(await remaining(old)).toHaveLength(1)
+  })
+
   it('a reaped instance registers again on its next heartbeat', async () => {
     const id = await instance(device, '2 hours')
     await db.query('SELECT identity.sweep_device_leases()')

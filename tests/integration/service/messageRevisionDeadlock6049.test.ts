@@ -173,7 +173,7 @@ describe('message revision lock order #6049', () => {
         FROM chat.account_revisions WHERE event='message_created' AND resource_key->>'entity_id'=$1 ORDER BY user_id`, [id])
       expect(rows).toEqual([{ user_id: f.middle }, { user_id: f.high }])
       const acl = await admin.query<{ allowed: boolean }>(`SELECT has_function_privilege(role,
-        'chat.lock_chat_revision_recipients(text,text)', 'EXECUTE') AS allowed
+        'chat.lock_chat_revision_recipients(text,text[])', 'EXECUTE') AS allowed
         FROM unnest(ARRAY['anon','authenticated','service_role']) AS role`)
       expect(acl.rows).toEqual([{ allowed: false }, { allowed: false }, { allowed: true }])
     })

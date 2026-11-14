@@ -198,7 +198,8 @@ describe('workspace_replace_file_as', () => {
       .toMatch(/workspace item not found/)
 
     expect(await item(file.id)).toMatchObject({ pointer: file.pointer, version: 1 })
-    expect(await history(file.id)).toEqual([])
+    // Only the current version's own record.
+    expect(await history(file.id)).toMatchObject([{ n: 1, pointer: file.pointer }])
     // 正对照:同样的对象、对的版本号,换得进去
     expect(await replace(file.id, owner, owner, next, 3, 1)).toMatchObject({ version: 2 })
   })
@@ -233,9 +234,9 @@ describe('读历史', () => {
     expect((await database.query<{ n: number }>('SELECT n FROM chat.workspace_versions_as($1,$2)', [file.id, agent])).rows.map((r) => r.n))
       .toEqual([2, 1])
     await asUser(member)
-    expect((await database.query('SELECT * FROM chat.workspace_item_versions WHERE item_id = $1', [file.id])).rowCount).toBe(2)
+    expect((await database.query('SELECT n FROM chat.workspace_item_versions WHERE item_id = $1', [file.id])).rowCount).toBe(2)
     await asUser(outsider)
-    expect((await database.query('SELECT * FROM chat.workspace_item_versions WHERE item_id = $1', [file.id])).rowCount).toBe(0)
+    expect((await database.query('SELECT n FROM chat.workspace_item_versions WHERE item_id = $1', [file.id])).rowCount).toBe(0)
     await asUser(outsider)
     expect(await fails('SELECT * FROM chat.workspace_versions_as($1,$2)', [file.id, outsider])).toMatch(/workspace item not found/)
   })
