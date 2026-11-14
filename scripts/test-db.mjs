@@ -26,6 +26,7 @@ if (action === 'stop') {
 } else {
   if (existsSync(directory)) throw new Error('Test directory already exists; stop this checkout\'s fixture first')
   const port = Number(process.env.GUGU_TEST_DB_PORT || '54322')
+  const emailOtp = process.env.GUGU_TEST_EMAIL_OTP === '1'
   if (!Number.isInteger(port) || port < 1026 || port > 65535) throw new Error('Invalid GUGU_TEST_DB_PORT')
   const existing = execFileSync('docker', ['ps', '-a', '--filter', 'name=^supabase_db_' + project + '$', '--format', '{{.ID}}'], { encoding: 'utf8' }).trim()
   if (existing) throw new Error('A container already uses this fixture identity; refusing to adopt it')
@@ -36,6 +37,10 @@ if (action === 'stop') {
   })
   mkdirSync(path.join(directory, 'supabase/migrations'), { recursive: true })
   writeFileSync(marker, JSON.stringify({ root, project, port }) + '\n', { mode: 0o600, flag: 'wx' })
+  if (emailOtp) {
+    mkdirSync(path.join(directory, 'supabase/templates'), { recursive: true })
+    writeFileSync(path.join(directory, 'supabase/templates/otp.html'), '<p>Code: {{ .Token }}</p>\n')
+  }
   execFileSync('docker', ['network', 'create', '--label', 'org.gugu.test-checkout=' + project,
     '--opt', 'com.docker.network.bridge.host_binding_ipv4=127.0.0.1', network], { stdio: 'inherit' })
   writeFileSync(path.join(directory, 'supabase/config.toml'), `project_id = "${project}"
@@ -55,15 +60,23 @@ enabled = false
 enabled = false
 [auth]
 enabled = true
+${emailOtp ? `[auth.email.template.magic_link]
+subject = "Local deletion verification"
+content_path = "./supabase/templates/otp.html"
+` : ''}
 [storage]
 enabled = true
 [realtime]
 enabled = true
 [inbucket]
-enabled = false
+enabled = ${emailOtp}
+${emailOtp ? `port = ${port + 1}
+smtp_port = ${port + 2}
+pop3_port = ${port + 3}` : ''}
 `)
   // Storage and Realtime initialize their real platform schemas before the Gugu baseline.
-  execFileSync(cli, ['start', '--workdir', directory, '--network-id', network, '--exclude', 'analytics,edge-runtime,functions,imgproxy,inbucket,meta,studio,vector'], { stdio: 'inherit' })
+  const excluded = ['analytics', 'edge-runtime', 'functions', 'imgproxy', 'meta', 'studio', 'vector', ...emailOtp ? [] : ['inbucket']]
+  execFileSync(cli, ['start', '--workdir', directory, '--network-id', network, '--exclude', excluded.join(',')], { stdio: 'inherit' })
   const binding = execFileSync('docker', ['port', 'supabase_db_' + project, '5432/tcp'], { encoding: 'utf8' }).trim()
   if (binding !== '127.0.0.1:' + port) throw new Error('Fixture database is not bound exclusively to loopback; stop this fixture before continuing')
   const apiBinding = execFileSync('docker', ['port', 'supabase_kong_' + project, '8000/tcp'], { encoding: 'utf8' }).trim()
