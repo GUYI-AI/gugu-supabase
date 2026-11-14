@@ -50,9 +50,9 @@ CREATE FUNCTION identity.team_context_for(p_actor_user_id uuid,p_team_id uuid DE
 RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE principal record; membership team_private.members%ROWTYPE; organization team_private.teams%ROWTYPE;
 BEGIN
-    SELECT u.id,u.deleted_at,u.banned_until,u.raw_app_meta_data->>'gugu_account_kind' AS account_kind
+    SELECT u.id,u.deleted_at,u.banned_until,u.email_confirmed_at,u.raw_app_meta_data->>'gugu_account_kind' AS account_kind
       INTO principal FROM auth.users u WHERE u.id=p_actor_user_id;
-    IF NOT FOUND OR principal.deleted_at IS NOT NULL THEN
+    IF NOT FOUND OR principal.deleted_at IS NOT NULL OR principal.email_confirmed_at IS NULL THEN
         RAISE EXCEPTION 'team_context_unauthenticated' USING ERRCODE='42501',HINT='unauthenticated';
     END IF;
     IF principal.banned_until>now() THEN
@@ -60,7 +60,7 @@ BEGIN
     END IF;
     SELECT * INTO membership FROM team_private.members WHERE principal_user_id=p_actor_user_id;
     IF NOT FOUND THEN
-        IF principal.account_kind IN ('team_member','team_login_anchor') OR p_team_id IS NOT NULL THEN
+        IF (principal.account_kind IS NOT NULL AND principal.account_kind<>'personal') OR p_team_id IS NOT NULL THEN
             RAISE EXCEPTION 'team_context_required' USING ERRCODE='42501',HINT='team_identity_required';
         END IF;
         IF NOT EXISTS(SELECT 1 FROM identity.users WHERE id=p_actor_user_id::text AND type='human' AND removed_at IS NULL) THEN

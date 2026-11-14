@@ -56,8 +56,8 @@ describe('service-only team identity context', () => {
     expect((await refusal('SELECT identity.team_context_for($1,$2)', [m.principal, other])).message).toBe('team_context_mismatch')
     await db.query("UPDATE team_private.members SET state='disabled',revision=revision+1 WHERE id=$1", [m.id])
     expect((await refusal('SELECT identity.team_context_for($1)', [m.principal])).message).toBe('team_membership_disabled')
-    const orphaned = await auth('team_member'), anchor = await auth('team_login_anchor')
-    for (const actor of [orphaned, anchor]) expect((await refusal('SELECT identity.team_context_for($1)', [actor])).message).toBe('team_context_required')
+    const orphaned = await auth('team_member'), anchor = await auth('team_login_anchor'), future = await auth('team_member_v2')
+    for (const actor of [orphaned, anchor, future]) expect((await refusal('SELECT identity.team_context_for($1)', [actor])).message).toBe('team_context_required')
     expect((await refusal('SELECT identity.team_context_for($1)', [randomUUID()])).message).toBe('team_context_unauthenticated')
   })
   it('enumerates no-usage and disabled members for administrators without returning private metadata', async () => {
