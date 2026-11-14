@@ -21,6 +21,7 @@ import { ossObjectStorage, supabaseObjectStorage } from '../_shared/attachment-o
 import { type AttachmentStorageConfig, attachmentStorageConfig, StorageConfigError } from '../_shared/attachment-storage-config.ts'
 import { handleUsageImport,handleStorageInventory,handleFileResolve } from '../_shared/file-transfer-core.ts'
 import { handleProjectFiles } from '../_shared/project-file-transfer-core.ts'
+import { configureAttachmentGc } from '../_shared/attachment-gc-config.ts'
 import { ossDirectSigner } from '../_shared/oss-direct-url.ts'
 import { handleDocumentImport, WORKSPACE_TEXT_MAX_BYTES, workspaceUploadKind } from '../_shared/document-import-core.ts'
 
@@ -145,6 +146,18 @@ Deno.serve(async (request) => {
   const authorization = request.headers.get('Authorization') ?? ''
   try {
     const deps = depsFor(authorization, storage)
+    if (route === 'gc-configure' || route === 'gc-status') {
+      if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY'))) {
+        return json({ error: 'denied', message: 'GC configuration is restricted to the service' }, 401)
+      }
+      if (route === 'gc-configure') {
+        return json({ gc: await configureAttachmentGc(deps.serviceRpc, env('SUPABASE_URL'),
+          env('SUPABASE_SERVICE_ROLE_KEY'), await request.json()) })
+      }
+      const { data, error } = await deps.serviceRpc('file_blob_gc_control_status', {})
+      if (error) throw new Refusal(500, 'failed', 'Attachment GC status is unavailable')
+      return json({ gc: data })
+    }
     if (route === 'usage-import'||route==='storage-inventory'||route==='document-import') {
       if (!sameSecret(authorization.replace(/^Bearer\s+/i,''),env('SUPABASE_SERVICE_ROLE_KEY'))) {
         return json({error:'denied',message:'Usage ingestion is restricted to the service'},401)
@@ -157,19 +170,21 @@ Deno.serve(async (request) => {
       if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY'))) {
         return json({ error: 'denied', message: 'gc is the server\'s own job' }, 401)
       }
-      const result = await handleGc(deps, 'kick')
-      // OSS expires abandoned staging uploads with its own lifecycle rule; only the Supabase bucket needs this sweep.
-      if (storage.kind === 'oss') return json({ ...result, staging_deleted: 0 })
-      const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })
-      const bucket = storage.bucket
-      const { data: expired, error: expiredError } = await service.rpc('attachment_expired_staging', { p_bucket: bucket })
-      if (expiredError) throw new Error('Could not list expired staging uploads')
-      const names = ((expired ?? []) as Array<{ name: string }>).map((row) => row.name)
-      if (names.length) {
-        const { error } = await service.storage.from(bucket).remove(names)
-        if (error) throw new Error('Could not remove expired staging uploads')
-      }
-      return json({ ...result, staging_deleted: names.length })
+      let stagingDeleted = 0
+      const result = await handleGc(deps, 'kick', async (remaining, guard) => {
+        // OSS expires abandoned staging uploads through its own lifecycle rule.
+        if (storage.kind === 'oss') return
+        const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })
+        const { data: expired, error } = await service.rpc('attachment_expired_staging', { p_bucket: storage.bucket })
+        if (error) throw new Error('Could not list expired staging uploads')
+        for (const row of ((expired ?? []) as Array<{ name: string }>).slice(0, remaining)) {
+          await guard()
+          const { error } = await service.storage.from(storage.bucket).remove([row.name])
+          if (error) throw new Error('Could not remove expired staging uploads')
+          stagingDeleted++
+        }
+      })
+      return json({ ...result, staging_deleted: stagingDeleted })
     }
     // PostgREST checks the JWT's signature and expiry; the RPC checks that its session still exists and the account is
     // neither banned nor deleted. That is what Auth's getUser answered, without a second server round trip per call.

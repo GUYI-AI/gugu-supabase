@@ -39,7 +39,9 @@ describe('temporary file HTTP protocol',()=>{
     const f=fixture(),order:string[]=[]
     f.serviceRpc.mockImplementation(async(fn)=>{
       order.push(fn)
-      return {data:fn==='file_temporary_expire'?(order.length===1?1:0):fn==='file_blob_gc_claim'
+      if(fn==='file_blob_gc_run_begin') return {data:{acquired:true,token:download,batch_limit:5,concurrency:1},error:null}
+      if(fn==='file_blob_gc_run_renew'||fn==='file_blob_gc_run_end') return {data:true,error:null}
+      return {data:fn==='file_temporary_expire'?(order.length===1?1:0):fn==='file_blob_gc_run_claim'
         ?[{blob_id:'old',claim_token:'claim',bucket_id:'temporary',object_name:'temporary/old',content_type:'application/octet-stream'}]:null,error:null}
     })
     const accept=f.userRpc.getMockImplementation()!
@@ -54,7 +56,7 @@ describe('temporary file HTTP protocol',()=>{
   })
   it('continues file-accept permission issuance when the GC summary logger throws', async () => {
     const f=fixture(), loggingError=new Error('summary logger unavailable')
-    f.serviceRpc.mockImplementation(async(fn)=>({data:fn==='file_temporary_expire'?1:fn==='file_blob_gc_claim'?[]:null,error:null}))
+    f.serviceRpc.mockImplementation(async(fn)=>({data:fn==='file_blob_gc_run_begin'?{acquired:true,token:download,batch_limit:5,concurrency:1}:fn==='file_blob_gc_run_renew'||fn==='file_blob_gc_run_end'?true:fn==='file_temporary_expire'?1:fn==='file_blob_gc_run_claim'?[]:null,error:null}))
     f.deps.log=()=>{throw loggingError}
     const stderr=vi.spyOn(console,'error').mockImplementation(()=>{})
     try {

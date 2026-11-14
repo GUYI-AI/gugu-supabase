@@ -73,6 +73,7 @@ afterAll(async () => { await database?.end() })
 beforeEach(async () => {
   await database.query('BEGIN')
   await database.query(`SELECT pg_advisory_xact_lock(hashtextextended('tests:file_blob_gc', 0))`)
+  await database.query('UPDATE chat.file_blob_gc_control SET enabled=true,batch_limit=50 WHERE singleton')
 })
 afterEach(async () => { await database?.query('ROLLBACK') })
 

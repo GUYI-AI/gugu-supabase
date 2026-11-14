@@ -72,6 +72,7 @@ describe('non-project idle expiry, not quota eviction',()=>{
     const file=await upload();await age(file.stored)
     await db.query("UPDATE chat.file_blob_gc SET status='pending',next_attempt_at=now()+interval '1 day'")
     // Missing secrets prove the real tick queued work without scheduling a network call.
+    await db.query('UPDATE chat.file_blob_gc_control SET enabled=true,batch_limit=50 WHERE singleton')
     await db.query("DELETE FROM vault.secrets WHERE name IN ('attachments_gc_url','attachments_gc_key')")
     expect((await reject('SELECT chat.file_blob_gc_kick()')).message).toMatch(/blobs are due.*Vault has no attachments_gc_url/)
     expect((await state(file.stored)).expired_at).toBeNull() // A refused statement rolls back atomically.
