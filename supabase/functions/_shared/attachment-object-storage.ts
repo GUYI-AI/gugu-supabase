@@ -29,8 +29,8 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
       const response = await ossRequest(oss, fetch, { method: 'PUT', key, body: bytes as BodyInit, internal: true })
       if (response.status !== 200) throw new ObjectStorageError(response.status, null, 'Could not stage attachment bytes')
     },
-    exists: (key) => ossExists(oss, fetch, key),
-    remove: (key) => ossDelete(oss, fetch, key),
+    exists: (key, signal) => ossExists(oss, signal ? (input, init) => fetch(input, { ...init, signal }) : fetch, key),
+    remove: (key, signal) => ossDelete(oss, signal ? (input, init) => fetch(input, { ...init, signal }) : fetch, key),
     sign: async (key, image, now, permit) => {
       if(permit?.direct) {
         if(!config.directSign) throw new ObjectStorageError(503,'not_configured','Origin signing is not configured')
@@ -188,8 +188,8 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
       await response.body?.cancel()
     },
     put: (key, bytes) => write(key, bytes),
-    exists: async (key) => {
-      const response = await request(objectUrl(key), { method: 'HEAD' })
+    exists: async (key, signal) => {
+      const response = await request(objectUrl(key), { method: 'HEAD', ...(signal ? { signal } : {}) })
       try { await check(response) }
       catch (error) {
         if (error instanceof ObjectStorageError && error.status === 404) return false
@@ -198,9 +198,10 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
       await response.body?.cancel()
       return true
     },
-    remove: async (key) => {
+    remove: async (key, signal) => {
       const response = await request(base + '/storage/v1/object/' + encodeURIComponent(config.bucket), {
         method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prefixes: [key] }),
+        ...(signal ? { signal } : {}),
       })
       await check(response)
       await response.body?.cancel()
