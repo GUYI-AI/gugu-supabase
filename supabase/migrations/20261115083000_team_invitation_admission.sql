@@ -122,7 +122,10 @@ BEGIN
       finished_at=stamp,lease_token=NULL,lease_expires_at=NULL WHERE id=delivery.id RETURNING * INTO delivery;
     RETURN jsonb_build_object('delivery_id',delivery.id,'state',delivery.state,'reason_code',delivery.reason_code,'claimed',false);
   END IF;
-  IF p_action NOT IN ('prepare','claim') THEN PERFORM team_private.refuse('invalid_request',400); END IF;
+  IF p_action NOT IN ('prepare','claim','complete_code')
+    OR p_action='complete_code' AND p_input->>'kind' IS DISTINCT FROM 'code' THEN
+    PERFORM team_private.refuse('invalid_request',400);
+  END IF;
   IF p_input->>'kind'='invitation' THEN
     actor:=team_private.caller(p_actor,p_session);
     SELECT * INTO invitation FROM team_private.invitations WHERE id=(p_input->>'invitation_id')::uuid FOR UPDATE;
@@ -137,7 +140,9 @@ BEGIN
     key:='team-invitation-v1:'||invitation.id::text;
   ELSIF p_input->>'kind'='code' THEN
     SELECT * INTO challenge FROM team_private.email_challenges WHERE id=(p_input->>'challenge_id')::uuid FOR UPDATE;
-    IF challenge.id IS NULL OR challenge.expires_at<=stamp OR challenge.state NOT IN ('sending','challenge') THEN
+    IF challenge.id IS NULL OR challenge.expires_at<=stamp
+      OR (p_action<>'complete_code' AND challenge.state NOT IN ('sending','challenge'))
+      OR (p_action='complete_code' AND challenge.state NOT IN ('sending','challenge','verifying','verified','consumed')) THEN
       PERFORM team_private.refuse('verification_expired',401);
     END IF;
     address:=challenge.email_normalized;
@@ -157,6 +162,20 @@ BEGIN
     -- team UUID. Only a checked invitation or live administrator supplies it.
     key:='team-email-code-v1:'||challenge.id::text;
   ELSE PERFORM team_private.refuse('invalid_request',400);
+  END IF;
+  IF p_action='complete_code' THEN
+    -- A stored send receipt survives a lost challenge-update acknowledgment.
+    -- Keep challenge -> delivery lock order; never resend or reset verification.
+    SELECT * INTO delivery FROM team_private.mail_deliveries WHERE challenge_id=challenge.id FOR UPDATE;
+    IF delivery.id IS NULL OR delivery.state<>'accepted' OR delivery.reason_code IS DISTINCT FROM 'code_accepted'
+      OR ROW(delivery.recipient_digest,delivery.team_id,delivery.inviter_member_id)
+        IS DISTINCT FROM ROW(encode(sha256(convert_to(address,'UTF8')),'hex'),tid,inviter) THEN
+      PERFORM team_private.refuse('version_conflict',409);
+    END IF;
+    IF challenge.state='sending' THEN
+      UPDATE team_private.email_challenges SET state='challenge' WHERE id=challenge.id RETURNING * INTO challenge;
+    END IF;
+    RETURN jsonb_build_object('challenge_id',challenge.id,'state',challenge.state);
   END IF;
   recipient:=encode(sha256(convert_to(address,'UTF8')),'hex');
   INSERT INTO team_private.mail_deliveries(delivery_key,invitation_id,challenge_id,team_id,inviter_member_id,recipient_digest)

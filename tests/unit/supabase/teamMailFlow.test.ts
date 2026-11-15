@@ -85,4 +85,25 @@ describe('team mail side effects follow durable admission', () => {
     expect(f.auth.sendEmailCode).toHaveBeenCalledExactlyOnceWith(challenge.email)
     expect(f.rpc.mock.calls[0][1]).toMatchObject({ p_client_ip: null, p_input: { kind: 'code', challenge_id: challenge.challenge_id } })
   })
+  it.each(['before_commit', 'after_commit'])('recovers code completion %s without sending another code', async phase => {
+    const f = fixture(), implementation = f.rpc.getMockImplementation()!
+    const challenge = { challenge_id: randomUUID(), email: 'code@example.invalid' }
+    let state = 'sending', completions = 0
+    f.rpc.mockImplementation(async (name, args) => {
+      if (name === 'team_email_workflow' && args.p_action === 'sent'
+        || name === 'team_mail_delivery' && args.p_action === 'complete_code') {
+        completions++
+        if (completions === 1 && phase === 'before_commit') throw Error('not committed')
+        state = 'challenge'
+        if (completions === 1) throw Error('committed acknowledgment lost')
+        return { ...await implementation(name, args), state }
+      }
+      return implementation(name, args)
+    })
+    await expect(f.flow.sendCode(challenge, f.request)).rejects.toThrow()
+    await f.flow.sendCode(challenge, f.request)
+    expect(state).toBe('challenge'); expect(completions).toBe(2)
+    expect(f.auth.sendEmailCode).toHaveBeenCalledTimes(1)
+    expect(f.rpc.mock.calls.filter(([, args]) => args.p_action === 'finish')).toHaveLength(1)
+  })
 })

@@ -22,6 +22,8 @@ A replay keeps the original invitation, token, identity operation and unique mai
 
 Mail states are `pending`, `sending`, `accepted`, `failed` and `unknown`. `accepted` means SMTP explicitly accepted the message, not that it reached an inbox. Active/expired sending leases and unknown outcomes never trigger automatic resend. A failed persistence acknowledgment after SMTP acceptance is reported as unknown. Limits refuse before Auth/SMTP side effects. Existing personal identities are not modified or adopted by email.
 
+Code delivery acceptance and challenge readiness have separate acknowledgments. Both initial success and an accepted-receipt replay call the idempotent `complete_code` checkpoint: it requires the stored accepted code receipt, advances only `sending` to `challenge`, and never resets verification attempts, leases or completed states. If this checkpoint fails before commit or loses its post-commit acknowledgment, the original change-email intent repairs/reuses the same challenge without another code send.
+
 For an existing personal recipient, no anchor is created or adopted: GoTrue's duplicate-email result leaves the personal ID, email and metadata unchanged; email verification uses that existing account, while accepting the invitation provisions a separate team principal.
 
 ## Lock order and transaction boundaries
@@ -35,6 +37,7 @@ Each Edge RPC is a separate database transaction and commits before the next RPC
 | Invitation mail prepare/claim | Invitation row, delivery row and its FK key-share locks, then `team-mail-admission` advisory only for a fresh claim. Caller/context checks do not take the team advisory. |
 | OTP mail prepare/claim | Challenge row, optional invitation row, delivery row/FK locks, then the same mail-global advisory only for a fresh claim. |
 | Mail finish | Delivery row only; the private lease authorizes this in-flight result without taking team/global locks. |
+| Accepted code completion | Challenge row, optional invitation row, existing delivery row; no team/global advisory and no send admission. |
 
 After acquiring the mail-global advisory, admission reads policy/counters and updates only its already-locked delivery row; it does not acquire a team advisory or another subject row. Thus no implemented path reverses global-to-team. A caller composing multiple RPCs inside one SQL transaction must keep team-before-global order; normal Edge requests do not compose them. Existing invitation acceptance uses challenge → provision advisory/operation → invitation/member, with no mail-global acquisition. SMTP runs after commit, under the durable lease rather than database locks.
 

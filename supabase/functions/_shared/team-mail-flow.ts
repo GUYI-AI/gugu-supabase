@@ -32,8 +32,9 @@ export function teamMailFlow(deps: Dependencies) {
   return {
     async sendCode(challenge: { challenge_id: string; email: string }, request: Request, caller?: TeamAuthCaller | null) {
       const permit = checked(await deps.rpc('team_mail_delivery', args('claim', { kind: 'code', challenge_id: challenge.challenge_id }, request, caller)));
+      const complete = () => deps.rpc('team_mail_delivery', args('complete_code', { kind: 'code', challenge_id: challenge.challenge_id }, request, caller));
       if (!permit.claimed) {
-        if (permit.state === 'accepted') return;
+        if (permit.state === 'accepted') { await complete(); return; }
         throw new TeamRefusal('dependency_unavailable', 503, { challenge_id: challenge.challenge_id,
           delivery: { operation_id: permit.delivery_id, state: permit.state, reason_code: permit.reason_code } });
       }
@@ -41,7 +42,8 @@ export function teamMailFlow(deps: Dependencies) {
       try { sent = await deps.auth.sendEmailCode(challenge.email); } catch { /* The send result is uncertain, never an automatic retry. */ }
       const result = { state: sent ? 'accepted' : 'unknown', reason_code: sent ? 'code_accepted' : 'code_result_unknown' };
       await finish(permit, result);
-      await deps.rpc('team_email_workflow', { p_action: 'sent', p_input: { challenge_id: challenge.challenge_id, sent } });
+      if (sent) await complete();
+      else await deps.rpc('team_email_workflow', { p_action: 'sent', p_input: { challenge_id: challenge.challenge_id, sent: false } });
       if (!sent) throw new TeamRefusal('dependency_unavailable', 503, { challenge_id: challenge.challenge_id,
         delivery: { operation_id: permit.delivery_id, ...result } });
     },

@@ -154,6 +154,30 @@ it('does not let an unauthenticated code challenge invent a team admission scope
   expect((await db.query('SELECT team_id,inviter_member_id FROM team_private.mail_deliveries WHERE id=$1', [result.delivery_id])).rows[0]).toEqual({ team_id: null, inviter_member_id: null })
 })
 
+it('requires an accepted code receipt before idempotent completion and never resets verification progress', async () => {
+  const challenge = await rpc('team_email_workflow', ['begin', { purpose: 'create', email: randomUUID() + '@completion.invalid' }])
+  const input = { kind: 'code', challenge_id: challenge.challenge_id }
+  const complete = () => rpc('team_mail_delivery', ['complete_code', input])
+  expect((await refused(complete)).hint).toBe('version_conflict')
+  const claimed = await rpc('team_mail_delivery', ['claim', input])
+  expect((await refused(complete)).hint).toBe('version_conflict')
+  await rpc('team_mail_delivery', ['finish', { delivery_id: claimed.delivery_id, lease_token: claimed.lease_token,
+    state: 'accepted', reason_code: 'code_accepted' }])
+  expect(await complete()).toMatchObject({ state: 'challenge' })
+  expect(await complete()).toMatchObject({ state: 'challenge' })
+  const verification = await rpc('team_email_workflow', ['claim', { challenge_id: challenge.challenge_id }])
+  expect(await complete()).toMatchObject({ state: 'verifying' })
+  expect((await db.query('SELECT attempts,lease_token FROM team_private.email_challenges WHERE id=$1', [challenge.challenge_id])).rows[0])
+    .toEqual({ attempts: 1, lease_token: verification.lease_token })
+  await rpc('team_email_workflow', ['verified', { challenge_id: challenge.challenge_id, lease_token: verification.lease_token,
+    verified_email: challenge.email, receipt_digest: hash(randomUUID()) }])
+  expect(await complete()).toMatchObject({ state: 'verified' })
+  await db.query("UPDATE team_private.email_challenges SET state='consumed' WHERE id=$1", [challenge.challenge_id])
+  expect(await complete()).toMatchObject({ state: 'consumed' })
+  await db.query('DELETE FROM team_private.email_challenges WHERE id=$1', [challenge.challenge_id])
+  expect((await refused(complete)).hint).toBe('verification_expired')
+})
+
 it('keeps independent recipient cooldowns and reserves global capacity for OTP', async () => {
   await policy({ global_short: 5, invitation_global_percent: 60 })
   const owner = await founder(), address = randomUUID() + '@recipient.invalid'

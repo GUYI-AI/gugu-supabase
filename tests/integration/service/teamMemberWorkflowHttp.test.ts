@@ -13,6 +13,8 @@ const ownedUsers = new Set<string>(), teams = new Set<string>(), addresses = new
 const url = process.env.GUGU_INTEGRATION_SUPABASE_URL ?? '', anon = process.env.VITE_SUPABASE_ANON_KEY ?? ''
 const modelRevocations: Record<string, unknown>[] = []
 const invitationDeliveries: unknown[] = []
+const codeDeliveries: string[] = []
+let completionFailure: 'before_commit' | 'after_commit' | null = null, completionChallenge: string | null = null
 function need(value: unknown, phase: string): asserts value { if (!value) throw Error('Owned workflow fixture: ' + phase) }
 const address = () => { const value = randomUUID() + '@workflow-http.invalid'; addresses.add(value); return value }
 beforeAll(async () => {
@@ -30,7 +32,18 @@ beforeAll(async () => {
     invitationMailer: { canSend: () => true, send: async input => {
       invitationDeliveries.push(input); return { state: 'accepted', reason_code: 'smtp_accepted' }
     } } })
-  handle = createTeamAccountsHandler({ ...deps, auth: { ...deps.auth, sendEmailCode: value => deps.auth.ensureAnchor(value) },
+  handle = createTeamAccountsHandler({ ...deps, auth: { ...deps.auth, sendEmailCode: async value => {
+    codeDeliveries.push(value); return deps.auth.ensureAnchor(value)
+  } }, rpc: async (name, args) => {
+    if (name === 'team_mail_delivery' && args.p_action === 'complete_code' && completionFailure) {
+      const phase = completionFailure; completionFailure = null
+      completionChallenge = (args.p_input as { challenge_id: string }).challenge_id
+      if (phase === 'before_commit') throw Error('Owned fixture completion before commit')
+      await deps.rpc(name, args)
+      throw Error('Owned fixture completion acknowledgment lost')
+    }
+    return deps.rpc(name, args)
+  },
     revokeModel: async input => { modelRevocations.push(input); return true } })
 })
 afterAll(async () => {
@@ -58,10 +71,13 @@ afterAll(async () => {
   await db.query('UPDATE team_private.delivery_configuration SET site_origin=$1 WHERE singleton', [priorOrigin])
   await db.end()
 })
-async function call(body: Record<string, unknown>, bearer?: string) {
-  const response = await handle(new Request('https://backend.example.invalid/functions/v1/team-accounts', {
+async function request(body: Record<string, unknown>, bearer?: string) {
+  return handle(new Request('https://backend.example.invalid/functions/v1/team-accounts', {
     method: 'POST', headers: { 'content-type': 'application/json', ...(bearer ? { authorization: 'Bearer ' + bearer } : {}) }, body: JSON.stringify(body),
   }))
+}
+async function call(body: Record<string, unknown>, bearer?: string) {
+  const response = await request(body, bearer)
   const value = await response.json()
   need(response.status === 200 && value.ok === true, 'HTTP ' + body.action + ' status ' + response.status + ' code ' + (value.error?.code ?? 'none'))
   return value.data
@@ -126,4 +142,33 @@ it('creates, invites, signs in, disables, restores and confirms member email thr
   expect(done.state).toBe('changed'); expect(done.requires_sign_in).toBe(true)
   expect((await db.query('SELECT count(*)::int n FROM auth.sessions WHERE user_id=$1', [member.session.user.id])).rows[0].n).toBe(0)
   need((await db.query('SELECT email_normalized FROM team_private.members WHERE id=$1', [member.membership.id])).rows[0].email_normalized === nextEmail, 'confirmed email applied')
+})
+
+it.each(['before_commit', 'after_commit'] as const)('recovers change-email code completion %s through a same-intent HTTP retry', async phase => {
+  const founderEmail = address(), memberEmail = address(), nextEmail = address()
+  const founder = await call({ action: 'create', name: 'Code receipt fixture',
+    verification_receipt: await proof(founderEmail, 'create'), idempotency_key: randomUUID() })
+  teams.add(founder.team.id); ownedUsers.add(founder.session.user.id)
+  const invited = await call({ action: 'invite', email: memberEmail, role: 'member', idempotency_key: randomUUID() }, founder.session.access_token)
+  const invitation = new URL(invited.invitation_url).hash.slice('#invitation_token='.length)
+  const member = await call({ action: 'accept_invitation', invitation_token: invitation,
+    verification_receipt: await proof(memberEmail, 'accept_invitation', invitation), idempotency_key: randomUUID() })
+  ownedUsers.add(member.session.user.id)
+  const intent = { action: 'change_email', member_id: member.membership.id, new_email: nextEmail,
+    expected_revision: member.membership.revision, idempotency_key: randomUUID() }
+  completionChallenge = null; completionFailure = phase
+  const failed = await request(intent, founder.session.access_token)
+  expect(failed.status).toBe(503); await failed.body?.cancel()
+  need(completionChallenge, 'completion fault exercised')
+  const state = (await db.query(`SELECT c.state challenge,d.state delivery FROM team_private.email_challenges c
+    JOIN team_private.mail_deliveries d ON d.challenge_id=c.id WHERE c.id=$1`, [completionChallenge])).rows[0]
+  expect(state).toEqual({ challenge: phase === 'before_commit' ? 'sending' : 'challenge', delivery: 'accepted' })
+  const replay = await call(intent, founder.session.access_token)
+  expect(replay.challenge_id).toBe(completionChallenge)
+  expect((await db.query('SELECT state FROM team_private.email_challenges WHERE id=$1', [completionChallenge])).rows[0].state).toBe('challenge')
+  expect(codeDeliveries.filter(email => email === nextEmail)).toHaveLength(1)
+  expect((await db.query('SELECT count(*)::int n FROM team_private.email_challenges WHERE email_normalized=$1', [nextEmail])).rows[0].n).toBe(1)
+  const done = await call({ action: 'confirm_email_change', challenge_id: replay.challenge_id,
+    code: await code(nextEmail), idempotency_key: randomUUID() }, member.session.access_token)
+  expect(done.state).toBe('changed'); expect(done.requires_sign_in).toBe(true)
 })
