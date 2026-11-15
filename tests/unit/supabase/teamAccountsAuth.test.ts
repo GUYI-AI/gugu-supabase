@@ -21,8 +21,10 @@ describe('team official Auth adapter', () => {
     expect(JSON.parse(String(calls[1][1].body))).toEqual({ email: 'member@example.invalid', create_user: false })
   })
   it('does not rewrite an existing personal account or treat an Auth outage as duplicate email', async () => {
-    for (const [status, code, expectedCalls, expected] of [[422, 'email_exists', 2, true], [500, 'unexpected_failure', 1, false]] as const) {
-      const fetcher = vi.fn(async () => new Response(JSON.stringify(fetcher.mock.calls.length === 1 ? { code } : {}),
+    for (const [status, error, expectedCalls, expected] of [[422, { code: 'email_exists' }, 2, true],
+      [422, { code: 422, error_code: 'email_exists' }, 2, true], [422, { code: 422, error_code: 'unexpected_failure' }, 1, false],
+      [500, { code: 'unexpected_failure' }, 1, false]] as const) {
+      const fetcher = vi.fn(async () => new Response(JSON.stringify(fetcher.mock.calls.length === 1 ? error : {}),
         { status: fetcher.mock.calls.length === 1 ? status : 200 }))
       const api = teamAuth({ url: 'https://auth.example.invalid', anonKey: 'public-test', serviceKey: 'server-test', fetch: fetcher as typeof fetch })
       expect(await api.sendEmailCode('member@example.invalid')).toBe(expected)

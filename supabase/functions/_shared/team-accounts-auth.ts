@@ -60,8 +60,11 @@ export function teamAuth(settings: Settings) {
     const anchor = await call('/auth/v1/admin/users', 'POST', settings.serviceKey, settings.serviceKey, {
       email: address, email_confirm: false, app_metadata: { gugu_account_kind: 'team_login_anchor' },
     });
+    // GoTrue's raw HTTP envelope uses numeric `code` plus string `error_code`.
+    // Do not let the numeric status mask the actual duplicate-email code.
+    const errorCode = typeof anchor.data?.error_code === 'string' ? anchor.data.error_code : anchor.data?.code;
     const duplicate = [409, 422].includes(anchor.status)
-      && ['email_exists', 'user_already_exists'].includes(anchor.data?.code ?? anchor.data?.error_code);
+      && ['email_exists', 'user_already_exists'].includes(errorCode);
     if (!anchor.ok) return duplicate;
     return UUID.test(anchor.data?.id ?? '') && typeof anchor.data?.email === 'string'
       && email(anchor.data.email) === email(address)
