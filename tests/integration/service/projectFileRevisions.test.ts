@@ -87,7 +87,7 @@ describe('project local metadata and exact references, kept by the device that s
     await service()
     expect((await db.query('SELECT blob_id FROM chat.workspace_items WHERE id=$1',[item])).rows[0].blob_id).toBeNull()
     expect((await db.query('SELECT id FROM chat.file_transfer_storage WHERE blob_id IN (SELECT blob_id FROM chat.workspace_items WHERE id=$1)',[item])).rows).toEqual([])
-    expect(await resolve({item_id:item},outsider)).toEqual({status:'gone'})
+    expect(await resolve({item_id:item},outsider)).toEqual({status:'gone',availability:'unavailable',expired_at:null})
   })
   it('rejects traversal, ambiguous platform paths, invalid SHA and sizes atomically; Unicode and empty files remain valid',async()=>{
     for(const path of ['/etc/passwd','../secret','a/../../secret','a/./b','a//b','a/','C:/secret','C:secret','a\\b','\\\\server\\file','a\nb','']) {
@@ -108,7 +108,7 @@ describe('project local metadata and exact references, kept by the device that s
     await publish({3:'data/new.bin',4:'cd'.repeat(32),5:456,6:'new.bin',8:1})
     expect(await resolve({item_id:item})).toMatchObject({version:2,file_name:'new.bin',sha256:'cd'.repeat(32),size_bytes:456})
     expect(await resolve({item_id:item,version:1})).toMatchObject({version:1,file_name:'file.bin',sha256:sha,size_bytes:123})
-    expect(await resolve({item_id:item,version:3})).toEqual({status:'gone'})
+    expect(await resolve({item_id:item,version:3})).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     expect((await db.query('SELECT updated_by FROM chat.workspace_items WHERE id=$1',[item])).rows[0].updated_by).toBe(owner)
     await service()
     // Both versions are one record each, kept by the device that published them.
@@ -205,11 +205,11 @@ describe('project local metadata and exact references, kept by the device that s
     await publish({3:'data/new.bin',4:'cd'.repeat(32),5:456,6:'new.bin',8:1})
     expect(await resolve({message_id:id})).toMatchObject({version:1,sha256:sha,file_name:'file.bin'})
     await service();await db.query('UPDATE chat.messages SET retracted_at=now() WHERE id=$1',[id])
-    expect(await resolve({message_id:id})).toEqual({status:'gone'})
+    expect(await resolve({message_id:id})).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     await user()
     const hidden=randomUUID()
     await db.query('INSERT INTO chat.messages(id,chat_id,sender_user_id,content,is_whisper,to_user_ids) VALUES($1,$2,$3,$4,true,$5)',[hidden,group,owner,'private', [hiddenReader]])
-    expect(await resolve({message_id:hidden})).toEqual({status:'gone'})
+    expect(await resolve({message_id:hidden})).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     expect(await resolve({item_id:item})).toMatchObject({status:'ready'})
   })
   it('rejects alternate or malformed reference shapes without manufacturing broader authority',async()=>{
@@ -218,7 +218,7 @@ describe('project local metadata and exact references, kept by the device that s
       {item_id:item,version:'1'},{item_id:item,version:1000000000},{item_id:item,path:'../secret'},{attachment_id:randomUUID(),item_id:item}]) {
       expect((await fails('SELECT chat.file_resolve_as($1,$2)',[ref,member])).hint).toBe('file_transfer_invalid')
     }
-    expect(await resolve({item_id:'bad-id'})).toEqual({status:'gone'})
+    expect(await resolve({item_id:'bad-id'})).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     expect(await resolve()).toMatchObject({status:'ready'})
   })
   const MOVE='SELECT * FROM chat.workspace_move_as($1,$2,$3,$4,$5)'
@@ -311,11 +311,11 @@ describe('project local metadata and exact references, kept by the device that s
   it('reads a version as gone while its project is not bound to the chat, and again when it is bound again',async()=>{
     await publish();await service()
     await db.query('UPDATE identity.device_projects SET chat_id=NULL WHERE device_id=$1',[device])
-    expect(await resolve()).toEqual({status:'gone'})
+    expect(await resolve()).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     await service();await db.query('UPDATE identity.device_projects SET chat_id=$2 WHERE device_id=$1',[device,group])
     expect(await resolve()).toMatchObject({status:'ready'})
     await service();await db.query('DELETE FROM identity.device_projects WHERE device_id=$1',[device])
-    expect(await resolve()).toEqual({status:'gone'})
+    expect(await resolve()).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     await service()
     expect((await db.query('SELECT item_id FROM chat.workspace_item_versions WHERE item_id=$1',[item])).rows).toHaveLength(1)
   })
@@ -324,7 +324,7 @@ describe('project local metadata and exact references, kept by the device that s
     const project={local_project_id:'root',name:'fixture',root_path:'/private/root',created_at:new Date().toISOString(),chat_id:group,group_representative:true,folders:[]}
     const PROJECTS='SELECT identity.publish_device_projects($1,$2::jsonb) AS r'
     await user();await db.query(PROJECTS,[device,JSON.stringify([])])
-    expect(await resolve()).toEqual({status:'gone'})
+    expect(await resolve()).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     // Nor can that device publish under the project while it is not listed.
     await user();await fails(PUBLISH,args({0:randomUUID(),3:'data/other.bin'}))
     await user();await db.query(PROJECTS,[device,JSON.stringify([project])])
@@ -345,7 +345,7 @@ describe('project local metadata and exact references, kept by the device that s
     await db.query(`INSERT INTO chat.workspace_items(id,chat_id,kind,filename,content_type,size_bytes,created_by,blob_id)
       VALUES($1,$2,'file','managed.bin',$3,123,$4,chat.file_blob_for_pointer($5,123,$3,$4))`,[item,group,type,owner,object])
     expect(await resolve()).toMatchObject({status:'ready',source:'managed-object',object_name:object})
-    expect(await resolve({item_id:item},outsider)).toEqual({status:'gone'})
+    expect(await resolve({item_id:item},outsider)).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     await service();await db.query('UPDATE chat.file_transfer_storage_refs SET expired_at=now() WHERE chat_id=$1',[group])
     expect(await resolve()).toMatchObject({status:'expired',source:'managed-object'})
   })
@@ -419,7 +419,7 @@ describe('temporary generations reuse managed budgets and private key issuance',
   }
   it('requires a real readable reference, and issues normal permits in a project chat like any other',async()=>{
     await user(outsider)
-    expect((await db.query('SELECT chat.file_temporary_request($1,$2,$3) AS r',[{item_id:item},outsider,randomUUID()])).rows[0].r).toEqual({status:'gone'})
+    expect((await db.query('SELECT chat.file_temporary_request($1,$2,$3) AS r',[{item_id:item},outsider,randomUUID()])).rows[0].r).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     await user()
     expect((await db.query('SELECT chat.file_managed_upload_as($1,$2,$3,128) AS r',[randomUUID(),group,owner])).rows[0].r.max_bytes).toBe(128)
     expect((await request()).transfer_status).toBe('requested')
@@ -531,7 +531,7 @@ describe('temporary generations reuse managed budgets and private key issuance',
     const transfer=await ready(),id=randomUUID();await download(id);await service()
     await db.query('DELETE FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[group,member])
     expect((await fails('SELECT chat.file_temporary_key_for($1,$2)',[id,member])).hint).toBe('file_transfer_denied')
-    expect(await download()).toEqual({status:'gone'})
+    expect(await download()).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     await service();expect((await db.query('SELECT state,bytes FROM chat.file_transfer_reservations WHERE id=$1',[id])).rows[0]).toEqual({state:'issued',bytes:'128'})
     expect(transfer).toBeTruthy()
   })

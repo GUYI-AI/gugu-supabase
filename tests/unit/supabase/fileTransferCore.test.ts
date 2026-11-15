@@ -36,11 +36,19 @@ describe('streamed file inspection',()=>{
 })
 describe('download input and signed throttles',()=>{
   it('preserves an explicit missing object in individual and batched metadata without signing',async()=>{
-    const missing={status:'missing',code:'object_not_found',sha256:null}
+    const missing={status:'missing',code:'object_not_found',sha256:null,availability:'unavailable',expired_at:null}
     const deps={userRpc:vi.fn(async()=>({data:missing,error:null}))} as unknown as AttachmentsDeps
     const ref={message_id:'missing'}
     expect(await handleFileResolve(deps,'reader',{ref})).toEqual(missing)
     expect(await handleFileResolve(deps,'reader',{refs:[ref]})).toEqual({files:[{...missing,ref}]})
+  })
+  it('passes overall availability and actual expiry through single and batched metadata',async()=>{
+    const expired={status:'expired',availability:'expired',expired_at:'2026-11-01T00:00:00.000000Z'}
+    const local={status:'ready',source:'local',host_online:false,availability:'available',expired_at:null}
+    const deps={userRpc:vi.fn<AttachmentsDeps['userRpc']>(async(_name,args)=>({data:(args.p_ref as Record<string,unknown>).item_id?local:expired,error:null}))} as unknown as AttachmentsDeps
+    const refs=[{message_id:'expired'},{item_id:'11111111-1111-4111-8111-111111111111'}]
+    expect(await handleFileResolve(deps,'reader',{ref:refs[0]})).toEqual(expired)
+    expect(await handleFileResolve(deps,'reader',{refs})).toEqual({files:[{...expired,ref:refs[0]},{...local,ref:refs[1]}]})
   })
   it('metadata display calls only the read-only RPC and never invokes a provider or signing RPC',async()=>{
     const calls:string[]=[]
