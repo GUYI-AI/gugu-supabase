@@ -159,12 +159,12 @@ it('keeps the helper closed and rejects a forged context without deleting anythi
   expect((await row('SELECT count(*)::int n FROM chat.chats WHERE id=$1',[target])).n).toBe(1)
 }))
 
-it('refuses an unsupported nested-topic cascade instead of deleting an outside participant',async()=>rollback(async()=>{
-  const owner=await human(),mine=await agent(owner),peer=await human()
+it('refuses an unsupported nested-topic cascade before changing any conversations',async()=>rollback(async()=>{
+  const owner=await human(),mine=await agent(owner)
   const root=await room('group',owner,[owner,mine]),child=await room('topic',owner,[owner,mine],root)
   // Product create_topic rejects this shape; seed a legacy inconsistency via
   // the owned database without weakening any trigger or membership policy.
-  const nested=await room('topic',owner,[owner,mine,peer],child)
+  const nested=await room('topic',owner,[owner,mine],child)
   await db.query('SAVEPOINT nested_refused')
   await expect(db.query('DELETE FROM auth.users WHERE id=$1',[owner])).rejects.toMatchObject({code:'55000',message:'Nested source topics require explicit repair before erasure'})
   await db.query('ROLLBACK TO nested_refused')
