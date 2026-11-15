@@ -1,0 +1,3194 @@
+[
+  {
+    "owner": "postgres",
+    "object": "database/current"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.account_revision_heads"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.account_revisions"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.active_members"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.agent_flood_adjustments"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.app_enablements"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.app_installs"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.catch_up_summaries"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.channel_connections"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.chat_member_stream_read_state"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.chat_members"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.chats"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.contacts"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_blob_gc"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_blob_uploads"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_blobs"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_contents"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_device_revisions_retired"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_temporary_transfers"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_transfer_limits"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_transfer_observations"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_transfer_reservations"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_transfer_storage"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_transfer_storage_refs"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.file_transfer_uploads"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.group_agent_states"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.group_announcement_likes"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.group_announcements"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.group_invitations"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.group_join_requests"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.group_outputs"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.group_scheduler_states"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.group_tasks"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.gugu_decision_events"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.legacy_attachment_adoptions"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.live_identity_members"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.message_agent_delivery_blocks"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.message_agent_sends"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.message_agent_wakes"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.message_deliveries"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.message_reactions"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.messages"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.messages_ingest_seq_seq"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.messages_view"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.presence_wake_throttles"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.project_groups"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.public_chat_id_seq"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.session_attachments"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.widget_id_grants"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.widgets"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.workspace_item_opens"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.workspace_item_versions"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.workspace_items"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/chat.workspace_name_migrations"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/gugu_install.releases"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.account_lifecycle_context"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.accounts"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.active_friendships"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.active_users"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_configs"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_embeddings"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_lifecycle_tombstones"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_model_selections"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_name_serials"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_presets"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_profiles"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_provision_operations"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_provisions"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_ratings"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_runtime_states"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_scheduled_tasks"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_session_archive_intervals"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.agent_sessions"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.api_keys"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.assets"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.assistant_panel_changes"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.assistant_panel_changes_revision_seq"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.assistant_panel_items"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.assistant_work"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.assistant_work_claimant_cooldowns"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.assistant_work_created_seq_seq"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.assistant_work_events"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.assistant_work_events_seq_seq"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.assistant_work_notice_wakes"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.assistant_work_ready_hints"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_admissions"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_authority_switches"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_batches"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_heads"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_items"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_legacy_functions"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_management_client_policy"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_operation_identities"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_operations"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_recreation_intents"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_takeover_evidence"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.connection_unknown_outcome_resolutions"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.contact_group_members"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.contact_groups"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.contact_overrides"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.device_lease_sweeps"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.device_projects"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.feedback"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.friend_requests"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.friendships"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.gugu_device_commands"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.gugu_device_removals"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.gugu_devices"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.gugu_runtime_capability_policy"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.gugu_server_enrollments"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.installation_machine_limits"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.member_liveness"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.mycel_id_seq"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.password_vault_devices"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.password_vault_heads"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.password_vault_items"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.password_vault_log"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.password_vault_shares"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.password_vault_shares_share_id_seq"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.runtime_instances"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.server_login_requests"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.signup_email_domain_rules"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.user_settings"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/identity.users"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/moments.comment_media"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/moments.post_comments"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/moments.post_likes"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/moments.post_media"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/moments.posts"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.forum_assignments"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.forum_blocks"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.forum_bounties"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.forum_community_points"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.forum_community_points_id_seq"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.forum_participants"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.forum_post_events"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.forum_posts"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.forum_reactions"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.forum_replies"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.preset_teams"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/public.usage_daily"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_agent.agents"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_agent.audit"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_agent.audit_id_seq"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_agent.controllers"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_agent.grants"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_agent.replies"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_help.audit"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_help.audit_id_seq"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_help.configuration"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_help.configuration_admins"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_help.rate_limits"
+  },
+  {
+    "owner": "postgres",
+    "object": "relation/support_help.release_gate"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat._keys_diff_owned_by(pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.activity_metadata_as(pg_catalog.text,pg_catalog.timestamptz,pg_catalog.timestamptz,pg_catalog.text,pg_catalog.int8,pg_catalog.int8,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.add_group_agent(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.agent_channel_name(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.agent_flood_threshold_effective(chat.chats)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.agent_flood_threshold_for(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.announce_group_management(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.append_user_revision(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.apply_agent_flood_rule(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.apply_group_stop_decision_status()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.archive_group_as(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.archive_topic_as(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.archive_topics_with_source()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.assign_message_seq()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_caption_of(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_caption_suffix(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_commit(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog._text,pg_catalog.text,pg_catalog.text,pg_catalog.bool,pg_catalog.bool,pg_catalog.text,pg_catalog.text,pg_catalog.uuid,pg_catalog.int4,pg_catalog.uuid,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_document_snapshot(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_envelope(pg_catalog.text,pg_catalog.int8,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_envelope_name(pg_catalog.text,pg_catalog.int8,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_expired_staging(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_forward(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog._text,pg_catalog.text,pg_catalog.bool,pg_catalog.bool,pg_catalog.uuid,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_item_for(pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_place(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_place_forward(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_place_share(pg_catalog.uuid,pg_catalog.int4,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_place_version(pg_catalog.text,pg_catalog.uuid,pg_catalog.int4,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_sender_check(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_share(pg_catalog.uuid,pg_catalog.int4,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog._text,pg_catalog.text,pg_catalog.text,pg_catalog.bool,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachment_text_envelope(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.attachments_principal()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.auto_passive_on_agent_flood()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.broadcast_agent_delivery_block()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.broadcast_member_read_changed()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.broadcast_message_created()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.broadcast_message_deleted()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.broadcast_message_delivery_changed()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.broadcast_message_reaction_changed()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.broadcast_to_chat_member_user_events(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.caller_may_probe_chat(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.caller_member_chats_without_floor()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.can_act_as(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.can_manage_group_members(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.can_read_message(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.can_see_delivery_of(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.can_see_topic(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.can_see_topic_message(pg_catalog.text,pg_catalog.timestamptz,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.can_speak_in_topic(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.chat_facts(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.chat_members_role_user_type_chk()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.chats_membership_invariants()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.chats_meta_broadcast()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.chats_status_invariants()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.claim_presence_wake(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.cleanup_removed_group_agent(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.clear_messages_for_me(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.conversation_gone(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.conversation_release(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.conversation_release_on_change()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.create_gugu_group(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.jsonb,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.create_topic(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog._text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.current_user_group_role(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.decide_group_invitation_as(pg_catalog.text,pg_catalog.bool,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.decide_group_join(pg_catalog.text,pg_catalog.bool,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.delete_group_announcement_as(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.delete_message(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.delete_my_dm_conversation(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.enforce_agent_flood_passive(pg_catalog.text,pg_catalog._text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.enforce_group_member_limit()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.enforce_whisper_rule()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.enqueue_agent_deliver_device_command()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.enroll_topic_agent_owner()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_enqueue(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_for_object(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_for_pointer(pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_gc_claim(pg_catalog.int4,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_gc_fail(pg_catalog.uuid,pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_gc_finish(pg_catalog.uuid,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_gc_kick()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_held_until(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_in_use(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_lost_reference()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_pointer(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_register(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog.int4,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_sweep()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_blob_take(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_current_version()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_device_publish(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog.text,pg_catalog.int4,pg_catalog.uuid,pg_catalog.jsonb,pg_catalog.text,pg_catalog.int4,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_device_version_integrity()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_managed_upload_as(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_managed_upload_closed(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_managed_upload_for(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_managed_upload_prepare(pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_managed_upload_registered(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_managed_upload_scope(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_place_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog._text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_project_policy_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool,pg_catalog.bool,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_project_policy_for(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_replace_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_resolve_as(pg_catalog.jsonb,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_resolve_for(pg_catalog.jsonb,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_storage_mark_as(pg_catalog.jsonb,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_storage_of(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_storage_overview_as()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_accept(pg_catalog.uuid,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_collect()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_commit(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_current(chat.file_temporary_transfers)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_expire(pg_catalog.int4,pg_catalog.uuid,pg_catalog.text,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_host_for(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_interval(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_key_for(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_pending(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_read_complete(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_request(pg_catalog.jsonb,pg_catalog.text,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_temporary_usage(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_account(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_download_as(pg_catalog.jsonb,pg_catalog.text,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_expire(pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_group(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_group_usage(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_import(pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_inventory(pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_observe(pg_catalog.text,pg_catalog.uuid,pg_catalog.int8,pg_catalog.timestamptz)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_parameter(pg_catalog.jsonb,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_reference_expired(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_reference_guard()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_reserve(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_settings(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_settle(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_track(pg_catalog.uuid,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_track_reference()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_transfer_usage(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_upload_take(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.file_urls_as(pg_catalog.jsonb,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.files_authorize(pg_catalog.uuid,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.files_record_version(pg_catalog.uuid,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.files_replace_deadline()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.files_replace_stage(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int4,pg_catalog.jsonb,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.forwarded_source(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.get_or_create_agent_social_group(pg_catalog.text,pg_catalog._text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.get_or_create_dm(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.group_add_denial(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.group_collab_broadcast()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.group_info_as(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.group_is_manager(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.group_prompt_blank_is_none()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.group_prompt_present(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.group_related(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.guard_widget_identity()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.gugu_can_send_as(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.gugu_decision_events_auto_settle()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.gugu_decision_events_broadcast()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.gugu_decision_events_vote_scope_chk()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.gugu_mark_message_delivered(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.gugu_token_context(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.historical_dm_peer(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.history_floor(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.import_agent_session_history(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.insert_group_member(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_acting_as(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_addressable_in(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_agent_user(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_chat_member(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_group_creator(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_member(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_owned_agent_user(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_pending_delivery(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_project_group(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_project_owner(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_retained_member(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_strict_legacy_chat_media_attachment(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.is_user_event_recipient(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.join_public_group(pg_catalog.int4,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.join_topic_participants()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.leave_topics_of_source_line()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.list_chat_previews(pg_catalog._text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.list_group_invitations_as(pg_catalog.text,pg_catalog.bool,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.list_group_join_requests(pg_catalog.text,pg_catalog.bool,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.list_managed_group_join_requests(pg_catalog.bool,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.list_member_ids(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.list_my_agent_join_requests(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.list_my_chats_as(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.list_owner_groups_as(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.list_topics_of_chat(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.list_unread_locators(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.list_unread_locators_for_chats(pg_catalog._text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.lock_chat_revision_recipients(pg_catalog.text,pg_catalog._text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.lock_message_agent_devices()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.lock_revision_heads(pg_catalog._text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.lookup_public_group(pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.management_authority(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.mark_message_read(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.mark_read(pg_catalog.text,pg_catalog.int8,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.mark_stream_read(pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.mark_thread_root(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.mark_unread(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.market_install_counts()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.market_install_ranking()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.may_bind_project_group(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.member_accepts_delivery(pg_catalog.text,pg_catalog.bool,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_history_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_preview(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_preview_keepalive(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_preview_relay(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_preview_subscribe(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_preview_unsubscribe(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_reply_preview(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_reply_preview_for(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_reply_preview_row(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_reply_routing_target(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_search_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_visible_at(pg_catalog.timestamptz,pg_catalog.timestamptz,pg_catalog.bool,pg_catalog.text,pg_catalog._text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_visible_to(pg_catalog.text,pg_catalog.timestamptz,pg_catalog.bool,pg_catalog.text,pg_catalog._text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_wakes_agent(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool,pg_catalog.bool,pg_catalog._text,pg_catalog.bool,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.message_wakes_nobody(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.messages_file_ref()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.messages_join_send_group()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.notify_agent_of_reaction()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.notify_files_item_deleted()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.notify_files_item_marked()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.notify_files_member_removed()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.open_dm(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.own_agent_app_sends(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.own_agent_sent(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.own_agent_sent_view(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.post_group_announcement_as(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.preview(chat.messages_view)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_chat_row_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_group_invitation_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_group_join_request_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_member_stream_read_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_membership_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_roster_revisions()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_session_archival_roster()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_topic_activity_to_source_line()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_topic_created_to_source_line()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_topic_membership_to_source_line()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_topic_roster_to_source_line()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_user_revision(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.publish_workspace_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.queue_agent_join_request(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.reapply_agent_flood_on_threshold_change()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.recompute_chat_last_message(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.recompute_chat_last_message_on_update()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.record_market_install(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.record_message_agent_wakes()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.record_message_removed_agent_refusals()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.refresh_message_search_vector()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.refuse_topic_under_archived_source()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.register_inserted_widget()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.register_widget_message(chat.messages)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.reject_non_member_recipients()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.remove_group_member_as(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.request_agent_friend_contact(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.request_group_invitation_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.request_group_join(pg_catalog.int4,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.request_group_join_by_id(pg_catalog.int4,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.require_group_actor(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.require_group_inviter(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.require_group_manager(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.search_discoverable_groups(pg_catalog.text,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.send_friend_file_as_owner(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.send_friend_message_as_owner(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.send_message_idempotent(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog._text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool,pg_catalog.bool,pg_catalog.text,pg_catalog.uuid,pg_catalog.int4,pg_catalog.text,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.send_message_with_overlays(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog._text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool,pg_catalog.bool,pg_catalog.text,pg_catalog.uuid,pg_catalog.int4,pg_catalog.text,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.send_user_event(pg_catalog.jsonb,pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.send_widget(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.\"json\",pg_catalog.text,pg_catalog.text,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.session_attachment_commit(pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog._text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.session_attachment_lost_reference()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.session_attachment_revoke(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.session_attachment_urls_as(pg_catalog._uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.set_agent_listen_mode_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.set_agent_sent_marker()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.set_group_member_role_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.set_hide_history_before_on_join()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.set_inbox_publication_on_membership_insert()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.set_join_instant_on_membership_insert()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.set_workspace_item_updated_at()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.skip_listen_state_for_member_join_notice()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.sync_since(pg_catalog.int8,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.sync_snapshot()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.thread_handoff_deliver(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.thread_summaries(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.topic_name_from_message(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.topic_source_state(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.undo_agent_flood_adjustment(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.update_chat_last_message()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.update_group_announcement_as(pg_catalog.text,pg_catalog.jsonb,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.update_group_as(pg_catalog.text,pg_catalog.jsonb,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.validate_storage_reference_pair()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.whisper_visible_to(pg_catalog.bool,pg_catalog.text,pg_catalog._text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.widget_origin(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.widget_spec(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_actor_for(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_bytes_pinned()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_clash_as(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_clean_name(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_create_app_document_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.jsonb,pg_catalog.text,pg_catalog.text,pg_catalog._text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_create_document_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog._text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_create_file_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog._text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_deletable_as(pg_catalog._uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_delete_as(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_document_import_candidates(pg_catalog.uuid,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_fit_name(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_folder_for(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_get_as(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_import_document(pg_catalog.uuid,pg_catalog.int4,pg_catalog.uuid,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_ingest_upload(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_is_chat_admin(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_item_for(pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_items_guard_delete()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_items_place()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_list_as(pg_catalog.text,pg_catalog.text,pg_catalog.int4,pg_catalog.int4,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_lock_chat(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_mark_app_data_as(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_may_delete(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_mkdir_as(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_move_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_name_taken(pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.uuid,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_note_open(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_path_of(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_place_item(pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.uuid,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_placed_for(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_pointer_in_use(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_recent(pg_catalog.int4,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_replace_file_as(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_require_room_member(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_same_series(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_search(pg_catalog.text,pg_catalog._text,pg_catalog.int4,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_set_metadata(pg_catalog.uuid,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_split_name(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_status_as(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_stored_name(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_system_folder(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_version_as(pg_catalog.text,pg_catalog.text,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_version_blob(pg_catalog.uuid,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_version_envelope(pg_catalog.uuid,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat.workspace_versions_as(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat_private.is_direct_chat(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat_private.is_removed_agent_recipient(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat_private.is_removed_agent_seat(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/chat_private.member_seat_visible(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/file_private.link_project_message(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/file_private.publish_revision(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog.text,pg_catalog.int4,pg_catalog.uuid,pg_catalog.int4,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.accept_friend_request_by_id(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.agent_presence_viewer_ids(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.agent_ratings_guard_update()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.api_key_has_scope(pg_catalog._text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.archive_user(pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assert_device_command_post_context(pg_catalog.uuid,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog._text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assert_provision_owner_live(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_ack(pg_catalog.text,pg_catalog.text,pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_admit(pg_catalog.text,pg_catalog.text,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_body_published(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_budget(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_commit(pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog.jsonb,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_guard_body()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_home_changed()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_is_owner(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_lock(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_notice(pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_pending(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_prune(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_reject(pg_catalog.text,pg_catalog.text,pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_resource(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_runtime(pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_snapshot(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_panel_validate(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_abandoned(pg_catalog.text,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_attachment(pg_catalog.jsonb,pg_catalog.jsonb,identity.assistant_work)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_changed()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_commit(pg_catalog.text,pg_catalog.text,pg_catalog.uuid,pg_catalog.uuid,pg_catalog.jsonb,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_coordinator(pg_catalog.text,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_coordinator_bind(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_coordinator_initial()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_coordinator_left()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_history(pg_catalog.text,pg_catalog.uuid,pg_catalog.int8,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_import(pg_catalog.text,pg_catalog.text,pg_catalog.uuid,pg_catalog.jsonb,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_list(pg_catalog.text,pg_catalog.int8,pg_catalog.int4,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_notice_pending(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_notice_reason(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_notice_wake_claim(pg_catalog.text,pg_catalog.int4,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_notice_wake_release(pg_catalog.text,pg_catalog.uuid,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_outbox_claim(pg_catalog.text,pg_catalog.int4,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_outbox_settle(pg_catalog.text,pg_catalog.uuid,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.int4,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_owner_delivered(pg_catalog.text,pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_prompt_ready_target()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_require_owner(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_retire_ready_hint()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_runtime(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.assistant_work_source(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.broadcast_agent_deliver_outcome_7503()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.broadcast_agent_presence_from_device()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.broadcast_agent_presence_from_runtime()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.broadcast_identity_removal()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.broadcast_user_agent_changed()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.broadcast_user_setting_changed()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.build_agent_presence_payload(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.can_view_agent_runtime_state(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.can_write_agent_runtime_state(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.cancel_agent_provision_operation(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.cancel_agent_provision_operation_pre_adopt_7199(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.claim_provision_slots(pg_catalog.uuid,pg_catalog.int4,pg_catalog._uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.cleanup_legacy_gugu_devices(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.complete_agent_provision(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.complete_agent_provision_internal(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.complete_agent_provision_pre_adopt_7199(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_account_key(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_ack(pg_catalog.text,pg_catalog.uuid,pg_catalog.uuid,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_admit(pg_catalog.text,pg_catalog.int8,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_admit_operation(pg_catalog.text,pg_catalog.uuid,pg_catalog.int8,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_authority()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_authority_cutover(pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_authority_fence(pg_catalog.text,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_claim_operation(pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_commit(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog.jsonb,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_commit_batch(pg_catalog.uuid,pg_catalog.uuid,pg_catalog.jsonb,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_has_legacy_data(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_item_projection(identity.connection_items)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_legacy_import_rows(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_legacy_inventory(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_management_access()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_management_assert(pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_management_decision(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb,pg_catalog.bool,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_management_headers()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_management_policy_valid(pg_catalog.jsonb,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_management_require_access()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_management_require_read()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_management_set_policy(pg_catalog.int8,pg_catalog.bool,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_management_write_fence(pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_operation_projection(identity.connection_operations,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_owner()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_owner_lock(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_pending(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_prepare_import(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_prepared_inventory(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_record_takeover(pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_recreate_begin(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog.text,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_resolve_unknown_outcome(pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_resource(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_runtime(pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_scope(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_semver_compare(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_semver_parts(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_snapshot(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.connection_unknown_outcomes(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.create_owned_agent(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool,pg_catalog.text,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.current_jwt_session_id()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.device_list_capabilities(identity.gugu_devices)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.eject_agent_group_member_after_friendship_delete()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.ensure_cloud_device()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.erase_account_references(pg_catalog._text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.erase_human_account(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.fan_agent_presence_to_viewers(pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.feedback_screenshot_is_referenced(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.feedback_screenshots_released()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.fetch_fair_pending_device_commands(pg_catalog.text,pg_catalog.int4,pg_catalog._text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.finalize_agent_team(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.finish_first_run()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.get_agent_join_context(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.get_agent_presence(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.get_agent_presence_batch(pg_catalog._text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.get_thread_messages(pg_catalog.text,pg_catalog.text,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.guard_feedback_screenshot_delete()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.guard_removed_identity()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.gugu_device_commands_broadcast()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.gugu_device_removal_blocks(pg_catalog.text,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.gugu_devices_default_label()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.gugu_devices_enforce_machine_limit()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.gugu_devices_preserve_custom_label()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.gugu_devices_refuse_removed()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.gugu_devices_stamp_lease()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.gugu_machine_limit_refusal(pg_catalog.uuid,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.handle_deleted_auth_user()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.handle_new_auth_user()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.import_agent_provision_history(pg_catalog.uuid,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.is_my_project(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.is_trusted_decision_erasure_update(chat.gugu_decision_events,chat.gugu_decision_events)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.is_valid_avatar_url(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.list_my_projects()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.machine_limits_for(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.mark_read_on_deliver(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.my_recent_machine_limit_refusal(pg_catalog.timestamptz)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.official_help_info()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.official_help_join(pg_catalog.int8,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_append(pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_approve(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int4,pg_catalog.jsonb,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_challenge(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_delete(pg_catalog.text,pg_catalog.uuid,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_device_gone()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_dismiss(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_initialize(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_member(pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_owner(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_put_shares(pg_catalog.text,pg_catalog.int4,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_recover(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int4,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_recovery_begin(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_recovery_proven(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_refuse(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_request(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_reset(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_reveal(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_revision(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_rotate(pg_catalog.text,pg_catalog.int4,pg_catalog._text,pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_save(pg_catalog.text,pg_catalog.uuid,pg_catalog.int8,pg_catalog.int4,pg_catalog.text,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_set_recovery(pg_catalog.text,pg_catalog.int4,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_state(pg_catalog.text,pg_catalog.int8,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.password_vault_write(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.prepare_agent_provision(pg_catalog.uuid,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.prepare_agent_provision_legacy_7199(pg_catalog.uuid,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.prepare_agent_provision_pre_adopt_7199(pg_catalog.uuid,pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.preserve_newer_agent_runtime_state()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.provision_member_hash(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.bool,pg_catalog.bool,pg_catalog._text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.provision_taskpage_agent(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.provision_taskpage_agent(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.provision_template_message(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.publish_device_projects(pg_catalog.text,pg_catalog.jsonb,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.publish_device_projects_v2(pg_catalog.text,pg_catalog.jsonb,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.publish_device_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.publish_display_override_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.publish_friend_request_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.publish_friendship_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.publish_identity_display_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.publish_owned_agent_revision()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.publish_support_help_configuration(pg_catalog.int8,pg_catalog.text,pg_catalog.text,pg_catalog._text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.pull_agent_inbox_v2(pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.int4,pg_catalog.jsonb,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.read_agent_turn_outcomes(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.recheck_device_command_execution(pg_catalog.uuid,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.record_agent_deliver_outcome(pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.record_agent_name_serial()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.recover_orphaned_device_commands(pg_catalog.text,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.reject_friend_request_by_id(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.reject_retired_cloud_agent()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.reject_retired_thread_handoff_command()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.remove_contact(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.remove_device(pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.remove_owned_agent(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.rename_device(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.report_agent_model_selection(pg_catalog.text,pg_catalog.jsonb,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.retry_agent_provision_model(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.runtime_instance_heartbeat(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.scrub_terminal_agent_create_memory()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.search_users(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.server_login_mark_refused(pg_catalog.uuid,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.set_agent_desired_status(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.set_agent_model_selection(pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.set_agent_public(pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.set_agent_runtime_state(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int4,pg_catalog.timestamptz,pg_catalog.text,pg_catalog._text,pg_catalog.timestamptz,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.set_agent_runtime_state_owner()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.set_agent_runtime_state_with_api_key(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int4,pg_catalog.timestamptz,pg_catalog.text,pg_catalog._text,pg_catalog.timestamptz,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.set_agent_session_archival(pg_catalog.text,pg_catalog.text,pg_catalog.uuid,pg_catalog.int8,pg_catalog.timestamptz,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.set_api_keys_updated_at()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.set_device_project_removed(pg_catalog.text,pg_catalog.text,pg_catalog.bool,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.set_support_help_release_gate(pg_catalog.text,pg_catalog.bool,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.settle_agent_provision_terminal(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.settle_agent_provision_terminal_pre_adopt_7199(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.settle_device_project_removal()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.settle_provision_cancellation(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.stamp_agent_provision_command_id()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.start_agent_provision_operation(pg_catalog.uuid,pg_catalog.text,pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.start_agent_provision_operation_legacy_7199(pg_catalog.uuid,pg_catalog.text,pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.start_agent_provision_operation_pre_adopt_7199(pg_catalog.uuid,pg_catalog.text,pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.jsonb,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.storage_actor_is_live()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.storage_object_is_referenced(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.sweep_device_leases(pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.sync_agent_profile_user()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.sync_member_liveness()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.upsert_agent_session(pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.user_is_live(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.users_block_device_id_change()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.validate_agent_model_selection(pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.validate_feedback_screenshots()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/identity.verify_api_key(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/moments.broadcast_feed_changed()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/moments.can_view_post_author(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/moments.is_friend(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_account_established(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_ack(pg_catalog.text,pg_catalog.uuid,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_actor(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_admit(public.forum_posts,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_agent_may_act(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_append_event(pg_catalog.uuid,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_assert_delivery_live(pg_catalog.uuid,pg_catalog.text,pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_assign(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_award(pg_catalog.uuid,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_awards_total(pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_block(pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_bounty_close(public.forum_bounties)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_bounty_settled(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_create_post(pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.int4,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_delete_post(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_delete_reply(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_event_wakes_agent(pg_catalog.uuid,pg_catalog.int8,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_feed_changed(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_list_posts(pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.int4,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_lock_post(pg_catalog.uuid)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_me()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_owner_of(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_points_apply()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_points_grant(pg_catalog.text,pg_catalog.text,pg_catalog.int8,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_points_lock(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_points_on_reaction()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_points_reverse(pg_catalog.text,pg_catalog.int8,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_points_signup_sweep()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_post_events_after_insert()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_pull_agent_inbox(pg_catalog.text,pg_catalog.int4)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_react(pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.bool,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_read_post(pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_record_delivery_failure(pg_catalog.text,pg_catalog.uuid,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_reply(pg_catalog.uuid,pg_catalog.text,pg_catalog.uuid,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_reply_visible(pg_catalog.timestamptz,pg_catalog.bool,pg_catalog.text,pg_catalog.text,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.forum_settle_expired()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.gg_revoke_public_execute_on_new_function()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.hook_before_user_created(pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.my_usage_daily(pg_catalog.date,pg_catalog.date,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.my_usage_devices()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.server_login_approve(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.server_login_decide(pg_catalog.text,pg_catalog.text,pg_catalog.bool)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.server_login_grant(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb,pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.server_login_poll(pg_catalog.text,pg_catalog.int4,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.server_login_start(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.server_login_view(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/public.usage_daily_touch_updated_at()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_agent.active_identity(pg_catalog.text,pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_agent.block_owner_delivery()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_agent.block_owner_send()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_agent.manage(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_agent.request(pg_catalog.text,pg_catalog.text,pg_catalog.jsonb)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_agent.revoke_changed_authority()"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_agent.same_hash(pg_catalog.bytea,pg_catalog.bytea)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_help.agent_isolation_verified(pg_catalog.text,pg_catalog.uuid,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_help.allow_call(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_help.configuration_version_changed(pg_catalog.uuid,pg_catalog.int8,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_help.live_human(pg_catalog.text)"
+  },
+  {
+    "owner": "postgres",
+    "object": "routine:f/support_help.valid_configuration(pg_catalog.uuid,pg_catalog.int8)"
+  },
+  {
+    "owner": "postgres",
+    "object": "schema/chat"
+  },
+  {
+    "owner": "postgres",
+    "object": "schema/chat_private"
+  },
+  {
+    "owner": "postgres",
+    "object": "schema/file_private"
+  },
+  {
+    "owner": "postgres",
+    "object": "schema/gugu_install"
+  },
+  {
+    "owner": "postgres",
+    "object": "schema/identity"
+  },
+  {
+    "owner": "postgres",
+    "object": "schema/moments"
+  },
+  {
+    "owner": "pg_database_owner",
+    "object": "schema/public"
+  },
+  {
+    "owner": "postgres",
+    "object": "schema/support_agent"
+  },
+  {
+    "owner": "postgres",
+    "object": "schema/support_help"
+  }
+]
