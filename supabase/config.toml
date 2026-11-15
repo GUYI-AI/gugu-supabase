@@ -39,3 +39,8 @@ verify_jwt = false
 # authorization after deletion. No browser receives the server credential.
 [functions.account-deletion]
 verify_jwt = false
+
+# Email proofs are scoped capabilities; every member route verifies Auth and
+# a live database session. No client receives the server credential.
+[functions.team-accounts]
+verify_jwt = false
