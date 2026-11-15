@@ -12,7 +12,7 @@
     "test": "node --test tests/push/*.test.mjs && vitest run --project unit",
     "test:push": "node --test tests/push/*.test.mjs",
     "test:integration": "node scripts/test-integration.mjs",
-    "check:functions": "deno check supabase/functions/server-login/index.ts supabase/functions/attachments/index.ts supabase/functions/account-deletion/index.ts",
+    "check:functions": "deno check supabase/functions/server-login/index.ts supabase/functions/attachments/index.ts supabase/functions/account-deletion/index.ts supabase/functions/team-accounts/index.ts",
     "setup": "node scripts/setup.mjs",
     "test:db:start": "node scripts/test-db.mjs start",
     "test:db:stop": "node scripts/test-db.mjs stop",

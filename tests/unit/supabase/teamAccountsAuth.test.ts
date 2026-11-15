@@ -11,6 +11,36 @@ function adapter(responses: unknown[]) {
   return { api: teamAuth({ url: 'https://auth.example.invalid', anonKey: 'public-test', serviceKey: 'server-test', fetch: fetcher as typeof fetch }), fetcher }
 }
 describe('team official Auth adapter', () => {
+  it('marks a new verification anchor before asking Auth to send an OTP without signup', async () => {
+    const { api, fetcher } = adapter([{ id: randomUUID(), email: 'member@example.invalid', app_metadata: { gugu_account_kind: 'team_login_anchor' } }, {}])
+    expect(await api.sendEmailCode('member@example.invalid')).toBe(true)
+    const calls = fetcher.mock.calls as unknown as [string, RequestInit][]
+    expect(JSON.parse(String(calls[0][1].body))).toMatchObject({
+      email_confirm: false, app_metadata: { gugu_account_kind: 'team_login_anchor' },
+    })
+    expect(JSON.parse(String(calls[1][1].body))).toEqual({ email: 'member@example.invalid', create_user: false })
+  })
+  it('does not rewrite an existing personal account or treat an Auth outage as duplicate email', async () => {
+    for (const [status, code, expectedCalls, expected] of [[422, 'email_exists', 2, true], [500, 'unexpected_failure', 1, false]] as const) {
+      const fetcher = vi.fn(async () => new Response(JSON.stringify(fetcher.mock.calls.length === 1 ? { code } : {}),
+        { status: fetcher.mock.calls.length === 1 ? status : 200 }))
+      const api = teamAuth({ url: 'https://auth.example.invalid', anonKey: 'public-test', serviceKey: 'server-test', fetch: fetcher as typeof fetch })
+      expect(await api.sendEmailCode('member@example.invalid')).toBe(expected)
+      expect(fetcher).toHaveBeenCalledTimes(expectedCalls)
+      expect((fetcher.mock.calls as unknown as [string, RequestInit][]).every(([, options]) => options.method === 'POST')).toBe(true)
+    }
+  })
+  it('recovers an existing planned principal after a lost creation response without creating another', async () => {
+    const { api, fetcher } = adapter([user()])
+    expect(await api.createPrincipal({ ...plan, principal_id: principalId })).toBe(principalId)
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect((fetcher.mock.calls as unknown as [string, RequestInit][])[0][1].method).toBe('GET')
+  })
+  it('rejects a planned principal rebound to another team instead of adopting it', async () => {
+    const { api, fetcher } = adapter([{ ...user(), app_metadata: { ...user().app_metadata, gugu_team_id: randomUUID() } }])
+    await expect(api.createPrincipal({ ...plan, principal_id: principalId })).rejects.toThrow('authentication_unavailable')
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
   it('uses the raw HTTP generate-link shape and verifies the existing team principal twice', async () => {
     const session = { access_token: 'temporary-test', refresh_token: 'refresh-test', user: user() }
     const { api, fetcher } = adapter([user(), { ...user(), hashed_token: 'opaque-test' }, session])

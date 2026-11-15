@@ -5,7 +5,7 @@ export interface TeamAuthCaller {
   googleVerified: boolean;
 }
 export interface TeamAuthSession { access_token: string; refresh_token: string; user: { id: string; [key: string]: unknown }; [key: string]: unknown }
-export interface PrincipalPlan { member_id: string; team_id: string; alias: string; name: string; region: 'cn' | 'hk' }
+export interface PrincipalPlan { principal_id?: string; member_id: string; team_id: string; alias: string; name: string; region: 'cn' | 'hk' }
 interface Settings { url: string; anonKey: string; serviceKey: string; fetch?: typeof fetch }
 export class TeamAuthUnavailable extends Error { constructor() { super('authentication_unavailable'); } }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -71,7 +71,19 @@ export function teamAuth(settings: Settings) {
         accountKind: user.app_metadata?.gugu_account_kind ?? 'personal', googleVerified };
     },
     async sendEmailCode(address: string): Promise<boolean> {
-      return (await call('/auth/v1/otp', 'POST', settings.anonKey, settings.anonKey, { email: address, create_user: true })).ok;
+      // A new verification-only identity must be marked before its INSERT
+      // triggers run. It cannot receive personal registration credits or act as
+      // a personal payer. Never rewrite an existing personal account's marker.
+      const anchor = await call('/auth/v1/admin/users', 'POST', settings.serviceKey, settings.serviceKey, {
+        email: address, email_confirm: false, app_metadata: { gugu_account_kind: 'team_login_anchor' },
+      });
+      const duplicate = [409, 422].includes(anchor.status)
+        && ['email_exists', 'user_already_exists'].includes(anchor.data?.code ?? anchor.data?.error_code);
+      if (!anchor.ok && !duplicate) return false;
+      if (anchor.ok && (!UUID.test(anchor.data?.id ?? '') || typeof anchor.data?.email !== 'string'
+          || email(anchor.data.email) !== email(address)
+          || anchor.data.app_metadata?.gugu_account_kind !== 'team_login_anchor')) return false;
+      return (await call('/auth/v1/otp', 'POST', settings.anonKey, settings.anonKey, { email: address, create_user: false })).ok;
     },
     async verifyEmailCode(address: string, code: string): Promise<{ id: string; email: string } | null> {
       const verified = await call('/auth/v1/verify', 'POST', settings.anonKey, settings.anonKey,
@@ -84,12 +96,23 @@ export function teamAuth(settings: Settings) {
       return { id: session.user.id, email: email(session.user.email) };
     },
     async createPrincipal(plan: PrincipalPlan): Promise<string> {
+      if (plan.principal_id) {
+        if (!UUID.test(plan.principal_id)) throw new TeamAuthUnavailable();
+        const prior = await call('/auth/v1/admin/users/' + plan.principal_id, 'GET', settings.serviceKey, settings.serviceKey);
+        if (prior.ok) {
+          if (prior.data?.id !== plan.principal_id || !ownsPlan(prior.data, plan)) throw new TeamAuthUnavailable();
+          return plan.principal_id;
+        }
+        if (prior.status !== 404) throw new TeamAuthUnavailable();
+      }
       const created = await call('/auth/v1/admin/users', 'POST', settings.serviceKey, settings.serviceKey, {
+        ...(plan.principal_id ? { id: plan.principal_id } : {}),
         email: plan.alias, email_confirm: true, user_metadata: { display_name: plan.name },
         app_metadata: { gugu_account_kind: 'team_member', gugu_team_id: plan.team_id,
           gugu_member_id: plan.member_id, gugu_team_region: plan.region },
       });
-      if (!created.ok || !UUID.test(created.data?.id ?? '') || !ownsPlan(created.data, plan)) throw new TeamAuthUnavailable();
+      if (!created.ok || !UUID.test(created.data?.id ?? '') || !ownsPlan(created.data, plan)
+          || plan.principal_id && created.data.id !== plan.principal_id) throw new TeamAuthUnavailable();
       return created.data.id;
     },
     issueSession: issue,
