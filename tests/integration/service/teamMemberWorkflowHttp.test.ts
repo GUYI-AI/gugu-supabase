@@ -12,6 +12,7 @@ let priorRegion: string | null, priorOrigin: string | null
 const ownedUsers = new Set<string>(), teams = new Set<string>(), addresses = new Set<string>()
 const url = process.env.GUGU_INTEGRATION_SUPABASE_URL ?? '', anon = process.env.VITE_SUPABASE_ANON_KEY ?? ''
 const modelRevocations: Record<string, unknown>[] = []
+const invitationDeliveries: unknown[] = []
 function need(value: unknown, phase: string): asserts value { if (!value) throw Error('Owned workflow fixture: ' + phase) }
 const address = () => { const value = randomUUID() + '@workflow-http.invalid'; addresses.add(value); return value }
 beforeAll(async () => {
@@ -26,7 +27,9 @@ beforeAll(async () => {
   admin = createClient(url, service, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } })
   // SMTP acceptance is an explicit test adapter; this does not attest delivery.
   const deps = teamAccountsDependencies({ url, anonKey: anon, serviceKey: service,
-    invitationMailer: { canSend: () => true, send: async () => ({ state: 'accepted', reason_code: 'smtp_accepted' }) } })
+    invitationMailer: { canSend: () => true, send: async input => {
+      invitationDeliveries.push(input); return { state: 'accepted', reason_code: 'smtp_accepted' }
+    } } })
   handle = createTeamAccountsHandler({ ...deps, auth: { ...deps.auth, sendEmailCode: value => deps.auth.ensureAnchor(value) },
     revokeModel: async input => { modelRevocations.push(input); return true } })
 })
@@ -84,12 +87,28 @@ it('creates, invites, signs in, disables, restores and confirms member email thr
     verification_receipt: await proof(founderEmail, 'create'), idempotency_key: randomUUID() })
   teams.add(founder.team.id); ownedUsers.add(founder.session.user.id)
   need(founder.session.user.id === founder.membership.identity_id, 'independent founder binding')
-  const invited = await call({ action: 'invite', email: memberEmail, role: 'member', idempotency_key: randomUUID() }, founder.session.access_token)
+  const existing = await admin.auth.admin.createUser({ email: memberEmail, email_confirm: true,
+    app_metadata: { gugu_account_kind: 'personal', invitation_sentinel: 'preserve-existing' }, user_metadata: { display_name: 'Existing personal identity' } })
+  need(!existing.error && existing.data.user, 'existing personal fixture')
+  ownedUsers.add(existing.data.user.id)
+  const originalPersonal = existing.data.user
+  const inviteIntent = { action: 'invite', email: memberEmail, role: 'member', idempotency_key: randomUUID() }
+  const invited = await call(inviteIntent, founder.session.access_token)
+  const replay = await call(inviteIntent, founder.session.access_token)
+  expect(replay.invitation_id).toBe(invited.invitation_id); expect(replay.delivery.operation_id).toBe(invited.delivery.operation_id)
+  expect(replay.delivery.state).toBe('accepted'); expect(invitationDeliveries.length).toBe(1)
+  expect(replay).not.toHaveProperty('seed'); expect(replay).not.toHaveProperty('recipient_email')
+  const unchanged = await admin.auth.admin.getUserById(originalPersonal.id)
+  need(!unchanged.error && unchanged.data.user, 'personal identity readback')
+  expect(unchanged.data.user.email).toBe(originalPersonal.email)
+  expect(unchanged.data.user.app_metadata).toEqual(originalPersonal.app_metadata)
+  expect(unchanged.data.user.user_metadata).toEqual(originalPersonal.user_metadata)
   const invitation = new URL(invited.invitation_url).hash.slice('#invitation_token='.length)
   const member = await call({ action: 'accept_invitation', invitation_token: invitation,
     verification_receipt: await proof(memberEmail, 'accept_invitation', invitation), idempotency_key: randomUUID() })
   ownedUsers.add(member.session.user.id)
   need(member.session.user.id === member.membership.identity_id && member.session.user.id !== founder.session.user.id, 'independent member binding')
+  expect(member.session.user.id).not.toBe(originalPersonal.id)
   const disabled = await call({ action: 'disable', member_id: member.membership.id, expected_revision: member.membership.revision,
     idempotency_key: randomUUID() }, founder.session.access_token)
   expect(disabled.revocation.state).toBe('complete'); expect(disabled.handoff.state).toBe('pending')
