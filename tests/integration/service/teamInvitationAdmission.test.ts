@@ -111,6 +111,14 @@ it('records a legitimate late send result even after its original caller is disa
   expect(await rpc('team_mail_delivery', ['finish', { delivery_id: claimed.delivery_id, lease_token: claimed.lease_token, state: 'accepted', reason_code: 'smtp_accepted' }])).toMatchObject({ state: 'accepted' })
 })
 
+it('cannot recreate an erased delivery through a late finish', async () => {
+  const i = await invitation(await founder()), claimed = await delivery(i)
+  await db.query('DELETE FROM team_private.invitations WHERE id=$1', [i.invitation_id])
+  expect((await refused(() => rpc('team_mail_delivery', ['finish', { delivery_id: claimed.delivery_id,
+    lease_token: claimed.lease_token, state: 'accepted', reason_code: 'smtp_accepted' }]))).hint).toBe('version_conflict')
+  expect((await db.query('SELECT count(*)::int n FROM team_private.mail_deliveries WHERE id=$1', [claimed.delivery_id])).rows[0].n).toBe(0)
+})
+
 it.each(['global_short', 'global_daily', 'team_short', 'team_daily', 'inviter_short', 'inviter_daily'])('enforces the configured %s bucket without any IP', async dimension => {
   await policy({ [dimension]: dimension.startsWith('global') ? 2 : 1, invitation_global_percent: 50 })
   const owner = await founder(), first = await invitation(owner), second = await invitation(owner)

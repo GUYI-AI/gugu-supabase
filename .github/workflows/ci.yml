@@ -111,6 +111,8 @@ jobs:
         with:
           deno-version: v2.6.4
       - run: pnpm check:functions
+      - name: Invitation SMTP over owned loopback sockets (no external SMTP access)
+        run: pnpm test:invitation-smtp
       - run: deno test --allow-env --allow-sys tests/deno/ossDirectUrl.test.ts tests/deno/textFileIngest.test.ts
   integration:
     runs-on: ubuntu-24.04

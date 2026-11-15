@@ -45,6 +45,7 @@ describe('team mail side effects follow durable admission', () => {
     await expect(f.invite()).rejects.toMatchObject({ status: 503, details: { invitation_created: true, delivery: { state: 'pending', reason_code: 'mail_not_configured' } } })
     expect(f.rpc.mock.calls.map(([, args]) => args.p_action)).toEqual(['prepare'])
     expect(f.auth.ensureAnchor).not.toHaveBeenCalled(); expect(f.mailer.send).not.toHaveBeenCalled()
+    try { await f.invite() } catch (error) { expect((error as TeamRefusal).details).not.toHaveProperty('invitation_url') }
   })
   it('replays a persisted acceptance even if SMTP settings have since closed', async () => {
     const f = fixture(); await f.invite(); f.mailer.canSend.mockReturnValue(false)
@@ -75,6 +76,7 @@ describe('team mail side effects follow durable admission', () => {
     const f = fixture(); f.auth.ensureAnchor.mockResolvedValue(false)
     await expect(f.invite()).rejects.toMatchObject({ details: { delivery: { state: 'failed', reason_code: 'identity_unavailable' } } })
     expect(f.mailer.send).not.toHaveBeenCalled()
+    try { await f.invite() } catch (error) { expect((error as TeamRefusal).details).not.toHaveProperty('invitation_url') }
   })
   it('puts official code sends behind the same admission and reuses accepted code receipts', async () => {
     const f = fixture(), challenge = { challenge_id: randomUUID(), email: 'code@example.invalid' }

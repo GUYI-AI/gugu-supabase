@@ -46,7 +46,7 @@ export function teamMailFlow(deps: Dependencies) {
         delivery: { operation_id: permit.delivery_id, ...result } });
     },
     async sendInvitation(invitation: any, response: Record<string, any>, request: Request, caller: TeamAuthCaller) {
-      let permit: any;
+      let permit: any, anchorReady = false;
       try {
         const scope = { kind: 'invitation', invitation_id: invitation.invitation_id };
         permit = checked(await deps.rpc('team_mail_delivery', args('prepare', scope, request, caller)));
@@ -68,6 +68,7 @@ export function teamMailFlow(deps: Dependencies) {
             if (typeof permit.recipient_email !== 'string' || !(await deps.auth.ensureAnchor(permit.recipient_email))) {
               result = { state: 'failed', reason_code: 'identity_unavailable' };
             } else {
+              anchorReady = true;
               result = await deps.invitationMailer!.send({ operationId: permit.delivery_id, invitationId: invitation.invitation_id,
                 to: permit.recipient_email, teamName: permit.team_name, invitationUrl: response.invitation_url, expiresAt: permit.expires_at });
             }
@@ -87,7 +88,13 @@ export function teamMailFlow(deps: Dependencies) {
         const failure = error instanceof TeamRefusal ? error : new TeamRefusal('dependency_unavailable', 503);
         if (!response.delivery) response.delivery = { operation_id: permit?.delivery_id ?? null, state: 'pending', reason_code: failure.code };
         else if (response.delivery.state === 'pending' && !response.delivery.reason_code) response.delivery.reason_code = failure.code;
-        throw new TeamRefusal(failure.code, failure.status, response);
+        const receipt = { ...response };
+        if (!anchorReady) {
+          // An unprepared recipient must not receive a usable team login link,
+          // even in a partial failure response (for example before Google OAuth).
+          delete receipt.invitation_url; delete receipt.app_deep_links;
+        }
+        throw new TeamRefusal(failure.code, failure.status, receipt);
       }
     },
   };

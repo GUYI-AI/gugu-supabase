@@ -11,6 +11,7 @@
   "scripts": {
     "test": "node --test tests/push/*.test.mjs && vitest run --project unit",
     "test:push": "node --test tests/push/*.test.mjs",
+    "test:invitation-smtp": "DENO_NO_PACKAGE_JSON=1 deno test --no-config --lock=deno.lock --frozen --allow-net=127.0.0.1 --allow-env --allow-sys=hostname,networkInterfaces --allow-run=openssl,python3 --allow-read --allow-write tests/deno/teamInvitationSmtp.test.ts",
     "test:integration": "node scripts/test-integration.mjs",
     "check:functions": "deno check supabase/functions/server-login/index.ts supabase/functions/attachments/index.ts supabase/functions/account-deletion/index.ts supabase/functions/team-accounts/index.ts",
     "setup": "node scripts/setup.mjs",
