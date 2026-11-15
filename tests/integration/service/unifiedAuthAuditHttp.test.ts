@@ -129,6 +129,8 @@ it.each([218987, 466000])('deletes through real Auth with %i synthetic audit row
   expect(job.delete_user_ids).toEqual(expect.arrayContaining([owner.id, agent])); expect(job.auth_email).toBe(owner.email)
   expect((await row('SELECT payload FROM auth.audit_log_entries WHERE id=$1', [actor])).payload.actor_username).toBe(owner.email)
   expect((await row('SELECT actor_user_id FROM file_private.storage_action_audit WHERE id=$1', [operation])).actor_user_id).toBe(owner.id)
+  const oldSession = await auth('user', 'GET', undefined, session.access_token)
+  expect([401, 403]).toContain(oldSession.status); await oldSession.body?.cancel()
   const replacement = await create(owner.email)
   const replacementPayload = { actor_id: replacement.id, actor_username: owner.email, actor_name: 'New account' }
   const replacementEvent = await audit(replacementPayload)
@@ -150,8 +152,6 @@ it.each([218987, 466000])('deletes through real Auth with %i synthetic audit row
   const stored = await row('SELECT * FROM file_private.storage_action_audit WHERE id=$1', [operation])
   expect(stored.actor_user_id).toMatch(/^erased:/); expect(stored.effective_actor_id).toBe(stored.actor_user_id)
   expect(stored.requested_message_ids).toEqual([])
-  const oldSession = await auth('user', 'GET', undefined, session.access_token)
-  expect([401, 403]).toContain(oldSession.status); await oldSession.body?.cancel()
 }, 90000)
 
 it.each(['registration', 'core'])('rolls back real Auth and its registration on %s failure', async point => {
