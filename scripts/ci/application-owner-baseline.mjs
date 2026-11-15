@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -42,7 +42,7 @@ export function publicIntersection(production, community) {
 }
 
 export async function captureFixture(root) {
-  root = resolve(root) + '/'
+  root = realpathSync(resolve(root)) + '/'
   const owner = JSON.parse(readFileSync(resolve(root, '.local/test-db/owner.json')))
   const project = 'gugucommunitytest' + createHash('sha256').update(root).digest('hex').slice(0,10)
   if (owner.root !== root || owner.project !== project || !Number.isInteger(owner.port)
