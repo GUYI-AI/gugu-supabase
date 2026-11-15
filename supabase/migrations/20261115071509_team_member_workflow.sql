@@ -177,7 +177,7 @@ BEGIN
     IF target.id=actor.id OR target.role='superadmin' OR actor.role='admin' AND target.role<>'member'
       OR p_action='set_role' AND actor.role<>'superadmin' THEN PERFORM team_private.refuse('forbidden'); END IF;
     IF target.revision IS DISTINCT FROM (p_input->>'expected_revision')::bigint
-      OR target.state<>CASE WHEN p_action='restore' THEN 'disabled' ELSE 'active' END THEN
+      OR target.state<>(CASE WHEN p_action='restore' THEN 'disabled' ELSE 'active' END) THEN
         PERFORM team_private.refuse('version_conflict',409);
     END IF;
     IF p_action='set_role' THEN
