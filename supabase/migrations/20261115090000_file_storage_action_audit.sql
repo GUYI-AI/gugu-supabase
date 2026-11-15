@@ -123,7 +123,10 @@ BEGIN
     -- serialize/fail after removal, not recreate an original-ID audit record.
     PERFORM 1 FROM identity.users u WHERE u.id=me AND u.removed_at IS NULL
         AND CASE WHEN u.type='human' THEN u.id ELSE u.owner_user_id END=owner_subject
-        FOR KEY SHARE OF u;
+        -- KEY SHARE permits a non-key removed_at update and can retain a stale
+        -- repeatable-read identity. SHARE conflicts with that update, causing
+        -- an older snapshot to fail serialization instead of recording its ID.
+        FOR SHARE OF u;
     IF NOT FOUND OR NOT identity.user_is_live(me) THEN
         RAISE EXCEPTION 'Account is unavailable' USING HINT='file_transfer_denied';
     END IF;
