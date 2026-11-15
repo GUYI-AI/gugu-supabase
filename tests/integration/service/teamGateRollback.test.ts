@@ -33,7 +33,13 @@ beforeAll(async()=>{
   if(!['postgres:','postgresql:'].includes(url.protocol)||!['127.0.0.1','localhost','[::1]'].includes(url.hostname))throw Error('Owned loopback database required')
   db=new pg.Client({connectionString:url.href});await db.connect()
 })
-beforeEach(async()=>{await db.query('BEGIN');await db.query('UPDATE team_private.deployment SET region=NULL WHERE singleton')})
+beforeEach(async()=>{
+  await db.query('BEGIN')
+  // regprocedure renders public names differently when rollback sets pg_catalog.
+  // Compare both catalog snapshots with the same path; keep every ACL/body check.
+  await db.query('SET LOCAL search_path=pg_catalog')
+  await db.query('UPDATE team_private.deployment SET region=NULL WHERE singleton')
+})
 afterEach(async()=>{await db.query('ROLLBACK')})
 afterAll(async()=>{await db?.end()})
 
