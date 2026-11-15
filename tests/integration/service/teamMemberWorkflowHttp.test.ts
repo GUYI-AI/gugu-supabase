@@ -72,6 +72,8 @@ async function code(email: string) {
 async function proof(email: string, purpose: string, invitation?: string) {
   // Only rate-limit time is advanced in the owned fixture. Expiry is unchanged.
   await db.query("UPDATE team_private.email_challenges SET created_at=created_at-interval '2 minutes' WHERE email_normalized=$1", [email])
+  await db.query(`UPDATE team_private.mail_deliveries d SET admitted_at=d.admitted_at-interval '2 minutes'
+    FROM team_private.email_challenges c WHERE d.challenge_id=c.id AND c.email_normalized=$1`, [email])
   const challenge = await call({ action: 'email_challenge', email, purpose, ...(invitation ? { invitation_token: invitation } : {}) })
   return (await call({ action: 'email_verify', challenge_id: challenge.challenge_id, code: await code(email) })).verification_receipt
 }
