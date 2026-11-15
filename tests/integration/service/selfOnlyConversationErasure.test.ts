@@ -87,14 +87,15 @@ afterAll(async()=>{
   await db?.end()
 })
 
-it.each(['dm','ai','group','topic','removed_owned_agent','other_human','other_agent'])('erases only the complete own member set: %s',async kind=>rollback(async()=>{
+it.each(['dm','ai','group','topic','removed_owned_agent','other_human','other_agent','other_archived_agent'])('erases only the complete own member set: %s',async kind=>rollback(async()=>{
   const owner=await human(),mine=await agent(owner),peer=await human(),theirs=await agent(peer)
   const source=kind==='topic'?await room('group',owner,[owner,mine,peer]):undefined
-  const members=[owner,mine,...(kind==='other_human'?[peer]:kind==='other_agent'?[theirs]:[])]
-  const target=await room(['removed_owned_agent','other_human','other_agent'].includes(kind)?'group':kind,owner,members,source)
+  const members=[owner,mine,...(kind==='other_human'?[peer]:['other_agent','other_archived_agent'].includes(kind)?[theirs]:[])]
+  const target=await room(['removed_owned_agent','other_human','other_agent','other_archived_agent'].includes(kind)?'group':kind,owner,members,source)
   if(kind==='removed_owned_agent')await db.query('UPDATE identity.users SET removed_at=now() WHERE id=$1',[mine])
+  if(kind==='other_archived_agent')await db.query('UPDATE identity.users SET archived_at=now() WHERE id=$1',[theirs])
   await db.query('DELETE FROM auth.users WHERE id=$1',[owner])
-  const retained=['other_human','other_agent'].includes(kind)
+  const retained=['other_human','other_agent','other_archived_agent'].includes(kind)
   expect((await row('SELECT count(*)::int n FROM chat.chats WHERE id=$1',[target])).n).toBe(retained?1:0)
   expect((await row('SELECT count(*)::int n FROM chat.messages WHERE chat_id=$1',[target])).n).toBe(retained?1:0)
   if(retained)expect((await row('SELECT sender_user_id FROM chat.messages WHERE chat_id=$1',[target])).sender_user_id).toBeNull()
