@@ -12,6 +12,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       enforced: ${{ steps.source.outputs.enforced }}
+      owner_enforced: ${{ steps.owner.outputs.enforced }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,6 +43,37 @@ jobs:
             echo '::notice::Migration versions not enforced: the base has no checker yet. Independent review is required for bootstrap.'
           else
             echo '::error::Incomplete migration checker in trusted source.'
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: trusted/.node-version
+      - name: Verify the owner baseline from trusted base bytes
+        id: owner
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          set -eu
+          script=scripts/ci/application-owner-baseline.mjs
+          sql=scripts/ci/application-owner-catalog.sql
+          snapshot=release/production-object-owners.json
+          if test -f "trusted/$script" && test -f "trusted/$sql" && test -f "trusted/$snapshot"; then
+            node "trusted/$script" --snapshot "trusted/$snapshot"
+            echo 'enforced=true' >> "$GITHUB_OUTPUT"
+          elif test ! -e "trusted/$script" && test ! -e "trusted/$sql" && test ! -e "trusted/$snapshot"; then
+            if test "$GITHUB_EVENT_NAME" = pull_request; then
+              latest=$(git -C trusted rev-parse --verify "refs/remotes/origin/$BASE_BRANCH^{commit}")
+              for file in "$script" "$sql" "$snapshot"; do
+                if git -C trusted cat-file -e "$latest:$file" 2>/dev/null; then
+                  echo '::error::The target branch has the owner check. Synchronize this PR to refresh its base event.'
+                  exit 1
+                fi
+              done
+            fi
+            echo 'enforced=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::Owner-baseline bootstrap: trusted-base enforcement is not installed yet; independent review is required.'
+          else
+            echo '::error::Incomplete trusted owner checker/snapshot.'
             exit 1
           fi
   migration-versions:
@@ -105,7 +137,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Test candidate migration checker offline
-        run: node --test tests/ci/migration-versions.test.mjs
+        run: node --test tests/ci/migration-versions.test.mjs tests/ci/application-owner-baseline.test.mjs
+      - name: Validate candidate owner snapshot format and policy
+        run: node scripts/ci/application-owner-baseline.mjs --snapshot release/production-object-owners.json
       - run: pnpm test
       - uses: denoland/setup-deno@v2
         with:
@@ -113,6 +147,7 @@ jobs:
       - run: pnpm check:functions
       - run: deno test --allow-env --allow-sys tests/deno/ossDirectUrl.test.ts tests/deno/textFileIngest.test.ts
   integration:
+    needs: migration-source
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -125,6 +160,15 @@ jobs:
       SUPABASE_INTERNAL_IMAGE_REGISTRY: docker.io
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          path: .owner-trusted
+          sparse-checkout: |
+            scripts/ci
+            release
+          persist-credentials: false
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -140,6 +184,18 @@ jobs:
           docker info --format '{{.RegistryConfig.Mirrors}}'
       - run: pnpm test:db:start
       - run: pnpm test:installation
+      - name: Check installed candidate application owners
+        env:
+          OWNER_ENFORCED: ${{ needs.migration-source.outputs.owner_enforced }}
+        run: |
+          set -eu
+          if test "$OWNER_ENFORCED" = true; then
+            node .owner-trusted/scripts/ci/application-owner-baseline.mjs --snapshot .owner-trusted/release/production-object-owners.json --fixture-root "$PWD"
+          else
+            test "$OWNER_ENFORCED" = false
+            echo '::notice::Bootstrap candidate test only; trusted-base owner enforcement requires this initial change to merge.'
+            node scripts/ci/application-owner-baseline.mjs --snapshot release/production-object-owners.json --fixture-root "$PWD"
+          fi
       - run: pnpm test:integration
       - if: ${{ always() }}
         run: pnpm test:db:stop
