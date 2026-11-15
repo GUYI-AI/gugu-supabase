@@ -32,6 +32,16 @@ describe('authorized CDN and origin download capabilities', () => {
     expect(f.userRpc.mock.calls).toEqual(Array(2).fill(['file_transfer_download_as', { p_ref: { message_id: 'message' }, p_as: 'reader', p_id: request }]))
     expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', false, at, { requestId: request, expiresSeconds: 60, trafficBits: 819200, direct: true })
   })
+  it.each(['application/octet-stream', 'image/png'])('can start a new %s read at the origin with one reservation request', async contentType => {
+    const freshRequest = '22222222-2222-4222-8222-222222222222', image = contentType === 'image/png'
+    const f = fixture({ content_type: contentType, download_id: freshRequest })
+    f.directSign.mockResolvedValueOnce({ url: 'https://origin.example/same-object?original', thumbUrl: image ? 'https://origin.example/same-object?thumbnail' : null, expiresAt: '2026-11-03T00:00:30Z' })
+    const row = await handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: freshRequest, origin: true })
+    expect(row).toMatchObject({ download_id: freshRequest, url: 'https://origin.example/same-object?original',
+      thumb_url: image ? 'https://origin.example/same-object?thumbnail' : null, expires_at: '2026-11-03T00:00:30Z' })
+    expect(f.userRpc).toHaveBeenCalledExactlyOnceWith('file_transfer_download_as', { p_ref: { message_id: 'message' }, p_as: 'reader', p_id: freshRequest })
+    expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', image, at, { requestId: freshRequest, expiresSeconds: 60, trafficBits: 819200, direct: true })
+  })
   it('lazily returns the authorized image thumbnail in the existing fallback response', async () => {
     const f = fixture({ content_type: 'image/png', width: 640, height: 480 })
     const primary = await handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request })
