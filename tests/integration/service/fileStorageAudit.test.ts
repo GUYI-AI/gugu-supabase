@@ -155,7 +155,7 @@ describe('committed file retention action audit', () => {
       for (const table of ['storage_action_audit','storage_action_audit_items']) {
         for (const privilege of ['SELECT','INSERT','UPDATE','DELETE']) expect(await value('SELECT has_table_privilege($1,$2,$3) AS v', [role, 'file_private.' + table, privilege])).toBe(false)
       }
-      for (const fn of ['storage_mark_audit_base(jsonb,text,text)','collect_storage_action_audit()','prune_storage_action_audit(integer)']) {
+      for (const fn of ['storage_mark_audit_base(jsonb,text,text)','collect_storage_action_audit()','prune_storage_action_audit(integer)','erase_storage_action_audit(text[])']) {
         expect(await value("SELECT has_function_privilege($1,$2,'EXECUTE') AS v", [role, 'file_private.' + fn])).toBe(false)
       }
     }
@@ -172,5 +172,57 @@ describe('committed file retention action audit', () => {
     expect(await changes()).toHaveLength(1); expect(await events()).toHaveLength(1)
     expect(await value('SELECT file_private.prune_storage_action_audit(1) AS v')).toBe(1)
     expect(await changes()).toHaveLength(0); expect(await events()).toHaveLength(0)
+  })
+  it('requires the exact private lifecycle context and refuses a caller-set erasure flag', async () => {
+    await db.query("SELECT set_config('gugu.privacy_erasure','1',true)")
+    expect((await rejected('SELECT file_private.erase_storage_action_audit($1)', [[owner]])).code).toBe('42501')
+    await db.query("INSERT INTO identity.account_lifecycle_context(transaction_id,operation,subject_user_id,delete_user_ids) VALUES(pg_current_xact_id(),'privacy_erasure',$1,$2)", [owner, [owner]])
+    expect((await rejected('SELECT file_private.erase_storage_action_audit($1)', [[member]])).code).toBe('42501')
+    await user()
+    expect((await rejected('SELECT file_private.erase_storage_action_audit($1)', [[owner]])).code).toBe('42501')
+  })
+  it('irreversibly replaces actors and clears embedded typed identity references without losing action evidence', async () => {
+    const mine = await upload(); await mark([{ item_id: mine.item }], 'permanent')
+    const [first] = await events()
+    const theirs = await upload(member); await mark([{ item_id: theirs.item }], 'permanent', member)
+    const second = (await db.query('SELECT * FROM file_private.storage_action_audit WHERE actor_user_id=$1', [member])).rows[0]
+    const agent = randomUUID(), ids = [owner, agent, 'agent_%']
+    await db.query('UPDATE file_private.storage_action_audit SET effective_actor_id=$2 WHERE id=$1', [first.id, agent])
+    await db.query('UPDATE file_private.storage_action_audit SET requested_item_ids=$2,requested_message_ids=$3 WHERE id=$1',
+      [second.id, [owner, theirs.item], ['message:' + agent, 'literal-agent_%', 'literal-agent-XY', theirs.message]])
+    await db.query('UPDATE file_private.storage_action_audit_items SET storage_id=$2,blob_id=$3,chat_id=$4,item_ids=$5,versions=$6 WHERE operation_id=$1',
+      [second.id, owner, agent, 'room:' + owner, [agent, theirs.item], [7, 1]])
+    await db.query("INSERT INTO identity.account_lifecycle_context(transaction_id,operation,subject_user_id,delete_user_ids) VALUES(pg_current_xact_id(),'privacy_erasure',$1,$2)", [owner, ids])
+    await db.query('SELECT file_private.erase_storage_action_audit($1)', [ids])
+    const read = async () => ({
+      events: (await db.query('SELECT * FROM file_private.storage_action_audit WHERE id=ANY($1) ORDER BY id', [[first.id, second.id]])).rows,
+      items: (await db.query('SELECT * FROM file_private.storage_action_audit_items WHERE operation_id=ANY($1) ORDER BY operation_id,change_no', [[first.id, second.id]])).rows,
+    })
+    const after = await read(), a = after.events.find(row => row.id === first.id)!, b = after.events.find(row => row.id === second.id)!
+    expect(a.actor_user_id).toMatch(/^erased:[0-9a-f-]{36}$/); expect(a.effective_actor_id).toBe(a.actor_user_id)
+    expect(a).toMatchObject({ action: first.action, occurred_at: first.occurred_at, changed_copy_count: first.changed_copy_count })
+    expect(b).toMatchObject({ actor_user_id: member, effective_actor_id: member, requested_item_ids: [theirs.item], requested_message_ids: ['literal-agent-XY', theirs.message] })
+    expect(after.items.find(row => row.operation_id === second.id)).toMatchObject({ storage_id: null, blob_id: null, chat_id: null, item_ids: [theirs.item], versions: [1] })
+    expect(after.events).toHaveLength(2); expect(after.items).toHaveLength(2)
+    expect(JSON.stringify(after).toLowerCase()).not.toContain(owner.toLowerCase())
+    expect(JSON.stringify(after).toLowerCase()).not.toContain(agent.toLowerCase())
+    expect(await expiry(mine.storage)).toBeNull(); expect(await expiry(theirs.storage)).toBeNull()
+    expect(Number(await value('SELECT count(*) AS v FROM chat.workspace_items WHERE id=ANY($1)', [[mine.item, theirs.item]]))).toBe(2)
+    await db.query('SELECT file_private.erase_storage_action_audit($1)', [ids])
+    expect(await read()).toEqual(after)
+  })
+  it('holds the shared owner erasure fence through the caller transaction', async () => {
+    await mark([{ class: 'kept', chat_id: group }], 'permanent')
+    const other = new pg.Client({ connectionString: url }); await other.connect()
+    try {
+      await other.query('BEGIN')
+      expect((await other.query("SELECT pg_try_advisory_xact_lock_shared(hashtextextended('identity:erase-human:'||$1::text,0)) AS v", [owner])).rows[0].v).toBe(true)
+      expect((await other.query("SELECT pg_try_advisory_xact_lock(hashtextextended('identity:erase-human:'||$1::text,0)) AS v", [owner])).rows[0].v).toBe(false)
+    } finally { await other.query('ROLLBACK'); await other.end() }
+  })
+  it('refuses a late JWT subject without a live identity before recording any action', async () => {
+    await user(randomUUID())
+    expect((await rejected('SELECT chat.file_storage_mark_as($1,$2)', [JSON.stringify([{ class: 'kept' }]), 'permanent'])).hint).toBe('file_transfer_denied')
+    await admin(); expect(await events()).toHaveLength(0)
   })
 })

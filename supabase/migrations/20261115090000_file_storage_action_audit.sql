@@ -19,9 +19,9 @@ CREATE INDEX storage_action_audit_time ON file_private.storage_action_audit(occu
 CREATE TABLE file_private.storage_action_audit_items (
     operation_id uuid NOT NULL REFERENCES file_private.storage_action_audit(id) ON DELETE CASCADE,
     change_no bigint NOT NULL,
-    storage_id uuid NOT NULL,
+    storage_id uuid,
     blob_id uuid,
-    chat_id text NOT NULL,
+    chat_id text,
     before_expires_at timestamptz,
     after_expires_at timestamptz,
     before_expired_at timestamptz,
@@ -107,12 +107,22 @@ REVOKE ALL ON FUNCTION file_private.storage_mark_audit_base(jsonb,text,text) FRO
 
 CREATE OR REPLACE FUNCTION chat.file_storage_mark_as(p_refs jsonb,p_action text,p_as text DEFAULT NULL) RETURNS integer
 LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
-DECLARE me text:=auth.uid()::text; actor text; operation uuid; n integer;
+DECLARE me text:=auth.uid()::text; actor text; operation uuid; n integer; owner_subject text;
     previous text:=current_setting('gugu.storage_audit_operation',true);
 BEGIN
     -- Same outer refusal contract as the original; per-reference authorization
     -- and all mutations are still performed by the unchanged closed base.
     IF me IS NULL THEN RAISE EXCEPTION 'Not authenticated' USING HINT='file_transfer_denied'; END IF;
+    SELECT CASE WHEN u.type='human' THEN u.id ELSE u.owner_user_id END INTO owner_subject
+    FROM identity.users u WHERE u.id=me;
+    IF owner_subject IS NULL THEN RAISE EXCEPTION 'Account is unavailable' USING HINT='file_transfer_denied'; END IF;
+    -- The Auth eraser takes the exclusive lock on this existing owner key. Let
+    -- in-flight actions commit first, and refuse a late JWT after erasure wins.
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended('identity:erase-human:'||owner_subject,0));
+    IF NOT EXISTS(SELECT 1 FROM identity.users u WHERE u.id=me
+        AND CASE WHEN u.type='human' THEN u.id ELSE u.owner_user_id END=owner_subject) THEN
+        RAISE EXCEPTION 'Account is unavailable' USING HINT='file_transfer_denied';
+    END IF;
     actor:=chat.workspace_actor_for(COALESCE(p_as,me));
     IF p_action IS NULL OR p_action NOT IN ('temporary','permanent','release') THEN
         RAISE EXCEPTION 'Invalid file storage action' USING HINT='file_transfer_invalid';
@@ -142,6 +152,45 @@ END $$;
 ALTER FUNCTION chat.file_storage_mark_as(jsonb,text,text) OWNER TO postgres;
 REVOKE ALL ON FUNCTION chat.file_storage_mark_as(jsonb,text,text) FROM PUBLIC,anon,authenticated,service_role;
 GRANT EXECUTE ON FUNCTION chat.file_storage_mark_as(jsonb,text,text) TO authenticated;
+
+-- Closed integration contract. The unified Auth erasure migration calls this
+-- before deleting its lifecycle context; this release does not wire that hook.
+CREATE FUNCTION file_private.erase_storage_action_audit(p_ids text[]) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+DECLARE erased_actor text:='erased:'||gen_random_uuid()::text; normalized text[]; patterns text[];
+BEGIN
+    IF p_ids IS NULL OR cardinality(p_ids)=0 OR EXISTS(SELECT 1 FROM unnest(p_ids) id WHERE id IS NULL OR id='')
+       OR NOT EXISTS(SELECT 1 FROM identity.account_lifecycle_context c
+           WHERE c.transaction_id=pg_current_xact_id() AND c.operation='privacy_erasure' AND c.delete_user_ids=p_ids) THEN
+        RAISE EXCEPTION 'Storage action erasure requires the auth deletion transaction' USING ERRCODE='42501';
+    END IF;
+    normalized:=ARRAY(SELECT lower(id) FROM unnest(p_ids) id);
+    -- Literal LIKE fragments: identifiers containing %, _ or a backslash must
+    -- never turn into wildcard instructions. No reverse identity map is kept.
+    patterns:=ARRAY(SELECT '%'||replace(replace(replace(id,chr(92),chr(92)||chr(92)),
+        '%',chr(92)||'%'),'_',chr(92)||'_')||'%' FROM unnest(normalized) id);
+    UPDATE file_private.storage_action_audit a SET
+        actor_user_id=CASE WHEN lower(a.actor_user_id)=ANY(normalized) THEN erased_actor ELSE a.actor_user_id END,
+        effective_actor_id=CASE WHEN lower(a.effective_actor_id)=ANY(normalized) THEN erased_actor ELSE a.effective_actor_id END,
+        requested_item_ids=ARRAY(SELECT id FROM unnest(a.requested_item_ids) id WHERE NOT (lower(id::text) LIKE ANY(patterns))),
+        requested_message_ids=ARRAY(SELECT id FROM unnest(a.requested_message_ids) id WHERE NOT (lower(id) LIKE ANY(patterns)))
+    WHERE lower(a.actor_user_id)=ANY(normalized) OR lower(a.effective_actor_id)=ANY(normalized)
+       OR EXISTS(SELECT 1 FROM unnest(a.requested_item_ids) id WHERE lower(id::text) LIKE ANY(patterns))
+       OR EXISTS(SELECT 1 FROM unnest(a.requested_message_ids) id WHERE lower(id) LIKE ANY(patterns));
+    UPDATE file_private.storage_action_audit_items a SET
+        storage_id=CASE WHEN lower(a.storage_id::text) LIKE ANY(patterns) THEN NULL ELSE a.storage_id END,
+        blob_id=CASE WHEN lower(a.blob_id::text) LIKE ANY(patterns) THEN NULL ELSE a.blob_id END,
+        chat_id=CASE WHEN lower(a.chat_id) LIKE ANY(patterns) THEN NULL ELSE a.chat_id END,
+        item_ids=ARRAY(SELECT item FROM unnest(a.item_ids,a.versions) WITH ORDINALITY pair(item,version,n)
+            WHERE NOT (lower(item::text) LIKE ANY(patterns)) ORDER BY n),
+        versions=ARRAY(SELECT version FROM unnest(a.item_ids,a.versions) WITH ORDINALITY pair(item,version,n)
+            WHERE NOT (lower(item::text) LIKE ANY(patterns)) ORDER BY n)
+    WHERE lower(a.storage_id::text) LIKE ANY(patterns) OR lower(a.blob_id::text) LIKE ANY(patterns)
+       OR lower(a.chat_id) LIKE ANY(patterns)
+       OR EXISTS(SELECT 1 FROM unnest(a.item_ids) id WHERE lower(id::text) LIKE ANY(patterns));
+END $$;
+ALTER FUNCTION file_private.erase_storage_action_audit(text[]) OWNER TO postgres;
+REVOKE ALL ON FUNCTION file_private.erase_storage_action_audit(text[]) FROM PUBLIC,anon,authenticated,service_role;
 
 CREATE FUNCTION file_private.prune_storage_action_audit(p_limit integer DEFAULT 1000) RETURNS integer
 LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$

@@ -38,9 +38,34 @@ restricted administrator read-only path, selecting only the required fields.
 
 There are no foreign keys to accounts, agents, chats, files, or live copy rows.
 Source deletion therefore cannot silently erase the evidence. The only cascade
-is from an audit header to its own details. Actor fields allow the separately
-approved subject de-identification policy; this release does not authorize
-permanent retention of original identity identifiers or invent an erasure policy.
+is from an audit header to its own details. The 180-day rule covers action
+evidence, not an exception permitting original identity IDs to survive account
+erasure. Actors must be irreversibly replaced and embedded subject IDs removed
+from typed references while action/time/count/deadline evidence remains.
+
+## Closed erasure integration contract
+
+`file_private.erase_storage_action_audit(p_ids text[]) RETURNS void` has no API
+execute grant. It requires an exact `identity.account_lifecycle_context` row for
+the current `pg_current_xact_id()`, operation `privacy_erasure`, and the full
+`delete_user_ids = p_ids` set. A caller-set flag cannot authorize it.
+
+The helper replaces matching actor/effective IDs with a random `erased:` token,
+keeps no reverse map, clears matching/embedded identity references in header IDs
+and copy/item/version references, and preserves item/version pairing. Literal
+identifiers cannot inject LIKE wildcards. Non-identifying shared references and
+the action evidence remain intact; repeated erasure is idempotent.
+
+Writers take a shared transaction lock on the existing human-owner
+`identity:erase-human:` key, then recheck identity liveness. The Auth eraser takes
+that key exclusively, so a completed erasure cannot be followed by a late JWT
+recording the original identity again.
+
+**Pending integration:** the unified Auth erasure migration must call this helper
+before deleting its private lifecycle context. This PR intentionally does not
+edit that entrypoint. Full Auth deletion, large-data erasure latency, and the
+complete concurrent Auth/write path are acceptance gates for that integration;
+direct helper tests do not stand in for them.
 
 ## Retention and cleanup
 
