@@ -78,6 +78,17 @@ describe('multipart upload state',()=>{
     const rows=(await db.query('SELECT * FROM chat.file_managed_upload_parts_expired(50)')).rows.filter(r=>[old,live,none].includes(r.staging_key))
     expect(rows).toEqual([{staging_key:old,account_id:owner,upload_id:'U-old'}])
   })
+  // upload-parts and upload-complete refuse through file_managed_upload_for: an expired permit, and an upload already sent.
+  it('the permit check the routes rely on refuses an expired permit and reports a sent upload\'s blob',async()=>{
+    const expired=await permit()
+    await db.query("UPDATE chat.file_transfer_reservations SET expires_at=now()-interval '1 second' WHERE id=(SELECT reservation_id FROM chat.file_transfer_uploads WHERE staging_key=$1)",[expired])
+    expect((await reject('SELECT chat.file_managed_upload_for($1,$2)',[expired,owner])).hint).toBe('file_transfer_expired')
+    const sent=await permit()
+    expect((await db.query('SELECT chat.file_managed_upload_for($1,$2) AS r',[sent,owner])).rows[0].r.blob_id).toBeNull()
+    await db.query('SELECT * FROM chat.file_blob_register($1,$2,$3,$4,$5)',[owner,sent,'ab'.repeat(32),60,'application/octet-stream'])
+    await db.query('SELECT chat.file_managed_upload_registered($1,$2)',[sent,owner])
+    expect((await db.query('SELECT chat.file_managed_upload_for($1,$2) AS r',[sent,owner])).rows[0].r.blob_id).toEqual(expect.any(String))
+  })
   it('is for the service only',async()=>{
     const key=await permit()
     await user(owner)
