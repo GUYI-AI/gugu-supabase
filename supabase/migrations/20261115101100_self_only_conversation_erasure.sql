@@ -28,6 +28,16 @@ BEGIN
     PERFORM 1 FROM chat.chat_members m WHERE m.chat_id=ANY(locked_rooms)
       ORDER BY m.chat_id,m.user_id FOR UPDATE;
 
+    -- Validate unsupported deep cascades before deleting any cursor row;
+    -- otherwise a UUID sort could remove a descendant before this check.
+    IF EXISTS(SELECT 1 FROM chat.chats c
+      JOIN chat.chats child ON child.source_chat_id=c.id AND child.kind='topic'
+      JOIN chat.chats nested ON nested.source_chat_id=child.id AND nested.kind='topic'
+      WHERE c.id=ANY(candidates) AND NOT EXISTS(SELECT 1 FROM chat.chat_members m
+        WHERE m.chat_id=c.id AND NOT m.user_id=ANY(p_ids))) THEN
+        RAISE EXCEPTION 'Nested source topics require explicit repair before erasure' USING ERRCODE='55000';
+    END IF;
+
     FOR room IN SELECT c.id FROM chat.chats c WHERE c.id=ANY(candidates)
       ORDER BY COALESCE(c.source_chat_id,c.id),(c.source_chat_id IS NOT NULL),c.id
     LOOP
@@ -41,13 +51,6 @@ BEGIN
         IF EXISTS(SELECT 1 FROM chat.chats t JOIN chat.chat_members m ON m.chat_id=t.id
           WHERE t.source_chat_id=room.id AND NOT m.user_id=ANY(p_ids)) THEN
             RAISE EXCEPTION 'A source conversation has surviving topic participants' USING ERRCODE='55000';
-        END IF;
-        -- Product topic creation rejects topics of topics. Do not let an
-        -- inconsistent nested chain evade the one-level participant/object
-        -- checks through a deeper foreign-key cascade.
-        IF EXISTS(SELECT 1 FROM chat.chats child JOIN chat.chats nested ON nested.source_chat_id=child.id
-          WHERE child.source_chat_id=room.id) THEN
-            RAISE EXCEPTION 'Nested source topics require explicit repair before erasure' USING ERRCODE='55000';
         END IF;
 
         WITH rooms AS (SELECT room.id AS id UNION SELECT t.id FROM chat.chats t WHERE t.source_chat_id=room.id),
