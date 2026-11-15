@@ -3,13 +3,18 @@ import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
 
 let db: pg.Client
+let previousRegion: string | null
 const hash = (s: string) => createHash('sha256').update(s).digest('hex')
 beforeAll(async () => {
   const url = new URL(process.env.GUGU_INTEGRATION_DATABASE_URL ?? '')
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw Error('Disposable loopback database required')
   db = new pg.Client({ connectionString: url.href }); await db.connect()
 })
-beforeEach(async () => { await db.query('BEGIN'); await db.query("UPDATE team_private.deployment SET region='cn' WHERE singleton") })
+beforeEach(async () => {
+  await db.query('BEGIN')
+  previousRegion = (await db.query('SELECT region FROM team_private.deployment WHERE singleton')).rows[0].region
+  await db.query("UPDATE team_private.deployment SET region='cn' WHERE singleton")
+})
 afterEach(async () => { await db.query('ROLLBACK') })
 afterAll(async () => { await db?.end() })
 const rpc = async (name: string, args: unknown[]) => (await db.query(`SELECT public.${name}(${args.map((_, i) => '$' + (i + 1)).join(',')}) r`, args)).rows[0].r
@@ -26,7 +31,7 @@ async function founder() {
   }])
   await rpc('team_account_provision', ['activate', { member_id: p.plan.member_id, principal_id: p.plan.principal_id }])
   const session = randomUUID(); await db.query('INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())', [session, p.plan.principal_id])
-  return { id: p.plan.principal_id, session, team: p.plan.team_id, member: p.plan.member_id }
+  return { id: p.plan.principal_id, session, team: p.plan.team_id, member: p.plan.member_id, email: address }
 }
 type Actor = Awaited<ReturnType<typeof founder>>
 async function invitation(actor: Actor, email = randomUUID() + '@recipient.invalid', key = randomUUID()) {
@@ -87,6 +92,8 @@ it('claims once and never counts a replay as another send attempt', async () => 
   const result = await rpc('team_mail_delivery', ['finish', { delivery_id: first.delivery_id, lease_token: first.lease_token, state: 'accepted', reason_code: 'smtp_accepted' }])
   expect(result.state).toBe('accepted')
   expect(await delivery(i)).toMatchObject({ state: 'accepted', claimed: false })
+  await db.query("UPDATE team_private.invitations SET state='accepted',expires_at=now()-interval '1 second' WHERE id=$1", [i.invitation_id])
+  expect(await delivery(i, 'prepare')).toMatchObject({ state: 'accepted', claimed: false })
 })
 
 it('does not automatically reclaim unknown outcomes or expired sending leases', async () => {
@@ -154,4 +161,69 @@ it('keeps independent recipient cooldowns and reserves global capacity for OTP',
 it('rejects incomplete or nonpositive policy changes rather than disabling admission', async () => {
   expect((await refused(() => policy({ global_short: 0 }))).code).toBe('23514')
   expect((await refused(() => db.query("UPDATE team_private.delivery_configuration SET mail_policy='{}'"))).code).toBe('23514')
+})
+
+async function overlapping(firstSql: string, firstArgs: unknown[], secondSql: string, secondArgs: unknown[]) {
+  const a = new pg.Client({ connectionString: process.env.GUGU_INTEGRATION_DATABASE_URL }), b = new pg.Client({ connectionString: process.env.GUGU_INTEGRATION_DATABASE_URL })
+  try {
+    await a.connect(); await b.connect()
+    const pid = (await b.query('SELECT pg_backend_pid() pid')).rows[0].pid
+    await a.query('BEGIN'); await b.query('BEGIN')
+    const first = (await a.query(firstSql, firstArgs)).rows[0].r
+    const second = b.query(secondSql, secondArgs).then(value => ({ value, error: null }), error => ({ value: null, error }))
+    let blocked = false
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      if ((await db.query("SELECT wait_event_type='Lock' blocked FROM pg_stat_activity WHERE pid=$1", [pid])).rows[0]?.blocked) { blocked = true; break }
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    expect(blocked, 'the second independent connection must actually wait for the first transaction').toBe(true)
+    await a.query('COMMIT')
+    const outcome = await second
+    await b.query('ROLLBACK')
+    return { first, outcome }
+  } finally {
+    await Promise.allSettled([a.query('ROLLBACK'), b.query('ROLLBACK')])
+    await Promise.allSettled([a.end(), b.end()])
+  }
+}
+async function removeCommittedFixture(owner: Actor, previousPolicy: unknown) {
+  await db.query('BEGIN')
+  await db.query('DELETE FROM team_private.mail_deliveries WHERE team_id=$1', [owner.team])
+  await db.query('DELETE FROM team_private.email_challenges WHERE team_id=$1 OR email_normalized=$2', [owner.team, owner.email])
+  await db.query('DELETE FROM team_private.member_operations WHERE team_id=$1', [owner.team])
+  await db.query('DELETE FROM team_private.asset_custody WHERE team_id=$1', [owner.team])
+  await db.query('DELETE FROM team_private.invitations WHERE team_id=$1', [owner.team])
+  await db.query('DELETE FROM team_private.members WHERE team_id=$1', [owner.team])
+  await db.query('DELETE FROM team_private.teams WHERE id=$1', [owner.team])
+  await db.query('DELETE FROM auth.users WHERE id=$1', [owner.id])
+  await db.query('UPDATE team_private.delivery_configuration SET mail_policy=$1::jsonb WHERE singleton', [previousPolicy])
+  await db.query('UPDATE team_private.deployment SET region=$1 WHERE singleton', [previousRegion])
+  await db.query('COMMIT')
+  await db.query('BEGIN') // afterEach retains its normal rollback boundary.
+}
+
+it('prevents simultaneous invitation creation from exceeding a one-slot team cap', async () => {
+  const previous = (await db.query('SELECT mail_policy FROM team_private.delivery_configuration WHERE singleton')).rows[0].mail_policy
+  const owner = await founder(); await policy({ max_pending: 1 }); await db.query('COMMIT')
+  try {
+    const body = () => ({ email: randomUUID() + '@concurrent.invalid', role: 'member', idempotency_key: randomUUID() })
+    const result = await overlapping('SELECT public.team_member_workflow($1,$2,$3,$4) r', ['invite', owner.id, owner.session, body()],
+      'SELECT public.team_member_workflow($1,$2,$3,$4) r', ['invite', owner.id, owner.session, body()])
+    expect(result.first.invitation_id).toBeTruthy(); expect(result.outcome.error?.hint).toBe('invitation_limit_reached')
+    expect((await db.query('SELECT count(*)::int n FROM team_private.invitations WHERE team_id=$1', [owner.team])).rows[0].n).toBe(1)
+  } finally { await removeCommittedFixture(owner, previous) }
+})
+
+it('serializes simultaneous claims at the invitation share of the global bucket', async () => {
+  const previous = (await db.query('SELECT mail_policy FROM team_private.delivery_configuration WHERE singleton')).rows[0].mail_policy
+  const owner = await founder(), first = await invitation(owner), second = await invitation(owner)
+  await policy({ global_short: 2, invitation_global_percent: 50 }); await db.query('COMMIT')
+  try {
+    const sql = "SELECT public.team_mail_delivery('claim',$1,$2,$3,NULL) r"
+    const args = (i: Invitation) => [{ kind: 'invitation', invitation_id: i.invitation_id }, owner.id, owner.session]
+    const result = await overlapping(sql, args(first), sql, args(second))
+    expect(result.first.claimed).toBe(true); expect(result.outcome.error?.hint).toBe('rate_limited')
+    expect((await db.query('SELECT count(*)::int n FROM team_private.mail_deliveries WHERE team_id=$1 AND admitted_at IS NOT NULL', [owner.team])).rows[0].n).toBe(1)
+  } finally { await removeCommittedFixture(owner, previous) }
 })

@@ -97,7 +97,7 @@ DECLARE actor team_private.members%ROWTYPE; invitation team_private.invitations%
   address text; recipient text; tid uuid; inviter uuid; key text; policy jsonb;
   stamp timestamptz:=clock_timestamp(); short_from timestamptz; daily_from timestamptz;
   count_short bigint; count_daily bigint; invitation_short bigint; invitation_daily bigint;
-  latest timestamptz; claimed boolean:=false; outcome text;
+  latest timestamptz; claimed boolean:=false; outcome text; existing_state text;
 BEGIN
   IF p_action='finish' THEN
     -- A legitimate in-flight send must be recorded even if its caller has since
@@ -128,7 +128,9 @@ BEGIN
     SELECT * INTO invitation FROM team_private.invitations WHERE id=(p_input->>'invitation_id')::uuid FOR UPDATE;
     IF invitation.id IS NULL OR actor.role NOT IN ('superadmin','admin') OR invitation.team_id<>actor.team_id
       OR invitation.created_by_member_id<>actor.id THEN PERFORM team_private.refuse('forbidden',403); END IF;
-    IF invitation.state<>'invited' OR invitation.expires_at<=stamp OR invitation.token_digest IS NULL THEN
+    SELECT state INTO existing_state FROM team_private.mail_deliveries WHERE invitation_id=invitation.id;
+    IF (invitation.state<>'invited' OR invitation.expires_at<=stamp OR invitation.token_digest IS NULL)
+      AND COALESCE(existing_state,'pending')='pending' THEN
       PERFORM team_private.refuse('invitation_invalid',404);
     END IF;
     address:=invitation.email_normalized; tid:=invitation.team_id; inviter:=actor.id;
