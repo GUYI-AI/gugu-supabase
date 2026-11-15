@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { prepareAuthAuditFixtureIndex } from './auth-audit-fixture-index.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const project = 'gugucommunitytest' + createHash('sha256').update(root).digest('hex').slice(0, 10)
@@ -81,5 +82,6 @@ pop3_port = ${port + 3}` : ''}
   if (binding !== '127.0.0.1:' + port) throw new Error('Fixture database is not bound exclusively to loopback; stop this fixture before continuing')
   const apiBinding = execFileSync('docker', ['port', 'supabase_kong_' + project, '8000/tcp'], { encoding: 'utf8' }).trim()
   if (apiBinding !== '127.0.0.1:' + (port - 1)) throw new Error('Fixture API is not bound exclusively to loopback; stop this fixture before continuing')
+  prepareAuthAuditFixtureIndex(root)
   console.log(`Fixture ready: set GUGU_INSTALL_TEST_DATABASE_URL and GUGU_INTEGRATION_DATABASE_URL to postgresql://postgres:postgres@127.0.0.1:${port}/postgres?sslmode=disable`)
 }
