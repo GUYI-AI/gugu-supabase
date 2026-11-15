@@ -22,8 +22,9 @@ async function human(real=false){
   ownedUsers.push(id);return id
 }
 async function agent(owner:string){
-  const id=randomUUID()
-  await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id)VALUES($1,'agent','Erasure fixture',$2)",[id,owner])
+  const id=randomUUID(),device=randomUUID()
+  await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform)VALUES($1,$2,'fixture','fixture','linux')",[device,owner])
+  await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id,desired_status)VALUES($1,'agent','Erasure fixture',$2,$3,'offline')",[id,owner,device])
   return id
 }
 async function room(kind:string,owner:string,members:string[],source?:string){
@@ -73,7 +74,12 @@ afterEach(async()=>{
   await db.query('DELETE FROM auth.users WHERE id=ANY($1::uuid[])',[ownedUsers])
   await db.query('DELETE FROM identity.account_audit_redaction_jobs WHERE source_subject_id=ANY($1::text[])',[ownedUsers])
   await db.query("DELETE FROM chat.file_blobs WHERE bucket_id='workspace' AND object_name=ANY($1::text[])",[ownedObjects])
-  await db.query("DELETE FROM storage.objects WHERE bucket_id='workspace' AND name=ANY($1::text[])",[ownedObjects])
+  if(ownedObjects.length&&(await row("SELECT count(*)::int n FROM storage.objects WHERE bucket_id='workspace' AND name=ANY($1::text[])",[ownedObjects])).n){
+    const removed=await fetch(api+'/storage/v1/object/workspace',{method:'DELETE',
+      headers:{apikey:service,authorization:'Bearer '+service,'content-type':'application/json'},
+      body:JSON.stringify({prefixes:ownedObjects}),signal:AbortSignal.timeout(15000)})
+    expect(removed.ok).toBe(true);await removed.body?.cancel()
+  }
   ownedUsers.length=ownedRooms.length=ownedObjects.length=0
 })
 afterAll(async()=>{
