@@ -44,7 +44,12 @@ it('has a ready expression index, pure helper permissions and closed erasure per
   expect(fn).toMatchObject({ provolatile: 'i', proparallel: 's', prosecdef: false })
   for (const role of ['authenticated', 'service_role']) expect((await db.query(`SELECT has_function_privilege($1,
     'identity.command_erasure_references_v1(text,jsonb)','EXECUTE') allowed`, [role])).rows[0].allowed).toBe(true)
-  expect((await db.query(`SELECT has_function_privilege('anon','identity.command_erasure_references_v1(text,jsonb)','EXECUTE') allowed`)).rows[0].allowed).toBe(false)
+  const writers = (await db.query(`SELECT rolname,has_function_privilege(rolname,
+    'identity.command_erasure_references_v1(text,jsonb)','EXECUTE') allowed FROM pg_roles
+    WHERE has_table_privilege(rolname,'identity.gugu_device_commands','INSERT')
+       OR has_table_privilege(rolname,'identity.gugu_device_commands','UPDATE')`)).rows
+  expect(writers.length).toBeGreaterThan(0)
+  for (const writer of writers) expect(writer.allowed, writer.rolname).toBe(true)
   for (const role of ['anon', 'authenticated', 'service_role']) expect((await db.query(`SELECT has_function_privilege($1,
     'identity.erase_human_account(text)','EXECUTE') allowed`, [role])).rows[0].allowed).toBe(false)
 })

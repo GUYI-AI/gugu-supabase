@@ -4,7 +4,7 @@ Account erasure must finish within the Auth HTTP deadline without weakening hist
 
 The new pure, immutable projection includes exactly the existing JSON-reference branches: agent ID; sender ID only for `agent.deliver`/`agent.wake`; reply author ID; and `jsonb_array_elements_text` recipient values. It deliberately retains legacy non-string recipient conversion semantics. Owner UUID matching remains a separate condition and can use the existing owner index.
 
-One GIN expression index covers this small reference array. Message text, result bodies and unrelated command JSON are excluded. No message-table index is added. The helper reads no tables; legitimate writers may execute it to evaluate index expressions. The account-erasure function remains closed to API roles.
+One GIN expression index covers this small reference array. Message text, result bodies and unrelated command JSON are excluded. No message-table index is added. The helper reads no tables; all existing roles with table INSERT/UPDATE privileges may execute it to evaluate index expressions, with a catalog test covering every writer (including service/trigger roles). The account-erasure function remains closed to API roles.
 
 All command statements use the indexed projection while retaining their original mutation predicates and payload transformations. Each statement keeps its own snapshot; no cached candidate-ID array can omit a command that becomes visible between statements. The existing chat → command → identity/device lock order and sorted command locking remain unchanged.
 

@@ -17,3 +17,16 @@ REVOKE ALL ON FUNCTION identity.command_erasure_references_v1(text,jsonb) FROM P
 -- This function only projects the value supplied by its caller. It reads no
 -- tables and confers no new authority. Writers need EXECUTE for index evaluation.
 GRANT EXECUTE ON FUNCTION identity.command_erasure_references_v1(text,jsonb) TO authenticated,service_role;
+-- Index expressions also run for service/trigger writers, not just API users.
+-- This pure function exposes only its input. Keep every existing table writer
+-- compatible, and enforce the same invariant for future roles in schema tests.
+DO $writers$
+DECLARE writer record;
+BEGIN
+    FOR writer IN SELECT rolname FROM pg_roles
+        WHERE has_table_privilege(rolname,'identity.gugu_device_commands','INSERT')
+           OR has_table_privilege(rolname,'identity.gugu_device_commands','UPDATE')
+    LOOP
+        EXECUTE format('GRANT EXECUTE ON FUNCTION identity.command_erasure_references_v1(text,jsonb) TO %I',writer.rolname);
+    END LOOP;
+END $writers$;
