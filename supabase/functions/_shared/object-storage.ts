@@ -16,6 +16,26 @@ export interface UploadPlan {
   headers?: Record<string, string>
 }
 
+/** One part of a multipart upload: a PUT the client sends as given, its length bound into the signature. */
+export interface SignedPart { n: number; bytes: number; url: string; headers: Record<string, string> }
+/**
+ * Multipart uploads of one staging key, for a store that can sign each part. No method lists the store: which upload
+ * belongs to a key and which parts arrived are kept in the database.
+ */
+export interface MultipartStorage {
+  /** A new multipart upload of `key`, which may not overwrite an existing object; returns its upload id. */
+  open(key: string): Promise<string>
+  /** A signed PUT for each part, its length bound into the signature. */
+  sign(key: string, uploadId: string, parts: Array<{ n: number; bytes: number }>): Promise<SignedPart[]>
+  /**
+   * Joins the parts that arrived, without overwriting, then reads the object's size. An upload that is already joined
+   * or gone is not an error: the answer is the size of the object at `key`, or null when there is none.
+   */
+  complete(key: string, uploadId: string): Promise<number | null>
+  /** Abandons an unfinished upload and frees its parts. An upload that no longer exists counts as abandoned. */
+  abandon(key: string, uploadId: string): Promise<void>
+}
+
 /** Primary blob storage. Database bucket tag "oss" is retained for existing records. */
 export interface AttachmentObjectStorage {
   uploadBounds(requestedBytes: number, requestedSeconds: number): Promise<{maxBytes:number;expiresSeconds:number}>
@@ -28,4 +48,6 @@ export interface AttachmentObjectStorage {
   remove(key: string): Promise<void>
   sign(key: string, image: boolean, now: Date, permit?: DownloadPermit): Promise<{ url: string; thumbUrl: string | null; expiresAt: string; originAvailable?: boolean }>
   invalidate(key: string, image: boolean): Promise<void>
+  /** Only a store that can sign each part has this; the others are always uploaded in one request. */
+  parts?: MultipartStorage
 }

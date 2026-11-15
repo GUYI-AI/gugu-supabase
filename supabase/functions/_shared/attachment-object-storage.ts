@@ -2,7 +2,7 @@ import {
   type CdnConfig, type FetchLike, type OssConfig, CDN_SIGN_TTL_SECONDS, MAX_ATTACHMENT_BYTES,
   cdnSignedUrl, ossCopy, ossDelete, ossExists, ossRequest, ossSignedRequest, postObjectForm, refreshCdn,
 } from './oss.ts'
-import { type AttachmentObjectStorage, ObjectStorageError } from './object-storage.ts'
+import { type AttachmentObjectStorage, type MultipartStorage, ObjectStorageError } from './object-storage.ts'
 import { type Inspector, inspectFileStream } from './file-inspection.ts'
 
 /** Bytes are read by the file service (`inspector`) from a request signed here; this Edge worker only copies by ETag. */
@@ -41,8 +41,53 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
       return {...signed,...(permit&&config.directSign?{originAvailable:true}:{})}
     },
     invalidate: async (key, image) => { await refreshCdn(oss, fetch, cdn, key, image) },
+    parts: ossMultipart(oss, fetch),
   }
   return store
+}
+
+/**
+ * OSS multipart uploads, as the runtime key was probed to allow on the bucket (initiate, upload part, complete-all,
+ * abort). Every key goes through `objectKey` inside the signer, so a deployment's prefix applies like everywhere else.
+ */
+function ossMultipart(oss: OssConfig, fetch: FetchLike): MultipartStorage {
+  const answer = async (response: Response, ok: number[], what: string) => {
+    const body = await response.text()
+    if (!ok.includes(response.status)) {
+      throw new ObjectStorageError(response.status, /<Code>([^<]+)<\/Code>/.exec(body)?.[1] ?? null, `OSS ${what}: ${response.status}`)
+    }
+    return body
+  }
+  return {
+    open: async (key) => {
+      const response = await ossRequest(oss, fetch, { method: 'POST', key, query: { uploads: '' }, headers: { 'x-oss-forbid-overwrite': 'true' }, internal: true })
+      const id = /<UploadId>([^<]+)<\/UploadId>/.exec(await answer(response, [200], 'initiate multipart upload'))?.[1]
+      if (!id) throw new ObjectStorageError(502, null, 'OSS answered a multipart upload without its id')
+      return id
+    },
+    // The part number and upload id are in the signed query, so only these parts of this upload can be sent; the
+    // length is a signed header, so a longer or shorter body is refused by OSS before it is stored.
+    sign: (key, uploadId, parts) => Promise.all(parts.map(async ({ n, bytes }) => ({
+      n, bytes,
+      ...await ossSignedRequest(oss, { method: 'PUT', key, query: { partNumber: String(n), uploadId }, headers: { 'content-length': String(bytes) }, additional: ['content-length'] }),
+    }))),
+    complete: async (key, uploadId) => {
+      // complete-all joins what arrived without a part list; joining again answers NoSuchUpload, an existing object
+      // FileAlreadyExists. Either way the object's size decides.
+      const joined = await ossRequest(oss, fetch, { method: 'POST', key, query: { uploadId }, internal: true,
+        headers: { 'x-oss-complete-all': 'yes', 'x-oss-forbid-overwrite': 'true' } })
+      await answer(joined, [200, 404, 409], 'complete multipart upload')
+      const head = await ossRequest(oss, fetch, { method: 'HEAD', key, internal: true })
+      await head.body?.cancel()
+      if (head.status === 404) return null
+      const size = Number(head.headers.get('content-length'))
+      if (head.status !== 200 || !Number.isSafeInteger(size)) throw new ObjectStorageError(head.status === 200 ? 502 : head.status, null, `OSS HEAD ${key}: ${head.status}`)
+      return size
+    },
+    abandon: async (key, uploadId) => {
+      await answer(await ossRequest(oss, fetch, { method: 'DELETE', key, query: { uploadId }, internal: true }), [204, 404], 'abort multipart upload')
+    },
+  }
 }
 
 export interface SupabaseObjectConfig {

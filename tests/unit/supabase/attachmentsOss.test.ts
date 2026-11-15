@@ -307,7 +307,7 @@ function fakes(opts: {
     serviceRpc: async (fn, args) => {
       order.push('service:' + fn)
       if (fn==='file_managed_upload_for') {controls.push({as:'service',fn,args});return {data:{max_bytes:MAX_ATTACHMENT_BYTES},error:null}}
-      if (fn==='file_managed_upload_registered'||fn==='file_transfer_expire'||fn==='file_temporary_expire') {controls.push({as:'service',fn,args});return {data:null,error:null}}
+      if (fn==='file_managed_upload_registered'||fn==='file_transfer_expire'||fn==='file_temporary_expire'||fn==='file_managed_upload_parts_expired') {controls.push({as:'service',fn,args});return {data:null,error:null}}
       if (fn==='file_transfer_settings') {controls.push({as:'service',fn,args});return {data:{},error:null}}
       rpcs.push({ as: 'service', fn, args })
       if (fn === 'file_blob_register') {

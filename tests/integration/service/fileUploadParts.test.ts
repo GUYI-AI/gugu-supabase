@@ -1,0 +1,89 @@
+// Multipart upload state (20261115190000): the store's upload id and the parts reported done, kept per staging key.
+import { randomUUID } from 'node:crypto'
+import pg from 'pg'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
+const settings = {
+  inventory_ready:true,
+  storage_global_bytes: 1000, storage_account_bytes: 800, storage_group_bytes: 700,
+  download_global_bytes: 1000, download_account_bytes: 800, download_group_bytes: 700,
+  upload_permit_seconds: 120,
+  sign_window_seconds: 60, sign_account_count: 100, sign_group_count: 100,
+  file_max_bytes: 600,
+}
+let db: pg.Client
+let baselineGlobalStorage: number
+let owner: string, member: string, outsider: string, group: string
+async function user(id: string) {
+  await db.query('SET LOCAL ROLE authenticated')
+  await db.query("SELECT set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: id, role: 'authenticated' })])
+}
+async function service() { await db.query('RESET ROLE') }
+async function reject(sql: string, args: unknown[] = []) {
+  await db.query('SAVEPOINT denied')
+  try { await db.query(sql, args) } catch (e) {
+    await db.query('ROLLBACK TO SAVEPOINT denied')
+    return e as pg.DatabaseError
+  }
+  throw new Error('Expected rejection: ' + sql)
+}
+beforeAll(async () => {
+  if (!['localhost', '127.0.0.1', '[::1]'].includes(new URL(url).hostname)) throw new Error('File policy tests require a disposable loopback database')
+  db = new pg.Client({ connectionString: url }); await db.connect()
+})
+afterAll(async () => { await db?.end() })
+beforeEach(async () => {
+  await db.query('BEGIN')
+  owner = randomUUID(); member = randomUUID(); outsider = randomUUID(); group = randomUUID()
+  for (const id of [owner, member, outsider]) {
+    await db.query('INSERT INTO auth.users(id,aud,role,email,raw_app_meta_data,raw_user_meta_data,created_at,updated_at) VALUES($1,\'authenticated\',\'authenticated\',$2,\'{"provider":"email"}\',\'{}\',now(),now())', [id, id + '@file-policy.invalid'])
+  }
+  await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'group','file policy',$2)", [group, owner])
+  await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [group, owner, member])
+  // Preserve the exact tested headroom when other suites have committed legitimate objects.
+  baselineGlobalStorage=Number((await db.query("SELECT chat.file_transfer_usage('upload','global','*') AS n")).rows[0].n)
+  await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=EXCLUDED.settings", [{...settings,storage_global_bytes:baselineGlobalStorage+settings.storage_global_bytes}])
+})
+afterEach(async () => { await db.query('ROLLBACK') })
+const PARTS='SELECT chat.file_managed_upload_parts($1,$2,$3,$4) AS r'
+async function permit(actor=owner) {
+  await user(actor)
+  const p=(await db.query('SELECT chat.file_managed_upload_as($1,$2,$3,$4) AS r',[randomUUID(),group,actor,60])).rows[0].r
+  await service()
+  return p.staging_key as string
+}
+const parts=async(key:string,id:string|null,done:number[]=[],account=owner)=>(await db.query(PARTS,[key,account,id,done])).rows[0].r
+describe('multipart upload state',()=>{
+  it('records the first upload id only, and merges reported parts in order without repeats',async()=>{
+    const key=await permit()
+    expect(await parts(key,null)).toEqual({upload_id:null,parts_done:[]})
+    expect(await parts(key,null,[1])).toEqual({upload_id:null,parts_done:[]})
+    expect(await parts(key,'U1')).toEqual({upload_id:'U1',parts_done:[]})
+    expect(await parts(key,'U2',[3,1,1])).toEqual({upload_id:'U1',parts_done:[1,3]})
+    expect(await parts(key,null,[2])).toEqual({upload_id:'U1',parts_done:[1,2,3]})
+    expect((await reject(PARTS,[key,member,'U1',[]])).hint).toBe('file_transfer_denied')
+  })
+  it('clears only the recorded upload, so a late clear of an old one keeps the new one',async()=>{
+    const key=await permit()
+    await parts(key,'U1',[1,2])
+    await db.query('SELECT chat.file_managed_upload_parts_clear($1,$2,$3)',[key,owner,'U0'])
+    expect(await parts(key,null)).toEqual({upload_id:'U1',parts_done:[1,2]})
+    await db.query('SELECT chat.file_managed_upload_parts_clear($1,$2,$3)',[key,owner,'U1'])
+    expect(await parts(key,null)).toEqual({upload_id:null,parts_done:[]})
+  })
+  it('lists the uploads whose permit expired, and only those that have an upload id',async()=>{
+    const [old,live,none]=[await permit(),await permit(),await permit()]
+    await parts(old,'U-old');await parts(live,'U-live')
+    await db.query("UPDATE chat.file_transfer_reservations SET expires_at=now()-interval '1 second' WHERE id IN (SELECT reservation_id FROM chat.file_transfer_uploads WHERE staging_key=ANY($1))",[[old,none]])
+    const rows=(await db.query('SELECT * FROM chat.file_managed_upload_parts_expired(50)')).rows.filter(r=>[old,live,none].includes(r.staging_key))
+    expect(rows).toEqual([{staging_key:old,account_id:owner,upload_id:'U-old'}])
+  })
+  it('is for the service only',async()=>{
+    const key=await permit()
+    await user(owner)
+    for(const [sql,args] of [[PARTS,[key,owner,'U1',[]]],['SELECT chat.file_managed_upload_parts_clear($1,$2,$3)',[key,owner,'U1']],
+      ['SELECT * FROM chat.file_managed_upload_parts_expired(1)',[]]] as const) {
+      expect((await reject(sql,[...args])).code).toBe('42501')
+    }
+  })
+})
