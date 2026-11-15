@@ -19,9 +19,10 @@ export function prepareAuthAuditFixtureIndex(root, run = execFileSync) {
   if (binding !== '127.0.0.1:' + owner.port) throw new Error('Auth audit fixture is not owned loopback')
   const sql = readFileSync(path.join(root, 'ops/auth-audit-retention-index.sql'), 'utf8')
   try {
-    run('docker', ['exec', '-i', container, 'psql', '-X', '-U', 'supabase_auth_admin', '-d', 'postgres',
-      '-v', 'ON_ERROR_STOP=1', '-P', 'pager=off'], { input: sql, stdio: ['pipe', 'pipe', 'pipe'], timeout: 125_000 })
-  } catch {
-    throw new Error('Auth audit fixture index preparation failed; no automatic drop or rebuild was attempted')
+    run('docker', ['exec', '-i', container, 'psql', '-X', '-U', 'supabase_admin', '-d', 'postgres',
+      '-v', 'ON_ERROR_STOP=1', '-v', 'VERBOSITY=sqlstate', '-P', 'pager=off'], { input: sql, stdio: ['pipe', 'pipe', 'pipe'], timeout: 125_000 })
+  } catch (error) {
+    const state = error?.stderr?.toString().match(/ERROR:\s+([A-Z0-9]{5})\b/)?.[1] ?? 'unavailable'
+    throw new Error('Auth audit fixture index preparation failed (SQLSTATE=' + state + '); no automatic drop or rebuild was attempted')
   }
 }

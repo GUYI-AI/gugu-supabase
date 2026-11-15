@@ -24,7 +24,7 @@ test('fixture preparation targets only its owned loopback platform owner, withou
   })
   assert.equal(calls.length, 2)
   assert.equal(calls[1].program, 'docker')
-  assert.deepEqual(calls[1].args.slice(0, 9), ['exec', '-i', 'supabase_db_' + owner.project, 'psql', '-X', '-U', 'supabase_auth_admin', '-d', 'postgres'])
+  assert.deepEqual(calls[1].args.slice(0, 9), ['exec', '-i', 'supabase_db_' + owner.project, 'psql', '-X', '-U', 'supabase_admin', '-d', 'postgres'])
   assert.ok(!calls[1].args.includes('-c'))
   assert.equal(calls[1].options.stdio[2], 'pipe')
   const sql = calls[1].options.input

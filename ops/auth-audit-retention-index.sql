@@ -1,6 +1,7 @@
 -- Fixed platform-owner preparation. Run with psql -X -v ON_ERROR_STOP=1,
 -- outside an explicit transaction; psql sends CREATE as its own request.
 -- Never pass this entire script as one driver query or wrap it in BEGIN.
+SET ROLE supabase_auth_admin;
 SET lock_timeout='100ms';
 SET statement_timeout='120s';
 SET search_path=pg_catalog;
@@ -9,7 +10,7 @@ BEGIN
     IF current_setting('server_version_num')::integer<170000 THEN
         RAISE EXCEPTION 'Auth audit preparation requires PostgreSQL 17';
     END IF;
-    IF current_user<>'supabase_auth_admin'
+    IF session_user<>'supabase_admin' OR current_user<>'supabase_auth_admin'
        OR (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='auth.audit_log_entries'::regclass)<>current_user THEN
         RAISE EXCEPTION 'Auth audit preparation requires its existing platform owner';
     END IF;
@@ -27,6 +28,7 @@ BEGIN
         RAISE EXCEPTION 'Existing Auth audit time index is invalid or differs; stop for review';
     END IF;
 END $before$;
+SELECT count(*) AS existing_indexes FROM pg_class WHERE oid=to_regclass('auth.audit_log_entries_created_at_id_idx');
 CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_entries_created_at_id_idx ON auth.audit_log_entries USING btree (created_at,id);
 DO $after$
 BEGIN
