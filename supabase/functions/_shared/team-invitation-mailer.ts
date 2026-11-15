@@ -2,13 +2,16 @@ import { normalizedTeamEmail } from './team-accounts-contract.ts';
 import type { InvitationMail, InvitationMailer } from './team-mail-flow.ts';
 
 type Configuration = { host: string; port: number; user: string; password: string; from: string;
-  mode: 'starttls' | 'implicit_tls'; testRecipient: string };
+  mode: 'starttls' | 'implicit_tls' };
 type Transport = { sendMail(message: Record<string, unknown>): Promise<any>; close(): void };
 export type InvitationSmtpFactory = (options: Record<string, any>) => Promise<Transport> | Transport;
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 function mailbox(value: unknown): string {
+  if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/.test(value)) throw Error('Invalid mailbox');
   const address = normalizedTeamEmail(value);
-  if (/[(),;:"\\\[\]]/.test(address)) throw Error('A single mailbox is required');
+  const [local, domain] = address.split('@');
+  if (/[(),;:"\\\[\]*?]/.test(address) || local.startsWith('.') || local.endsWith('.') || local.includes('..')
+    || domain.split('.').some(label => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) throw Error('A single mailbox is required');
   return address;
 }
 
@@ -22,7 +25,7 @@ function configuration(get: (name: string) => string | undefined): Configuration
       || !user || user.length > 254 || /[\r\n\0]/.test(user) || !password || password.length > 4096
       || !['starttls', 'implicit_tls'].includes(mode ?? '')) return null;
     return { host, port: Number(port), user, password, mode: mode as Configuration['mode'],
-      from: mailbox(get('TEAM_INVITE_SMTP_FROM')), testRecipient: mailbox(get('TEAM_INVITE_TEST_RECIPIENT')) };
+      from: mailbox(get('TEAM_INVITE_SMTP_FROM')) };
   } catch { return null; }
 }
 
@@ -54,14 +57,28 @@ async function smtpFactory(options: Record<string, any>): Promise<Transport> {
 }
 export function teamInvitationMailer(get: (name: string) => string | undefined, create: InvitationSmtpFactory = smtpFactory): InvitationMailer {
   const config = configuration(get);
+  const enabled = get('TEAM_INVITE_MAIL_ENABLED') === 'true';
+  let recipients: Set<string> | null = null;
+  try {
+    const raw = get('TEAM_INVITE_TEST_RECIPIENT');
+    if (!raw || raw.length > 8192 || /[\u0000-\u001f\u007f]/.test(raw)) throw Error('Invalid recipient list');
+    const entries = raw.split(',');
+    if (entries.length > 100) throw Error('Invalid recipient list');
+    recipients = new Set(entries.map(mailbox));
+  } catch { /* Missing or malformed lists never mean unrestricted sending. */ }
+  const recipientPolicy = (to: string): 'off' | 'allowed' | 'blocked' => {
+    if (!enabled) return 'off';
+    try { return recipients?.has(mailbox(to)) ? 'allowed' : 'blocked'; } catch { return 'blocked'; }
+  };
   const canSend = (to: string) => {
-    try { return config !== null && mailbox(to) === config.testRecipient; } catch { return false; }
+    return config !== null && recipientPolicy(to) === 'allowed';
   };
   return {
-    canSend,
+    canSend, recipientPolicy,
     async send(input) {
       // The candidate uses an operator-approved existing test recipient. Never
       // redirect a different invitation to it or open SMTP without configuration.
+      if (recipientPolicy(input.to) === 'blocked') return { state: 'failed', reason_code: 'recipient_not_allowed' };
       if (!config || !canSend(input.to)) return { state: 'failed', reason_code: 'smtp_rejected' };
       let transport: Transport | undefined, timeout: ReturnType<typeof setTimeout> | undefined, started = false;
       try {

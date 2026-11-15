@@ -14,6 +14,7 @@ const url = process.env.GUGU_INTEGRATION_SUPABASE_URL ?? '', anon = process.env.
 const modelRevocations: Record<string, unknown>[] = []
 const invitationDeliveries: unknown[] = []
 const codeDeliveries: string[] = []
+let invitationRecipientPolicy: 'allowed' | 'blocked' = 'allowed'
 let completionFailure: 'before_commit' | 'after_commit' | null = null, completionChallenge: string | null = null
 function need(value: unknown, phase: string): asserts value { if (!value) throw Error('Owned workflow fixture: ' + phase) }
 const address = () => { const value = randomUUID() + '@workflow-http.invalid'; addresses.add(value); return value }
@@ -29,7 +30,7 @@ beforeAll(async () => {
   admin = createClient(url, service, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } })
   // SMTP acceptance is an explicit test adapter; this does not attest delivery.
   const deps = teamAccountsDependencies({ url, anonKey: anon, serviceKey: service,
-    invitationMailer: { canSend: () => true, send: async input => {
+    invitationMailer: { canSend: () => true, recipientPolicy: () => invitationRecipientPolicy, send: async input => {
       invitationDeliveries.push(input); return { state: 'accepted', reason_code: 'smtp_accepted' }
     } } })
   handle = createTeamAccountsHandler({ ...deps, auth: { ...deps.auth, sendEmailCode: async value => {
@@ -171,4 +172,29 @@ it.each(['before_commit', 'after_commit'] as const)('recovers change-email code 
   const done = await call({ action: 'confirm_email_change', challenge_id: replay.challenge_id,
     code: await code(nextEmail), idempotency_key: randomUUID() }, member.session.access_token)
   expect(done.state).toBe('changed'); expect(done.requires_sign_in).toBe(true)
+})
+
+it('keeps invitation creation but persists a private recipient refusal without SMTP or an Auth anchor', async () => {
+  const founderEmail = address(), recipient = address()
+  const founder = await call({ action: 'create', name: 'Recipient refusal fixture',
+    verification_receipt: await proof(founderEmail, 'create'), idempotency_key: randomUUID() })
+  teams.add(founder.team.id); ownedUsers.add(founder.session.user.id)
+  const before = invitationDeliveries.length
+  invitationRecipientPolicy = 'blocked'
+  try {
+    const intent = { action: 'invite', email: recipient, role: 'member', idempotency_key: randomUUID() }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await request(intent, founder.session.access_token), body = await response.json()
+      expect(response.status).toBe(503)
+      expect(body.data).toMatchObject({ invitation_created: true,
+        delivery: { state: 'failed', reason_code: 'recipient_not_allowed' } })
+      expect(JSON.stringify(body)).not.toContain(recipient)
+      expect(JSON.stringify(body)).not.toContain(founderEmail)
+    }
+  } finally { invitationRecipientPolicy = 'allowed' }
+  expect(invitationDeliveries.length).toBe(before)
+  expect((await db.query('SELECT count(*)::int n FROM auth.users WHERE email=$1', [recipient])).rows[0].n).toBe(0)
+  const row = (await db.query(`SELECT i.state,d.state delivery,d.reason_code,d.admitted_at FROM team_private.invitations i
+    JOIN team_private.mail_deliveries d ON d.invitation_id=i.id WHERE i.team_id=$1 AND i.email_normalized=$2`, [founder.team.id, recipient])).rows
+  expect(row).toEqual([{ state: 'invited', delivery: 'failed', reason_code: 'recipient_not_allowed', admitted_at: null }])
 })

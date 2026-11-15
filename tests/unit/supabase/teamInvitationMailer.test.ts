@@ -14,7 +14,7 @@ function fixture(changes: Record<string, string | undefined> = {}) {
   return { mailer: teamInvitationMailer(k => env[k], factory), factory, transport }
 }
 describe('server-configured invitation SMTP adapter', () => {
-  it.each(['TEAM_INVITE_MAIL_ENABLED', 'TEAM_INVITE_SMTP_HOST', 'TEAM_INVITE_SMTP_PASSWORD', 'TEAM_INVITE_TEST_RECIPIENT'])('never connects with missing %s', async key => {
+  it.each(['TEAM_INVITE_MAIL_ENABLED', 'TEAM_INVITE_SMTP_HOST', 'TEAM_INVITE_SMTP_PASSWORD'])('never connects with missing %s', async key => {
     const f = fixture({ [key]: undefined })
     expect(f.mailer.canSend(input().to)).toBe(false)
     expect(await f.mailer.send(input())).toEqual({ state: 'failed', reason_code: 'smtp_rejected' })
@@ -26,7 +26,32 @@ describe('server-configured invitation SMTP adapter', () => {
   it('sends only to the approved existing test target and never redirects another recipient', async () => {
     const f = fixture(), other = { ...input(), to: 'other@example.invalid' }
     expect(f.mailer.canSend(other.to)).toBe(false)
-    expect((await f.mailer.send(other)).state).toBe('failed'); expect(f.factory).not.toHaveBeenCalled()
+    expect(await f.mailer.send(other)).toEqual({ state: 'failed', reason_code: 'recipient_not_allowed' }); expect(f.factory).not.toHaveBeenCalled()
+  })
+  it.each([undefined, '', '  ', ',', 'recipient@example.invalid,', 'invalid', 'recipient@example.invalid,invalid',
+    '*@example.invalid', 'recipient@*.invalid', 'recipient@example..invalid', 'recipient@example.invalid\r\nBcc: other@example.invalid'])('closes the entire missing or malformed list: %j', async value => {
+    const f = fixture({ TEAM_INVITE_TEST_RECIPIENT: value, TEAM_INVITE_ALLOW_ALL: 'true' })
+    expect(f.mailer.recipientPolicy(input().to)).toBe('blocked')
+    expect(f.mailer.canSend(input().to)).toBe(false)
+    expect(await f.mailer.send(input())).toEqual({ state: 'failed', reason_code: 'recipient_not_allowed' })
+    expect(f.factory).not.toHaveBeenCalled(); expect(f.transport.sendMail).not.toHaveBeenCalled()
+  })
+  it('normalizes case and outer spaces and allows each complete address in a multi-recipient list', async () => {
+    const f = fixture({ TEAM_INVITE_TEST_RECIPIENT: ' Recipient@Example.Invalid , Second@Example.Invalid ' })
+    for (const to of [' recipient@EXAMPLE.invalid ', 'SECOND@example.invalid']) {
+      const canonical = to.trim().toLowerCase()
+      f.transport.sendMail.mockResolvedValue({ accepted: [canonical], rejected: [] })
+      expect(f.mailer.recipientPolicy(to)).toBe('allowed')
+      expect(await f.mailer.send({ ...input(), to })).toEqual({ state: 'accepted', reason_code: 'smtp_accepted' })
+      expect(f.transport.sendMail.mock.calls.at(-1)?.[0].envelope.to).toEqual([canonical])
+    }
+    expect(f.mailer.recipientPolicy('suffixrecipient@example.invalid')).toBe('blocked')
+    expect(f.mailer.recipientPolicy('recipient@sub.example.invalid')).toBe('blocked')
+  })
+  it.each(['recipient@example.invalid\r\n', 'recipient@example.invalid\nBcc: other@example.invalid', 'recipient@example.invalid,other@example.invalid'])('refuses injected or multiple recipient inputs without opening SMTP', async to => {
+    const f = fixture()
+    expect(await f.mailer.send({ ...input(), to })).toEqual({ state: 'failed', reason_code: 'recipient_not_allowed' })
+    expect(f.factory).not.toHaveBeenCalled()
   })
   it('requires STARTTLS and certificate validation with bounded, nonlogging transport options', async () => {
     const f = fixture()

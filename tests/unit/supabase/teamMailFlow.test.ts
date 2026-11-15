@@ -8,13 +8,14 @@ function fixture() {
   let state = 'pending'
   const rpc = vi.fn(async (_name: string, args: Record<string, any>) => {
     if (args.p_action === 'finish') state = args.p_input.state
+    if (args.p_action === 'reject_recipient' && state === 'pending') state = 'failed'
     const claimed = args.p_action === 'claim' && state === 'pending'
     if (claimed) state = 'sending'
-    return { delivery_id: id, state, claimed, lease_token: claimed ? lease : null,
+    return { delivery_id: id, state, claimed, lease_token: claimed ? lease : null, reason_code: state === 'failed' ? 'recipient_not_allowed' : null,
       recipient_email: 'recipient@example.invalid', team_name: 'Server team', expires_at: '2026-11-20T00:00:00Z' }
   })
   const auth = { ensureAnchor: vi.fn().mockResolvedValue(true), sendEmailCode: vi.fn().mockResolvedValue(true) }
-  const mailer = { canSend: vi.fn().mockReturnValue(true), send: vi.fn().mockResolvedValue({ state: 'accepted', reason_code: 'smtp_accepted' }) }
+  const mailer = { canSend: vi.fn().mockReturnValue(true), recipientPolicy: vi.fn().mockReturnValue('allowed'), send: vi.fn().mockResolvedValue({ state: 'accepted', reason_code: 'smtp_accepted' }) }
   const flow = teamMailFlow({ auth, rpc, invitationMailer: mailer })
   const actor = { id: randomUUID(), sessionId: randomUUID(), email: 'admin@example.invalid', accountKind: 'team_member' }
   const request = new Request('https://edge.invalid/', { headers: { 'x-forwarded-for': '203.0.113.99', 'x-real-ip': '203.0.113.98' } })
@@ -23,6 +24,18 @@ function fixture() {
   return { flow, auth, rpc, mailer, id, invitationId, lease, actor, request, response, invite, setState: (next: string) => { state = next } }
 }
 describe('team mail side effects follow durable admission', () => {
+  it('persists a safe recipient refusal before any send admission, anchor or SMTP call', async () => {
+    const f = fixture(); f.mailer.recipientPolicy.mockReturnValue('blocked')
+    let receipt: unknown
+    try { await f.invite() } catch (error) { receipt = (error as TeamRefusal).details }
+    expect(receipt).toMatchObject({ invitation_created: true, delivery: { state: 'failed', reason_code: 'recipient_not_allowed' } })
+    expect(JSON.stringify(receipt)).not.toContain('recipient@example.invalid')
+    expect(JSON.stringify(receipt)).not.toContain('admin@example.invalid')
+    expect(f.rpc.mock.calls.map(([, args]) => args.p_action)).toEqual(['prepare', 'reject_recipient'])
+    expect(f.auth.ensureAnchor).not.toHaveBeenCalled(); expect(f.mailer.send).not.toHaveBeenCalled()
+    await expect(f.invite()).rejects.toMatchObject({ details: { delivery: { state: 'failed', reason_code: 'recipient_not_allowed' } } })
+    expect(f.mailer.send).not.toHaveBeenCalled()
+  })
   it('takes the frozen server recipient and sends only after successful admission', async () => {
     const f = fixture(), result = await f.invite()
     expect(result.delivery.state).toBe('accepted')
