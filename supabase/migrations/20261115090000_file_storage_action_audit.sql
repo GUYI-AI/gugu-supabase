@@ -119,8 +119,12 @@ BEGIN
     -- The Auth eraser takes the exclusive lock on this existing owner key. Let
     -- in-flight actions commit first, and refuse a late JWT after erasure wins.
     PERFORM pg_advisory_xact_lock_shared(hashtextextended('identity:erase-human:'||owner_subject,0));
-    IF NOT EXISTS(SELECT 1 FROM identity.users u WHERE u.id=me
-        AND CASE WHEN u.type='human' THEN u.id ELSE u.owner_user_id END=owner_subject) THEN
+    -- Lock the current identity tuple too: an old REPEATABLE READ snapshot must
+    -- serialize/fail after removal, not recreate an original-ID audit record.
+    PERFORM 1 FROM identity.users u WHERE u.id=me AND u.removed_at IS NULL
+        AND CASE WHEN u.type='human' THEN u.id ELSE u.owner_user_id END=owner_subject
+        FOR KEY SHARE OF u;
+    IF NOT FOUND OR NOT identity.user_is_live(me) THEN
         RAISE EXCEPTION 'Account is unavailable' USING HINT='file_transfer_denied';
     END IF;
     actor:=chat.workspace_actor_for(COALESCE(p_as,me));

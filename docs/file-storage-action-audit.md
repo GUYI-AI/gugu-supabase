@@ -59,7 +59,11 @@ the action evidence remain intact; repeated erasure is idempotent.
 Writers take a shared transaction lock on the existing human-owner
 `identity:erase-human:` key, then recheck identity liveness. The Auth eraser takes
 that key exclusively, so a completed erasure cannot be followed by a late JWT
-recording the original identity again.
+recording the original identity again. The writer locks the current identity
+tuple with `FOR KEY SHARE`, checks `removed_at` and the live-identity predicate;
+an older repeatable-read snapshot must serialize/fail after a concurrent removal
+instead of recording the original ID from its stale snapshot. The tuple lock
+follows the owner advisory lock, matching the eraser's order.
 
 **Pending integration:** the unified Auth erasure migration must call this helper
 before deleting its private lifecycle context. This PR intentionally does not
