@@ -252,7 +252,8 @@ describe('committed file retention action audit', () => {
     } finally {
       await reader.query('ROLLBACK').catch(() => undefined)
       await remover.query('ROLLBACK').catch(() => undefined)
-      await remover.query('UPDATE identity.users SET removed_at=NULL WHERE id=$1', [subject])
+      // Removal is intentionally irreversible; clean this committed fixture
+      // through Auth deletion rather than trying to resurrect its identity.
       await remover.query('DELETE FROM auth.users WHERE id=$1', [subject])
       await reader.end(); await remover.end()
     }
