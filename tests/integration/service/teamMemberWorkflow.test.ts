@@ -121,6 +121,13 @@ it('reuses one pending team/principal on same-key creation and rejects changed p
   expect(profile.realtime_namespace).toContain('session:' + active.session + ':')
 })
 
+it('refuses a missing creation name as a workflow error before inserting a team', async () => {
+  const address = randomUUID() + '@workflow.invalid', proof = await receipt(address)
+  const error = await refused('SELECT public.team_account_provision($1,$2)', ['create', { receipt_digest: proof.digest, idempotency_key: randomUUID() }])
+  expect(error.hint).toBe('invalid_request')
+  expect((await db.query('SELECT count(*)::int n FROM team_private.members WHERE email_normalized=$1', [address])).rows[0].n).toBe(0)
+})
+
 it('does not consume a verified login receipt when the member must choose a team', async () => {
   const owner = await founder(), second = randomUUID(), secondMember = randomUUID(), secondPrincipal = randomUUID()
   await db.query("INSERT INTO team_private.teams(id,name,region,state) VALUES($1,'Other same-email team','cn','active')", [second])
@@ -154,15 +161,19 @@ it('replays disable with its original revision without transferring legacy chat 
   expect((await db.query('SELECT principal_user_id FROM team_private.members WHERE id=$1', [seat.membership.id])).rows[0].principal_user_id).toBe(seat.id)
   const restore = { member_id: seat.membership.id, expected_revision: 2, idempotency_key: randomUUID() }
   expect((await refused('SELECT public.team_member_workflow($1,$2,$3,$4)', ['restore', owner.id, owner.session, restore])).hint).toBe('revocation_pending')
-  await memberFlow(owner, 'revocation_checkpoint', { operation_id: first.operation_id, auth_sessions_revoked: true,
-    auth_banned: true, model_authorization_revoked: true })
+  const checkpoint = { operation_id: first.operation_id, auth_sessions_revoked: true, auth_banned: true, model_authorization_revoked: true }
+  expect((await refused('SELECT public.team_member_workflow($1,$2,$3,$4)', ['revocation_checkpoint', owner.id, owner.session, checkpoint])).hint).toBe('version_conflict')
+  await db.query('DELETE FROM auth.sessions WHERE user_id=$1', [seat.id])
+  expect((await refused('SELECT public.team_member_workflow($1,$2,$3,$4)', ['revocation_checkpoint', owner.id, owner.session, checkpoint])).hint).toBe('version_conflict')
+  await db.query("UPDATE auth.users SET banned_until=now()+interval '1 day' WHERE id=$1", [seat.id])
+  await memberFlow(owner, 'revocation_checkpoint', checkpoint)
   const revoked = await memberFlow(owner, 'revocation_result', { operation_id: first.operation_id })
   expect(revoked.state).toBe('complete'); expect(revoked.handoff_complete).toBe(false)
   const restoring = await memberFlow(owner, 'restore', restore)
   expect(restoring.membership.state).toBe('disabled')
   expect((await refused('SELECT public.team_member_workflow($1,$2,$3,$4)', ['restore_finish', owner.id, owner.session,
     { operation_id: restoring.operation_id }])).hint).toBe('version_conflict')
-  await db.query('DELETE FROM auth.sessions WHERE user_id=$1', [seat.id])
+  await db.query('UPDATE auth.users SET banned_until=NULL WHERE id=$1', [seat.id])
   const restored = await memberFlow(owner, 'restore_finish', { operation_id: restoring.operation_id })
   expect(restored.membership.state).toBe('active'); expect(restored.membership.revision).toBe(3)
   expect(restored.requires_sign_in).toBe(true); expect(restored.handoff_state).toBe('pending')

@@ -51,7 +51,7 @@ BEGIN
     ELSE
         IF c.state<>'verified' THEN PERFORM team_private.refuse('verification_required',401); END IF;
         IF p_action='create' THEN
-            IF length(btrim(p_input->>'name')) NOT BETWEEN 1 AND 100 THEN PERFORM team_private.refuse('invalid_request',400); END IF;
+            IF COALESCE(length(btrim(p_input->>'name')),0) NOT BETWEEN 1 AND 100 THEN PERFORM team_private.refuse('invalid_request',400); END IF;
             INSERT INTO team_private.teams(name,region) VALUES(btrim(p_input->>'name'),local_region) RETURNING id INTO tid;
             INSERT INTO team_private.members(team_id,email_normalized,role,state,planned_principal_id,display_name)
               VALUES(tid,c.email_normalized,'superadmin','provisioning',gen_random_uuid(),split_part(c.email_normalized,'@',1)) RETURNING * INTO seat;
@@ -233,6 +233,16 @@ BEGIN
         IF actor.role='admin' AND target.role<>'member' THEN PERFORM team_private.refuse('forbidden'); END IF;
         IF p_action='revocation_checkpoint' THEN
             IF op.action<>'disable' OR target.state<>'disabled' THEN PERFORM team_private.refuse('version_conflict',409); END IF;
+            -- Server booleans request a checkpoint; they are not proof that
+            -- Auth actually revoked sessions or banned this exact principal.
+            IF (op.auth_sessions_revoked OR COALESCE((p_input->>'auth_sessions_revoked')::boolean,false))
+              AND EXISTS(SELECT 1 FROM auth.sessions WHERE user_id=target.principal_user_id) THEN
+                PERFORM team_private.refuse('version_conflict',409);
+            END IF;
+            IF (op.auth_banned OR COALESCE((p_input->>'auth_banned')::boolean,false))
+              AND NOT EXISTS(SELECT 1 FROM auth.users WHERE id=target.principal_user_id AND deleted_at IS NULL AND banned_until>now()) THEN
+                PERFORM team_private.refuse('version_conflict',409);
+            END IF;
             UPDATE team_private.member_operations SET
                 auth_sessions_revoked=auth_sessions_revoked OR COALESCE((p_input->>'auth_sessions_revoked')::boolean,false),
                 auth_banned=auth_banned OR COALESCE((p_input->>'auth_banned')::boolean,false),
