@@ -36,12 +36,12 @@ async function read(actor: string) {
 }
 describe('operator-confirmed missing objects', () => {
   it('returns an explicit missing code through both entry points before reserving any download quota', async () => {
-    expect(await read(owner)).toEqual({ metadata: { status: 'missing', code: 'object_not_found', sha256: null }, download: { status: 'missing', code: 'object_not_found', sha256: null } })
+    expect(await read(owner)).toEqual({ metadata: { status: 'missing', code: 'object_not_found', sha256: null, availability: 'unavailable', expired_at: null }, download: { status: 'missing', code: 'object_not_found', sha256: null, availability: 'unavailable', expired_at: null } })
     await db.query('RESET ROLE')
     expect((await db.query('SELECT count(*)::int AS n FROM chat.file_transfer_reservations WHERE account_id=$1', [owner])).rows[0].n).toBe(0)
   })
   it('preserves the exact-reference ACL instead of revealing absence to a nonmember', async () => {
-    expect(await read(outsider)).toEqual({ metadata: { status: 'gone' }, download: { status: 'gone' } })
+    expect(await read(outsider)).toEqual({ metadata: { status: 'gone', availability: 'unavailable', expired_at: null }, download: { status: 'gone', availability: 'unavailable', expired_at: null } })
   })
   it('preserves idle expiry after GC instead of classifying an expired reference as missing', async () => {
     await db.query(`INSERT INTO chat.file_transfer_storage_refs(storage_id,chat_id,account_id,expired_at)
@@ -53,7 +53,7 @@ describe('operator-confirmed missing objects', () => {
     await db.query('RESET ROLE')
     expect((await db.query('SELECT count(*)::int AS n FROM chat.file_transfer_reservations WHERE account_id=$1', [owner])).rows[0].n).toBe(0)
     await db.query('UPDATE chat.file_transfer_storage_refs SET expired_at=NULL WHERE chat_id=$1', [group])
-    expect(await read(owner)).toEqual({ metadata: { status: 'missing', code: 'object_not_found', sha256: null }, download: { status: 'missing', code: 'object_not_found', sha256: null } })
+    expect(await read(owner)).toEqual({ metadata: { status: 'missing', code: 'object_not_found', sha256: null, availability: 'unavailable', expired_at: null }, download: { status: 'missing', code: 'object_not_found', sha256: null, availability: 'unavailable', expired_at: null } })
   })
   it('does not infer physical absence from an unmarked object or an in-progress deletion', async () => {
     for (const state of ['ready', 'deleting']) {

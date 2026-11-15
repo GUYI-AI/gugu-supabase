@@ -616,11 +616,11 @@ describe('attachment message metadata', () => {
     expect(await read(sent.id, outsider)).toEqual([])
     await asOwner()
     await database.query('UPDATE chat.messages SET retracted_at=now() WHERE id=$1', [sent.id])
-    expect((await read(sent.id))[0]!.file_metadata).toEqual({ status: 'gone' })
+    expect((await read(sent.id))[0]!.file_metadata).toEqual({ status: 'gone', availability: 'unavailable', expired_at: null })
     const ordinary = await commit(owner, (await upload(owner, `deleted-${randomUUID()}`)).key, randomUUID(), group, owner, 'deleted.png')
     await asUser(owner)
     await database.query('SELECT chat.workspace_delete_as($1,$2)', [ordinary.file_item_id, owner])
-    expect((await read(ordinary.id))[0]!.file_metadata).toEqual({ status: 'gone' })
+    expect((await read(ordinary.id))[0]!.file_metadata).toEqual({ status: 'gone', availability: 'unavailable', expired_at: null })
   })
 })
 
