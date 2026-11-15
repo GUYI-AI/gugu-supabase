@@ -92,7 +92,7 @@ describe('non-project idle expiry, not quota eviction',()=>{
     await user(member)
     expect((await db.query('SELECT chat.file_resolve_as($1,$2) AS r',[{message_id:file.message},member])).rows[0].r.status).toBe('expired')
     await user(outsider)
-    expect((await db.query('SELECT chat.file_resolve_as($1,$2) AS r',[{message_id:file.message},outsider])).rows[0].r).toEqual({status:'gone'})
+    expect((await db.query('SELECT chat.file_resolve_as($1,$2) AS r',[{message_id:file.message},outsider])).rows[0].r).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     await service();const readable=await upload()
     expect((await download(readable.message)).status).toBe('ready')
     await service();expect((await state(readable.stored)).last_download_at).not.toBeNull()
