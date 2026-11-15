@@ -96,6 +96,24 @@ it('claims once and never counts a replay as another send attempt', async () => 
   expect(await delivery(i, 'prepare')).toMatchObject({ state: 'accepted', claimed: false })
 })
 
+it('records recipient refusal without a send lease or quota and preserves historical outcomes', async () => {
+  const owner = await founder(), rejected = await invitation(owner)
+  expect(await delivery(rejected, 'reject_recipient')).toMatchObject({ state: 'failed', reason_code: 'recipient_not_allowed', claimed: false })
+  expect(await delivery(rejected)).toMatchObject({ state: 'failed', claimed: false })
+  const row = (await db.query('SELECT admitted_at,lease_token,lease_expires_at FROM team_private.mail_deliveries WHERE invitation_id=$1', [rejected.invitation_id])).rows[0]
+  expect(row).toEqual({ admitted_at: null, lease_token: null, lease_expires_at: null })
+  for (const state of ['sending', 'unknown', 'accepted'] as const) {
+    const i = await invitation(owner), claimed = await delivery(i)
+    if (state !== 'sending') await rpc('team_mail_delivery', ['finish', { delivery_id: claimed.delivery_id,
+      lease_token: claimed.lease_token, state, reason_code: state === 'accepted' ? 'smtp_accepted' : 'smtp_result_unknown' }])
+    expect(await delivery(i, 'reject_recipient')).toMatchObject({ state, claimed: false })
+  }
+  expect((await db.query('SELECT count(*)::int n FROM team_private.mail_deliveries WHERE team_id=$1 AND admitted_at IS NOT NULL', [owner.team])).rows[0].n).toBe(3)
+  const code = await rpc('team_email_workflow', ['begin', { purpose: 'sign_in', email: randomUUID() + '@otp-unaffected.invalid' }])
+  expect((await refused(() => rpc('team_mail_delivery', ['reject_recipient', { kind: 'code', challenge_id: code.challenge_id }]))).hint).toBe('invalid_request')
+  expect((await db.query('SELECT state FROM team_private.email_challenges WHERE id=$1', [code.challenge_id])).rows[0].state).toBe('sending')
+})
+
 it('does not automatically reclaim unknown outcomes or expired sending leases', async () => {
   const owner = await founder(), first = await invitation(owner), claimed = await delivery(first)
   await rpc('team_mail_delivery', ['finish', { delivery_id: claimed.delivery_id, lease_token: claimed.lease_token, state: 'unknown', reason_code: 'smtp_result_unknown' }])
