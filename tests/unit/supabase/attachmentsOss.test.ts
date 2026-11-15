@@ -30,6 +30,8 @@ import {
   Refusal,
   refusalFromDb,
 } from '../../../supabase/functions/_shared/attachments-core'
+import { ObjectStorageError } from '../../../supabase/functions/_shared/object-storage'
+import { inspectSource } from '../../../services/files/src/inspect.mjs'
 
 const OSS: OssConfig = {
   region: 'cn-wulanchabu', bucket: 'gugu-files-test', endpointInternal: 'oss-cn-wulanchabu-internal.aliyuncs.com',
@@ -199,6 +201,17 @@ function fakes(opts: {
     textFiles: { maxBytes: 1024 * 1024, classify: () => ({ kind: 'file', why: 'binary fixture' }) },
     oss: OSS,
     cdn: CDN,
+    // The file service's own inspection over this fake OSS; its HTTP refusals map as fileServiceInspector maps them.
+    inspector: async (source, limit, retain) => {
+      try {
+        const r = await inspectSource({ source, limit, retain }, { fetch: deps.fetch as typeof fetch })
+        return { bytes: new Uint8Array(r.prefix), sizeBytes: r.sizeBytes, sha256: r.sha256, etag: r.etag }
+      } catch (error) {
+        const status = (error as { status?: number }).status
+        if (status === 404 || status === 413) throw new ObjectStorageError(status, status === 413 ? 'too_large' : null, String(error))
+        throw error
+      }
+    },
     fetch: async (url, init) => {
       order.push('object:' + (init?.method ?? 'GET'))
       const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>))

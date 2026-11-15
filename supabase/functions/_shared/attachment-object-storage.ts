@@ -1,11 +1,12 @@
 import {
   type CdnConfig, type FetchLike, type OssConfig, CDN_SIGN_TTL_SECONDS, MAX_ATTACHMENT_BYTES,
-  cdnSignedUrl, ossCopy, ossDelete, ossExists, ossGetBytes, ossRequest, postObjectForm, refreshCdn, sha256Hex,
+  cdnSignedUrl, ossCopy, ossDelete, ossExists, ossRequest, ossSignedRequest, postObjectForm, refreshCdn,
 } from './oss.ts'
 import { type AttachmentObjectStorage, ObjectStorageError } from './object-storage.ts'
-import { inspectFileStream } from './file-inspection.ts'
+import { type Inspector, inspectFileStream } from './file-inspection.ts'
 
-export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch: FetchLike; directSign?:AttachmentObjectStorage['sign'] }): AttachmentObjectStorage {
+/** Bytes are read by the file service (`inspector`) from a request signed here; this Edge worker only copies by ETag. */
+export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch: FetchLike; inspector: Inspector; directSign?:AttachmentObjectStorage['sign'] }): AttachmentObjectStorage {
   const { oss, cdn, fetch } = config
   const store: AttachmentObjectStorage = {
     uploadBounds: async (requestedBytes,requestedSeconds) => {
@@ -18,19 +19,12 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
     },
     upload: (key, date, limits) => postObjectForm(oss, { key, date, maxBytes: limits?.maxBytes ?? MAX_ATTACHMENT_BYTES,
       expiresInSeconds: limits?.expiresSeconds }),
-    inspect: async (key, limit, retainBytes) => {
-      const res=await ossRequest(oss,fetch,{method:'GET',key,internal:true,headers:{'Accept-Encoding':'identity'}})
-      if (!res.ok || !res.body || !res.headers.get('etag')) {
-        await res.body?.cancel()
-        throw new ObjectStorageError(res.status,null,'Could not inspect the reserved object')
-      }
-      return { ...await inspectFileStream(res.body,limit,retainBytes),etag:res.headers.get('etag') }
+    inspect: async (key, limit, retainBytes = 512) => {
+      const source = await ossSignedRequest(oss, { method: 'GET', key, internal: true })
+      const { etag, ...inspected } = await config.inspector(source, limit, retainBytes)
+      return { ...inspected, revision: etag }
     },
-    read: (key, limit) => ossGetBytes(oss, fetch, key, { internal: true, limit }),
-    promote: async (source, destination, read, headers) => {
-      if (!read.etag) throw new Error('OSS promotion requires the source ETag')
-      await ossCopy(oss, fetch, source, destination, read.etag, headers)
-    },
+    promote: (source, destination, revision, headers) => ossCopy(oss, fetch, source, destination, revision, headers),
     put: async (key, bytes) => {
       const response = await ossRequest(oss, fetch, { method: 'PUT', key, body: bytes as BodyInit, internal: true })
       if (response.status !== 200) throw new ObjectStorageError(response.status, null, 'Could not stage attachment bytes')
@@ -60,7 +54,11 @@ export interface SupabaseObjectConfig {
   signDownload(key: string, seconds: number, trafficBits?:number): Promise<string>
 }
 
-/** Stores the exact bytes read and hashed by the server; never re-copies mutable staging bytes. */
+/**
+ * Supabase Storage has no conditional copy, so the copy pins the object version that was hashed: inspection reads the
+ * version before and after one streamed GET, and promotion copies that version by id. Hashing stays in this Edge worker
+ * (a hosted project has no other process), so the platform's CPU limit bounds the largest file; see docs/self-hosting.md.
+ */
 export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentObjectStorage {
   const base = config.url.replace(/\/$/, '')
   const objectUrl = (key: string) => base + '/storage/v1/object/' + encodeURIComponent(config.bucket) + '/' + key.split('/').map(encodeURIComponent).join('/')
@@ -109,41 +107,41 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
       url: await config.signUpload(key), method: 'PUT', fields: {},
       expiresAt: new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString(),
     }),
-    read: async (key, limit) => {
+    inspect: async (key, limit, retainBytes) => {
+      const version = async () => {
+        const response = await request(base + '/storage/v1/object/info/' + encodeURIComponent(config.bucket) + '/' + key.split('/').map(encodeURIComponent).join('/'))
+        await check(response)
+        const info = await response.json() as { version?: unknown }
+        if (typeof info.version !== 'string' || !info.version) throw new ObjectStorageError(503, 'not_configured', 'Supabase Storage did not report an object version')
+        return info.version
+      }
+      const before = await version()
       const response = await request(objectUrl(key))
       await check(response)
-      const declared = Number(response.headers.get('content-length'))
-      if (declared > limit) {
+      if (Number(response.headers.get('content-length')) > limit) {
         await response.body?.cancel()
         throw new ObjectStorageError(413, 'too_large', 'Attachment exceeds storage limit')
       }
-      const reader = response.body?.getReader()
-      const parts: Uint8Array[] = []
-      let length = 0
-      if (reader) {
-        try {
-          for (;;) {
-            const next = await reader.read()
-            if (next.done) break
-            length += next.value.byteLength
-            if (length > limit) {
-              await reader.cancel()
-              throw new ObjectStorageError(413, 'too_large', 'Attachment exceeds storage limit')
-            }
-            parts.push(next.value)
-          }
-        } finally { reader.releaseLock() }
+      if (!response.body) throw new ObjectStorageError(502, null, 'Supabase Storage answered without a body')
+      const inspected = await inspectFileStream(response.body, limit, retainBytes)
+      if (await version() !== before) throw new ObjectStorageError(412, null, 'The object changed while it was being inspected')
+      return { ...inspected, revision: before }
+    },
+    promote: async (source, destination, revision, headers) => {
+      const named = new Headers(headers)
+      const response = await request(base + '/storage/v1/object/copy', {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-upsert': 'true' },
+        body: JSON.stringify({ bucketId: config.bucket, sourceKey: source, sourceVersionId: revision, destinationKey: destination,
+          copyMetadata: false, metadata: { mimetype: named.get('content-type') ?? 'application/octet-stream', cacheControl: named.get('cache-control') ?? undefined } }),
+      })
+      try { await check(response) }
+      catch (error) {
+        // The hashed version is gone: the staging object was replaced after inspection.
+        if (error instanceof ObjectStorageError && error.status === 404) throw new ObjectStorageError(412, null, 'The inspected object version no longer exists')
+        throw error
       }
-      const bytes = new Uint8Array(length)
-      let offset = 0
-      for (const part of parts) { bytes.set(part, offset); offset += part.byteLength }
-      return { bytes, etag: response.headers.get('etag') }
+      await response.body?.cancel()
     },
-    inspect: async (key, limit) => {
-      const read=await store.read(key,limit)
-      return { ...read,sizeBytes:read.bytes.byteLength,sha256:await sha256Hex(read.bytes) }
-    },
-    promote: async (_source, destination, read, headers) => write(destination, read.bytes, headers),
     put: (key, bytes) => write(key, bytes),
     exists: async (key) => {
       const response = await request(objectUrl(key), { method: 'HEAD' })

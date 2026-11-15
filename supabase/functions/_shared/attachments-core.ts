@@ -13,6 +13,7 @@
 
 import { ossObjectStorage } from './attachment-object-storage.ts'
 import { type AttachmentObjectStorage, ObjectStorageError, type InspectedObject } from './object-storage.ts'
+import type { Inspector } from './file-inspection.ts'
 import { hasThumbnail, objectHeaders, sniff } from './blob-sniff.ts'
 import { fileRef, handleFileDownload } from './file-transfer-core.ts'
 import {
@@ -43,6 +44,8 @@ export interface AttachmentsDeps {
   objects?: AttachmentObjectStorage
   oss?: OssConfig
   cdn?: CdnConfig
+  /** With oss/cdn: who reads staged bytes (the file service). */
+  inspector?: Inspector
   fetch: FetchLike
   /** 以调用者自己的令牌调 chat 里的函数(群规、成员、RLS 全照调用者)。 */
   userRpc: Rpc
@@ -64,8 +67,8 @@ export interface AttachmentsDeps {
 
 export function objectStorage(deps: AttachmentsDeps): AttachmentObjectStorage {
   if (deps.objects) return deps.objects
-  if (!deps.oss || !deps.cdn) throw new Error('Attachment object storage is not configured')
-  return ossObjectStorage({ oss: deps.oss, cdn: deps.cdn, fetch: deps.fetch })
+  if (!deps.oss || !deps.cdn || !deps.inspector) throw new Error('Attachment object storage is not configured')
+  return ossObjectStorage({ oss: deps.oss, cdn: deps.cdn, fetch: deps.fetch, inspector: deps.inspector })
 }
 
 /** 说给调用者听的拒绝:HTTP 状态 + 机读的 code + 一句话。 */
@@ -330,15 +333,16 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
   const store=objectStorage(deps)
   let read: InspectedObject | null = null
   try {
-    if (!store.inspect) throw new Refusal(503,'not_configured','Object inspection is not configured')
     read=await store.inspect(stagingKey,Number(permit.max_bytes),deps.textFiles.maxBytes + 1)
   } catch (error) {
     if (error instanceof ObjectStorageError && error.status === 413) throw new Refusal(413, 'too_large', 'file exceeds its upload reservation')
+    if (error instanceof ObjectStorageError && error.status === 503) throw new Refusal(503, 'not_configured', error.message)
+    if (error instanceof ObjectStorageError && error.status === 412) throw new Refusal(409, 'upload_changed', 'the upload changed while it was being committed; upload it again')
     // 暂存对象没了:要么没传上来,要么上一次已经登记过、删了暂存(重试)—— 交给库认那次登记。
     if (!(error instanceof ObjectStorageError && error.status === 404)) throw error
   }
   if (read) {
-    const { bytes, etag, sizeBytes } = read
+    const { bytes, revision, sizeBytes } = read
     if (sizeBytes === 0) throw new Refusal(400, 'invalid', 'an attachment has at least one byte')
     if (bytes.length < Math.min(sizeBytes, deps.textFiles.maxBytes + 1)) {
       throw new Refusal(503, 'not_configured', 'Object inspection did not retain the complete bounded text')
@@ -350,7 +354,7 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
     const headers = objectHeaders(type, IMMUTABLE)
     const copy = async () => {
       try {
-        await objectStorage(deps).promote(stagingKey, finalKey, { bytes, etag }, headers)
+        await objectStorage(deps).promote(stagingKey, finalKey, revision, headers)
       } catch (error) {
         // 暂存对象在读完之后换了内容:算的哈希不是它的了,不能拿这个名字存。
         if (error instanceof ObjectStorageError && error.status === 412) throw new Refusal(409, 'upload_changed', 'the upload changed while it was being committed; upload it again')

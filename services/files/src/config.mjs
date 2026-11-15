@@ -14,6 +14,7 @@ import fs from 'node:fs'
  * @property {string | null} jwksUrl    GoTrue 的 JWKS(非对称令牌)
  * @property {Uint8Array | null} jwtSecret HS256 密钥(可缺)
  * @property {string | null} jwtIssuer  给了就核 iss
+ * @property {string | null} inspectSecret 内部口 POST /inspect 的服务间密钥(attachments 函数持有同一个);没给 ⇒ /inspect 回 503
  * @property {number} timeoutMs         连接心跳超时
  * @property {number} debounceMs
  * @property {number} maxDebounceMs
@@ -72,6 +73,7 @@ export function loadConfig(env = process.env) {
     jwksUrl,
     jwtSecret: hs ? new TextEncoder().encode(hs) : null,
     jwtIssuer: env.FILES_JWT_ISSUER || null,
+    inspectSecret: secretFile('FILES_INSPECT_SECRET_FILE'),
     timeoutMs: int('FILES_TIMEOUT_MS', 30_000),
     debounceMs: int('FILES_DEBOUNCE_MS', 1_000),
     maxDebounceMs: int('FILES_MAX_DEBOUNCE_MS', 5_000),
