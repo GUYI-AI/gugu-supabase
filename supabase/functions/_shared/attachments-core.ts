@@ -550,11 +550,11 @@ interface Claimed {
   content_type: string
 }
 
-/** Multipart uploads whose permit expired are abandoned in the store, then forgotten; a failure is retried next time. */
+/** Multipart uploads whose permit expired are abandoned in the store, then forgotten; a failure is tried again in a later round. */
 async function abandonExpiredParts(deps: AttachmentsDeps) {
   const parts = objectStorage(deps).parts
   if (!parts) return
-  const stale = ((await call(deps.serviceRpc, 'file_managed_upload_parts_expired', { p_limit: 50 })) ?? []) as Array<{ staging_key: string; account_id: string; upload_id: string }>
+  const stale = ((await call(deps.serviceRpc, 'file_managed_upload_parts_claim', { p_limit: 50 })) ?? []) as Array<{ staging_key: string; account_id: string; upload_id: string }>
   for (const row of stale) {
     try {
       await parts.abandon(row.staging_key, row.upload_id)

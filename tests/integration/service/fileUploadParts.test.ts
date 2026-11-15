@@ -71,12 +71,34 @@ describe('multipart upload state',()=>{
     await db.query('SELECT chat.file_managed_upload_parts_clear($1,$2,$3)',[key,owner,'U1'])
     expect(await parts(key,null)).toEqual({upload_id:null,parts_done:[]})
   })
-  it('lists the uploads whose permit expired, and only those that have an upload id',async()=>{
+  const expire=(keys:string[])=>db.query("UPDATE chat.file_transfer_reservations SET expires_at=now()-interval '1 second' WHERE id IN (SELECT reservation_id FROM chat.file_transfer_uploads WHERE staging_key=ANY($1))",[keys])
+  const claim=async(limit:number,among:string[])=>(await db.query('SELECT * FROM chat.file_managed_upload_parts_claim($1)',[limit])).rows
+    .filter(r=>among.includes(r.staging_key))
+  it('claims only expired uploads that have an upload id, and stamps them as tried',async()=>{
     const [old,live,none]=[await permit(),await permit(),await permit()]
     await parts(old,'U-old');await parts(live,'U-live')
-    await db.query("UPDATE chat.file_transfer_reservations SET expires_at=now()-interval '1 second' WHERE id IN (SELECT reservation_id FROM chat.file_transfer_uploads WHERE staging_key=ANY($1))",[[old,none]])
-    const rows=(await db.query('SELECT * FROM chat.file_managed_upload_parts_expired(50)')).rows.filter(r=>[old,live,none].includes(r.staging_key))
-    expect(rows).toEqual([{staging_key:old,account_id:owner,upload_id:'U-old'}])
+    await expire([old,none])
+    expect(await claim(50,[old,live,none])).toEqual([{staging_key:old,account_id:owner,upload_id:'U-old'}])
+    expect((await db.query('SELECT abandon_tried_at IS NOT NULL AS tried FROM chat.file_transfer_uploads WHERE staging_key=$1',[old])).rows[0].tried).toBe(true)
+  })
+  it('when every claimed abandon fails, the next round takes the ones not tried yet',async()=>{
+    const keys=[await permit(),await permit(),await permit()]
+    for(const [i,key] of keys.entries()) await parts(key,'U'+i)
+    await expire(keys)
+    // Limit 2 stands for the gc's 50: the first round's two fail (nothing clears them), the third is next.
+    const first=(await claim(2,keys)).map(r=>r.staging_key)
+    expect(first).toHaveLength(2)
+    expect((await claim(2,keys)).map(r=>r.staging_key)[0]).toBe(keys.find(k=>!first.includes(k)))
+  })
+  it('a row that keeps failing is tried again in turn, earliest tried first, after the rows never tried',async()=>{
+    const [early,late,fresh]=[await permit(),await permit(),await permit()]
+    for(const key of [early,late,fresh]) await parts(key,'U-'+key.slice(-4))
+    await expire([early,late,fresh])
+    await db.query("UPDATE chat.file_transfer_uploads SET abandon_tried_at=now()-interval '10 minutes' WHERE staging_key=$1",[early])
+    await db.query("UPDATE chat.file_transfer_uploads SET abandon_tried_at=now()-interval '5 minutes' WHERE staging_key=$1",[late])
+    expect((await claim(1,[early,late,fresh])).map(r=>r.staging_key)).toEqual([fresh])
+    expect((await claim(1,[early,late,fresh])).map(r=>r.staging_key)).toEqual([early])
+    expect((await claim(1,[early,late,fresh])).map(r=>r.staging_key)).toEqual([late])
   })
   // upload-parts and upload-complete refuse through file_managed_upload_for: an expired permit, and an upload already sent.
   it('the permit check the routes rely on refuses an expired permit and reports a sent upload\'s blob',async()=>{
@@ -93,7 +115,7 @@ describe('multipart upload state',()=>{
     const key=await permit()
     await user(owner)
     for(const [sql,args] of [[PARTS,[key,owner,'U1',[]]],['SELECT chat.file_managed_upload_parts_clear($1,$2,$3)',[key,owner,'U1']],
-      ['SELECT * FROM chat.file_managed_upload_parts_expired(1)',[]]] as const) {
+      ['SELECT * FROM chat.file_managed_upload_parts_claim(1)',[]]] as const) {
       expect((await reject(sql,[...args])).code).toBe('42501')
     }
   })

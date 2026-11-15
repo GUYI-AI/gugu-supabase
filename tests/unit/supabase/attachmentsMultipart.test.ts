@@ -78,7 +78,7 @@ function fakes(opts: { prefix?: string; size?: number; expired?: boolean; blob?:
       if (row.upload_id === args.p_upload_id) { row.upload_id = null; row.parts_done = [] }
       return { data: null, error: null }
     }
-    if (fn === 'file_managed_upload_parts_expired') return { data: opts.expired && row.upload_id ? [{ staging_key: KEY, account_id: USER, upload_id: row.upload_id }] : [], error: null }
+    if (fn === 'file_managed_upload_parts_claim') return { data: opts.expired && row.upload_id ? [{ staging_key: KEY, account_id: USER, upload_id: row.upload_id }] : [], error: null }
     if (fn === 'file_blob_gc_claim') return { data: [], error: null }
     return { data: null, error: null }
   }
@@ -240,7 +240,7 @@ describe('gc abandons expired multipart uploads', () => {
       await handleGc(f.deps)
       expect(f.uploads.get('U1')!.state).toBe('aborted')
       expect(f.row.upload_id).toBeNull()
-      expect(f.rpcs.indexOf('file_managed_upload_parts_expired')).toBeGreaterThan(f.rpcs.indexOf('file_transfer_expire'))
+      expect(f.rpcs.indexOf('file_managed_upload_parts_claim')).toBeGreaterThan(f.rpcs.indexOf('file_transfer_expire'))
       // A part sent with an old signature after that is refused by the store.
       const signed = await f.deps.objects!.parts!.sign(KEY, 'U1', [{ n: 1, bytes: 10 }])
       expect(await f.send(signed[0]!)).toBe(404)
