@@ -78,6 +78,14 @@ describe('project local metadata and exact references, kept by the device that s
       expect((await db.query(PREPARE,[group,actor,123,kind])).rows[0].r).toMatchObject({chat_id:group})
     }
   })
+  it('refuses an upload over the configured size with that size in bytes',async()=>{
+    await service()
+    await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=chat.file_transfer_limits.settings||EXCLUDED.settings",
+      [{inventory_ready:true,file_max_bytes:1000,upload_permit_seconds:120}])
+    await user(member)
+    const refused=await fails('SELECT chat.file_managed_upload_prepare($1,$2,$3,$4)',[group,member,1001,null])
+    expect([refused.message,refused.hint]).toEqual(['File exceeds configured upload size of 1000 bytes','file_transfer_too_large'])
+  })
   it('publishes immutable device/project/path/SHA metadata, without a cloud blob, URL, key or absolute root',async()=>{
     expect(await publish()).toMatchObject({item_id:item,version:1,sha256:sha,size_bytes:123})
     const local=await resolve()
@@ -423,6 +431,19 @@ describe('temporary generations reuse managed budgets and private key issuance',
     await user()
     expect((await db.query('SELECT chat.file_managed_upload_as($1,$2,$3,128) AS r',[randomUUID(),group,owner])).rows[0].r.max_bytes).toBe(128)
     expect((await request()).transfer_status).toBe('requested')
+  })
+  // The published file is 123 bytes; whichever of the two limits is lower is the one the reader is told.
+  it.each([['file_max_bytes',122],['temporary_group_bytes',122]])('refuses a reader at once, with both sizes, when the file is over %s',async(limit,bytes)=>{
+    await service()
+    await db.query('UPDATE chat.file_transfer_limits SET settings=settings||$1',[{[limit]:bytes}])
+    const id=randomUUID()
+    await user(member)
+    const refused=await fails('SELECT chat.file_temporary_request($1,$2,$3)',[{item_id:item},member,id])
+    expect([refused.message,refused.hint]).toEqual(['File is 123 bytes; transfers through the server are at most 122 bytes','file_transfer_too_large'])
+    await service()
+    expect((await db.query('SELECT id FROM chat.file_temporary_transfers WHERE id=$1',[id])).rows).toEqual([])
+    await db.query('UPDATE chat.file_transfer_limits SET settings=settings||$1',[{[limit]:123}])
+    expect((await request(id)).transfer_status).toBe('requested')
   })
   it('wakes the holding device\'s channel with only the request id, not a renderer-only user bus',async()=>{
     const id=randomUUID(),transfer=await request(id)
