@@ -17,6 +17,14 @@ A signed URL is a replayable bearer capability. Sixty seconds limits **new reque
 
 No permanent file is evicted to satisfy a quota. This release contains no LRU. A later temporary-transfer provider may evict only its own temporary objects.
 
+## Origin fallback for image previews
+
+An OSS download advertises `origin_available` without pre-signing an origin URL. After a CDN connection failure, the client can repeat `file-download` with `origin: true`, the same reference and actor, and the current `download_id` as `request_id`. The existing authorization and reservation checks still run before signing.
+
+For an eligible managed image, that explicit fallback response reuses `thumb_url` for an OSS V4 URL to the same object with the existing fixed thumbnail transformation. No caller-selected object key or processing expression is accepted. Both original and thumbnail signatures retain the reservation's attribution, optional traffic limit and original deadline of at most 60 seconds; `expires_at` is their earliest actual expiry. Non-images, images outside the existing processing limits and encrypted temporary objects receive no origin thumbnail.
+
+Clients must not persist signed URLs. If an older backend supplies no origin `thumb_url`, the failed thumbnail preview must remain an explicit failure rather than silently fetching the full original. Preview bytes may retain their existing cache policy independently of these short-lived capabilities.
+
 ## Deployment settings
 
 Download admission calculates usage directly from the original reservation and observation ledgers. It locks the existing global limits row for signature-rate checks, quota checks and the reservation insert near the end of the transaction; the lock remains held through the already locked metadata updates and RPC commit. A shared row is necessary for the installation-wide hard download budget: locking different accounts or groups independently would let them overbook the same global headroom. Observations and settlement enter the same fence before changing usage. There is no copied usage total or reconciliation path.

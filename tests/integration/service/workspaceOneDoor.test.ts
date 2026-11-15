@@ -100,11 +100,11 @@ describe('只有门能写', () => {
       has_any_column_privilege('authenticated', 'chat.workspace_items', 'UPDATE') AS update`)
     expect(rows[0]).toEqual({ select: true, delete: false, insert: false, update: false })
     const writes = await database.query<{ policyname: string }>(`SELECT policyname FROM pg_policies
-      WHERE schemaname = 'chat' AND tablename = 'workspace_items' AND 'authenticated' = ANY(roles) AND cmd <> 'SELECT'`)
+      WHERE schemaname = 'chat' AND tablename = 'workspace_items' AND 'authenticated' = ANY(roles) AND cmd <> 'SELECT' AND permissive = 'PERMISSIVE'`)
     expect(writes.rows).toEqual([])
     // 对照:读的那条还在。
     const reads = await database.query<{ policyname: string }>(`SELECT policyname FROM pg_policies
-      WHERE schemaname = 'chat' AND tablename = 'workspace_items' AND 'authenticated' = ANY(roles) AND cmd = 'SELECT'`)
+      WHERE schemaname = 'chat' AND tablename = 'workspace_items' AND 'authenticated' = ANY(roles) AND cmd = 'SELECT' AND permissive = 'PERMISSIVE'`)
     expect(reads.rows).toEqual([{ policyname: 'workspace_items_select_member' }])
   })
 
