@@ -7,7 +7,7 @@ export interface TeamMember {
   role: TeamRole; state: MemberState; revision: number;
 }
 export class TeamRefusal extends Error {
-  constructor(readonly code: string, readonly status: number) { super(code); }
+  constructor(readonly code: string, readonly status: number, readonly details?: Record<string, unknown>) { super(code); }
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WRITE_ACTIONS = ['email_challenge', 'email_verify', 'create', 'sign_in', 'google_sign_in', 'invite',
