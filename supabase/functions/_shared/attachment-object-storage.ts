@@ -40,7 +40,7 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
     sign: async (key, image, now, permit) => {
       if(permit?.direct) {
         if(!config.directSign) throw new ObjectStorageError(503,'not_configured','Origin signing is not configured')
-        return config.directSign(key,false,now,permit)
+        return config.directSign(key,image,now,permit)
       }
       const signed=cdnSignedUrl(cdn,key,{image,now,rand:permit?.requestId.replace(/-/g,''),expiresSeconds:permit?.expiresSeconds})
       // Advertise the existing direct signer; never invoke it on the primary CDN path.
