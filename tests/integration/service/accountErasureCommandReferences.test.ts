@@ -59,8 +59,8 @@ it('hard deletion removes owned and sender commands while preserving anonymous r
   const ownDevice = 'erasure-' + randomUUID(), peerDevice = 'erasure-' + randomUUID()
   for (const id of [owner, peer]) await db.query(`INSERT INTO auth.users(id,aud,role,email,created_at)
     VALUES($1,'authenticated','authenticated',$2,now())`, [id, `${id}@command-erasure.invalid`])
-  for (const [id, user] of [[ownDevice, owner], [peerDevice, peer]]) await db.query(`INSERT INTO identity.gugu_devices(device_id,user_id,label,platform,status)
-    VALUES($1,$2,'Erasure fixture','linux','offline')`, [id, user])
+  for (const [id, user] of [[ownDevice, owner], [peerDevice, peer]]) await db.query(`INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform,status)
+    VALUES($1,$2,'Erasure fixture','erasure-fixture','linux','offline')`, [id, user])
   for (const [id, user, device] of [[ownAgent, owner, ownDevice], [peerAgent, peer, peerDevice]]) await db.query(`INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id,desired_status)
     VALUES($1,'agent','Erasure fixture',$2,$3,'offline')`, [id, user, device])
   async function command(user: string, device: string, payload: unknown) {
