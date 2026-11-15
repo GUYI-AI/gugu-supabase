@@ -178,6 +178,30 @@ it('requires an accepted code receipt before idempotent completion and never res
   expect((await refused(complete)).hint).toBe('verification_expired')
 })
 
+it('does not revive expired, failed or exhausted challenges or accept the wrong code receipt', async () => {
+  const begin = () => rpc('team_email_workflow', ['begin', { purpose: 'create', email: randomUUID() + '@code-negative.invalid' }])
+  const challenge = await begin(), other = await begin()
+  const complete = (id = challenge.challenge_id) => rpc('team_mail_delivery', ['complete_code', { kind: 'code', challenge_id: id }])
+  const claimed = await rpc('team_mail_delivery', ['claim', { kind: 'code', challenge_id: challenge.challenge_id }])
+  await rpc('team_mail_delivery', ['finish', { delivery_id: claimed.delivery_id, lease_token: claimed.lease_token,
+    state: 'accepted', reason_code: 'code_accepted' }])
+  expect((await refused(() => complete(other.challenge_id))).hint).toBe('version_conflict')
+  await db.query("UPDATE team_private.mail_deliveries SET reason_code='smtp_accepted' WHERE id=$1", [claimed.delivery_id])
+  expect((await refused(() => complete())).hint).toBe('version_conflict')
+  await db.query("UPDATE team_private.mail_deliveries SET reason_code='code_accepted' WHERE id=$1", [claimed.delivery_id])
+  await db.query("UPDATE team_private.email_challenges SET expires_at=now()-interval '1 second' WHERE id=$1", [challenge.challenge_id])
+  expect((await refused(() => complete())).hint).toBe('verification_expired')
+  await db.query("UPDATE team_private.email_challenges SET expires_at=now()+interval '5 minutes',state='failed' WHERE id=$1", [challenge.challenge_id])
+  expect((await refused(() => complete())).hint).toBe('verification_expired')
+  for (const state of ['sending', 'challenge']) {
+    await db.query('UPDATE team_private.email_challenges SET state=$2,attempts=5 WHERE id=$1', [challenge.challenge_id, state])
+    expect((await refused(() => complete())).hint).toBe('invalid_code')
+    expect((await db.query('SELECT state,attempts FROM team_private.email_challenges WHERE id=$1', [challenge.challenge_id])).rows[0])
+      .toEqual({ state, attempts: 5 })
+  }
+  expect((await db.query('SELECT count(*)::int n FROM team_private.mail_deliveries WHERE challenge_id=$1', [other.challenge_id])).rows[0].n).toBe(0)
+})
+
 it('keeps independent recipient cooldowns and reserves global capacity for OTP', async () => {
   await policy({ global_short: 5, invitation_global_percent: 60 })
   const owner = await founder(), address = randomUUID() + '@recipient.invalid'

@@ -166,6 +166,9 @@ BEGIN
   IF p_action='complete_code' THEN
     -- A stored send receipt survives a lost challenge-update acknowledgment.
     -- Keep challenge -> delivery lock order; never resend or reset verification.
+    IF challenge.state IN ('sending','challenge') AND challenge.attempts>=5 THEN
+      PERFORM team_private.refuse('invalid_code',401);
+    END IF;
     SELECT * INTO delivery FROM team_private.mail_deliveries WHERE challenge_id=challenge.id FOR UPDATE;
     IF delivery.id IS NULL OR delivery.state<>'accepted' OR delivery.reason_code IS DISTINCT FROM 'code_accepted'
       OR ROW(delivery.recipient_digest,delivery.team_id,delivery.inviter_member_id)
