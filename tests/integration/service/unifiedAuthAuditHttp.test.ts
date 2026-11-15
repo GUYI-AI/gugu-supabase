@@ -161,7 +161,7 @@ it.each(['registration', 'core'])('rolls back real Auth and its registration on 
   await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [room, owner.id, peer.id])
   await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type) VALUES($1,$2,$3,'fixture','text')", [message, room, owner.id])
   if (point === 'registration') await db.query(`ALTER TABLE identity.account_audit_redaction_jobs ADD CONSTRAINT unified_audit_enqueue_failure CHECK(source_subject_id<>'${owner.id}') NOT VALID`)
-  else await db.query(`ALTER TABLE chat.messages ADD CONSTRAINT unified_audit_core_failure CHECK(id<>'${message}'::uuid OR sender_user_id IS NOT NULL) NOT VALID`)
+  else await db.query(`ALTER TABLE chat.messages ADD CONSTRAINT unified_audit_core_failure CHECK(id<>'${message}' OR sender_user_id IS NOT NULL) NOT VALID`)
   const response = await auth('admin/users/' + owner.id, 'DELETE', { should_soft_delete: false })
   expect(response.status).toBeGreaterThanOrEqual(500); await response.body?.cancel()
   expect(await row('SELECT id FROM auth.users WHERE id=$1', [owner.id])).toBeDefined()

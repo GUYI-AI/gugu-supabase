@@ -97,7 +97,7 @@ BEGIN
     attempt_number:=job.attempts+1;
     BEGIN
         IF job.state='waiting_rescan' THEN
-            UPDATE identity.account_audit_redaction_jobs SET scan_round=2,phase='auth',
+            UPDATE identity.account_audit_redaction_jobs SET scan_round=2,state='pending',phase='auth',
               cursor_id=NULL,cursor_no=NULL WHERE id=job.id RETURNING * INTO job;
         END IF;
         UPDATE identity.account_audit_redaction_jobs SET state=CASE WHEN phase='verify' THEN 'verifying' ELSE 'running' END,
