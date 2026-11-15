@@ -105,7 +105,7 @@ it('records a legitimate late send result even after its original caller is disa
 })
 
 it.each(['global_short', 'global_daily', 'team_short', 'team_daily', 'inviter_short', 'inviter_daily'])('enforces the configured %s bucket without any IP', async dimension => {
-  await policy({ [dimension]: 1 })
+  await policy({ [dimension]: dimension.startsWith('global') ? 2 : 1, invitation_global_percent: 50 })
   const owner = await founder(), first = await invitation(owner), second = await invitation(owner)
   expect((await delivery(first)).claimed).toBe(true)
   expect((await refused(() => delivery(second))).hint).toBe('rate_limited')
@@ -137,6 +137,18 @@ it('does not let an unauthenticated code challenge invent a team admission scope
   const result = await rpc('team_mail_delivery', ['claim', { kind: 'code', challenge_id: challenge.challenge_id }])
   expect(result.claimed).toBe(true)
   expect((await db.query('SELECT team_id,inviter_member_id FROM team_private.mail_deliveries WHERE id=$1', [result.delivery_id])).rows[0]).toEqual({ team_id: null, inviter_member_id: null })
+})
+
+it('keeps independent recipient cooldowns and reserves global capacity for OTP', async () => {
+  await policy({ global_short: 5, invitation_global_percent: 60 })
+  const owner = await founder(), address = randomUUID() + '@recipient.invalid'
+  await delivery(await invitation(owner, address))
+  await delivery(await invitation(owner))
+  await delivery(await invitation(owner))
+  expect((await refused(async () => delivery(await invitation(owner)))).hint).toBe('rate_limited')
+  const challenge = await rpc('team_email_workflow', ['begin', { purpose: 'sign_in', email: address }])
+  expect(await rpc('team_mail_delivery', ['claim', { kind: 'code', challenge_id: challenge.challenge_id }])).toMatchObject({ claimed: true })
+  expect((await db.query('SELECT count(*)::int n FROM team_private.mail_deliveries WHERE admitted_at IS NOT NULL')).rows[0].n).toBe(4)
 })
 
 it('rejects incomplete or nonpositive policy changes rather than disabling admission', async () => {

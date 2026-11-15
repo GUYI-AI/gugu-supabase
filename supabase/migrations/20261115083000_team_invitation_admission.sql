@@ -1,6 +1,6 @@
 -- Identity mail admission only; SMTP configuration and credentials stay outside SQL.
 ALTER TABLE team_private.delivery_configuration ADD COLUMN mail_policy jsonb NOT NULL DEFAULT
-  '{"max_pending":100,"short_seconds":900,"daily_seconds":86400,"team_short":20,"team_daily":100,"inviter_short":10,"inviter_daily":50,"recipient_cooldown_seconds":60,"recipient_daily":3,"global_short":50,"global_daily":300,"ip_short":20,"ip_daily":100}'::jsonb;
+  '{"max_pending":100,"short_seconds":900,"daily_seconds":86400,"team_short":20,"team_daily":100,"inviter_short":10,"inviter_daily":50,"recipient_cooldown_seconds":60,"recipient_daily":3,"global_short":50,"global_daily":300,"invitation_global_percent":60,"ip_short":20,"ip_daily":100}'::jsonb;
 
 CREATE FUNCTION team_private.valid_mail_policy(p_policy jsonb) RETURNS boolean
 LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog AS $$
@@ -8,12 +8,13 @@ DECLARE field text;
 BEGIN
   IF p_policy IS NULL OR jsonb_typeof(p_policy)<>'object' THEN RETURN false; END IF;
   FOREACH field IN ARRAY ARRAY['max_pending','short_seconds','daily_seconds','team_short','team_daily',
-    'inviter_short','inviter_daily','recipient_cooldown_seconds','recipient_daily','global_short','global_daily','ip_short','ip_daily'] LOOP
+    'inviter_short','inviter_daily','recipient_cooldown_seconds','recipient_daily','global_short','global_daily','invitation_global_percent','ip_short','ip_daily'] LOOP
     IF jsonb_typeof(p_policy->field) IS DISTINCT FROM 'number'
       OR (p_policy->>field)!~'^[0-9]{1,7}$' THEN RETURN false; END IF;
     IF (p_policy->>field)::bigint NOT BETWEEN 1 AND 1000000 THEN RETURN false; END IF;
   END LOOP;
-  RETURN (p_policy->>'short_seconds')::integer<=(p_policy->>'daily_seconds')::integer
+  RETURN (p_policy->>'invitation_global_percent')::integer<100
+    AND (p_policy->>'short_seconds')::integer<=(p_policy->>'daily_seconds')::integer
     AND (p_policy->>'recipient_cooldown_seconds')::integer<=(p_policy->>'daily_seconds')::integer;
 END $$;
 ALTER TABLE team_private.delivery_configuration ADD CONSTRAINT team_mail_policy_valid
@@ -95,7 +96,8 @@ DECLARE actor team_private.members%ROWTYPE; invitation team_private.invitations%
   challenge team_private.email_challenges%ROWTYPE; delivery team_private.mail_deliveries%ROWTYPE;
   address text; recipient text; tid uuid; inviter uuid; key text; policy jsonb;
   stamp timestamptz:=clock_timestamp(); short_from timestamptz; daily_from timestamptz;
-  count_short bigint; count_daily bigint; latest timestamptz; claimed boolean:=false; outcome text;
+  count_short bigint; count_daily bigint; invitation_short bigint; invitation_daily bigint;
+  latest timestamptz; claimed boolean:=false; outcome text;
 BEGIN
   IF p_action='finish' THEN
     -- A legitimate in-flight send must be recorded even if its caller has since
@@ -109,8 +111,9 @@ BEGIN
       ('smtp_accepted','smtp_rejected','smtp_result_unknown','identity_unavailable','code_accepted','code_result_unknown') THEN
       PERFORM team_private.refuse('invalid_request',400);
     END IF;
-    IF outcome='accepted' AND p_input->>'reason_code' IS DISTINCT FROM
-      CASE WHEN delivery.invitation_id IS NOT NULL THEN 'smtp_accepted' ELSE 'code_accepted' END
+    IF outcome='accepted' AND
+      (delivery.invitation_id IS NOT NULL AND p_input->>'reason_code'<>'smtp_accepted'
+        OR delivery.challenge_id IS NOT NULL AND p_input->>'reason_code'<>'code_accepted')
       OR outcome='unknown' AND p_input->>'reason_code' NOT IN ('smtp_result_unknown','code_result_unknown')
       OR outcome='failed' AND p_input->>'reason_code' NOT IN ('smtp_rejected','identity_unavailable') THEN
       PERFORM team_private.refuse('invalid_request',400);
@@ -176,15 +179,31 @@ BEGIN
     END IF;
     short_from:=stamp-make_interval(secs=>(policy->>'short_seconds')::integer);
     daily_from:=stamp-make_interval(secs=>(policy->>'daily_seconds')::integer);
-    SELECT count(*) FILTER(WHERE admitted_at>short_from),count(*) INTO count_short,count_daily
+    SELECT count(*) FILTER(WHERE admitted_at>short_from),count(*),
+      count(*) FILTER(WHERE invitation_id IS NOT NULL AND admitted_at>short_from),
+      count(*) FILTER(WHERE invitation_id IS NOT NULL)
+      INTO count_short,count_daily,invitation_short,invitation_daily
       FROM team_private.mail_deliveries WHERE admitted_at>daily_from;
     IF count_short>=(policy->>'global_short')::integer OR count_daily>=(policy->>'global_daily')::integer THEN
       PERFORM team_private.refuse('rate_limited',429);
     END IF;
-    SELECT count(*),max(admitted_at) INTO count_daily,latest FROM team_private.mail_deliveries
-      WHERE recipient_digest=recipient AND admitted_at>daily_from;
-    IF count_daily>=(policy->>'recipient_daily')::integer OR latest>stamp-make_interval(secs=>(policy->>'recipient_cooldown_seconds')::integer) THEN
-      PERFORM team_private.refuse('rate_limited',429);
+    IF delivery.invitation_id IS NOT NULL THEN
+      -- Invitations cannot consume the OTP reservation of the global bucket.
+      IF invitation_short>=floor((policy->>'global_short')::numeric*(policy->>'invitation_global_percent')::numeric/100)
+        OR invitation_daily>=floor((policy->>'global_daily')::numeric*(policy->>'invitation_global_percent')::numeric/100) THEN
+        PERFORM team_private.refuse('rate_limited',429);
+      END IF;
+      SELECT count(*),max(admitted_at) INTO count_daily,latest FROM team_private.mail_deliveries
+        WHERE recipient_digest=recipient AND invitation_id IS NOT NULL AND admitted_at>daily_from;
+      IF count_daily>=(policy->>'recipient_daily')::integer OR latest>stamp-make_interval(secs=>(policy->>'recipient_cooldown_seconds')::integer) THEN
+        PERFORM team_private.refuse('rate_limited',429);
+      END IF;
+    ELSE
+      -- Keep the established OTP recipient bucket independent from invitations:
+      -- 60-second cooldown and three attempts per rolling 15 minutes.
+      SELECT count(*),max(admitted_at) INTO count_short,latest FROM team_private.mail_deliveries
+        WHERE recipient_digest=recipient AND challenge_id IS NOT NULL AND admitted_at>stamp-interval '15 minutes';
+      IF count_short>=3 OR latest>stamp-interval '60 seconds' THEN PERFORM team_private.refuse('rate_limited',429); END IF;
     END IF;
     IF tid IS NOT NULL THEN
       SELECT count(*) FILTER(WHERE admitted_at>short_from),count(*) INTO count_short,count_daily
@@ -215,7 +234,9 @@ BEGIN
   END IF;
   RETURN jsonb_build_object('delivery_id',delivery.id,'delivery_key',delivery.delivery_key,
     'state',delivery.state,'reason_code',delivery.reason_code,'claimed',claimed,
-    'lease_token',CASE WHEN claimed THEN delivery.lease_token END);
+    'lease_token',CASE WHEN claimed THEN delivery.lease_token END,'recipient_email',address,
+    'team_name',(SELECT name FROM team_private.teams WHERE id=tid),
+    'expires_at',COALESCE(invitation.expires_at,challenge.expires_at));
 END $$;
 ALTER FUNCTION public.team_mail_delivery(text,jsonb,uuid,uuid,inet) OWNER TO postgres;
 REVOKE ALL ON FUNCTION public.team_mail_delivery(text,jsonb,uuid,uuid,inet) FROM PUBLIC,anon,authenticated;

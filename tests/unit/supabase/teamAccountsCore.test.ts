@@ -24,7 +24,9 @@ describe('team member HTTP authorization boundary', () => {
     }
   })
   it('returns only safe challenge fields instead of forwarding the server email and lease', async () => {
-    const f = fixture(); f.rpc.mockResolvedValue({ challenge_id: challengeId, expires_at: '2026-11-15T02:00:00Z', email: 'private@example.invalid', lease_token: 'private-lease' })
+    const f = fixture(); f.rpc.mockImplementation(async (name, args) => name === 'team_mail_delivery'
+      ? { delivery_id: challengeId, state: args.p_action === 'claim' ? 'sending' : 'accepted', claimed: args.p_action === 'claim', lease_token: 'private-mail-lease' }
+      : { challenge_id: challengeId, expires_at: '2026-11-15T02:00:00Z', email: 'private@example.invalid', lease_token: 'private-lease' })
     f.auth.sendEmailCode.mockResolvedValue(true)
     const response = await f.handle(post({ action: 'email_challenge', email: 'private@example.invalid', purpose: 'create' }))
     expect(response.status).toBe(200)
@@ -32,7 +34,9 @@ describe('team member HTTP authorization boundary', () => {
     expect(JSON.stringify(value)).not.toContain('private@example.invalid'); expect(JSON.stringify(value)).not.toContain('private-lease')
   })
   it('records a failed official send without pretending an email was delivered', async () => {
-    const f = fixture(); f.rpc.mockResolvedValue({ challenge_id: challengeId, email: 'private@example.invalid' }); f.auth.sendEmailCode.mockResolvedValue(false)
+    const f = fixture(); f.rpc.mockImplementation(async name => name === 'team_mail_delivery'
+      ? { delivery_id: challengeId, state: 'sending', claimed: true, lease_token: 'private-mail-lease' }
+      : { challenge_id: challengeId, email: 'private@example.invalid' }); f.auth.sendEmailCode.mockResolvedValue(false)
     const response = await f.handle(post({ action: 'email_challenge', email: 'private@example.invalid', purpose: 'create' }))
     expect(response.status).toBe(503)
     expect(f.rpc).toHaveBeenLastCalledWith('team_email_workflow', { p_action: 'sent', p_input: { challenge_id: challengeId, sent: false } })

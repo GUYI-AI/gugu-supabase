@@ -24,7 +24,9 @@ beforeAll(async () => {
   await db.query("UPDATE team_private.delivery_configuration SET site_origin='https://team.example.invalid' WHERE singleton")
   const service = process.env.GUGU_INTEGRATION_SERVICE_ROLE_KEY ?? ''
   admin = createClient(url, service, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } })
-  const deps = teamAccountsDependencies({ url, anonKey: anon, serviceKey: service })
+  // SMTP acceptance is an explicit test adapter; this does not attest delivery.
+  const deps = teamAccountsDependencies({ url, anonKey: anon, serviceKey: service,
+    invitationMailer: { canSend: () => true, send: async () => ({ state: 'accepted', reason_code: 'smtp_accepted' }) } })
   handle = createTeamAccountsHandler({ ...deps, auth: { ...deps.auth, sendEmailCode: value => deps.auth.ensureAnchor(value) },
     revokeModel: async input => { modelRevocations.push(input); return true } })
 })
