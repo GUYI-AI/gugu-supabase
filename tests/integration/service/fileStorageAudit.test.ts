@@ -137,13 +137,14 @@ describe('committed file retention action audit', () => {
     expect(await events()).toHaveLength(1); expect(await changes()).toHaveLength(1)
     expect((await changes())[0]).toMatchObject({ item_ids: [file.item], storage_id: file.storage })
   })
-  it('prunes only records strictly older than 180 days, with a bounded batch', async () => {
+  it('prunes only records strictly older than 180 UTC days, independent of caller timezone', async () => {
     const file = await upload()
     for (let i = 0; i < 3; i++) await mark([{ item_id: file.item }], 'permanent')
     const rows = await events()
     await db.query("UPDATE file_private.storage_action_audit SET occurred_at=now()-interval '181 days' WHERE id=$1", [rows[0].id])
-    await db.query("UPDATE file_private.storage_action_audit SET occurred_at=now()-interval '180 days' WHERE id=$1", [rows[1].id])
-    await db.query("UPDATE file_private.storage_action_audit SET occurred_at=now()-interval '180 days'+interval '1 second' WHERE id=$1", [rows[2].id])
+    await db.query("UPDATE file_private.storage_action_audit SET occurred_at=now()-interval '15552000 seconds' WHERE id=$1", [rows[1].id])
+    await db.query("UPDATE file_private.storage_action_audit SET occurred_at=now()-interval '15552000 seconds'+interval '1 second' WHERE id=$1", [rows[2].id])
+    await db.query("SET LOCAL TimeZone='America/New_York'")
     expect(await value('SELECT file_private.prune_storage_action_audit(1) AS v')).toBe(1)
     expect(await value('SELECT file_private.prune_storage_action_audit(1) AS v')).toBe(0)
     expect((await events()).map(row => row.id).sort()).toEqual([rows[1].id, rows[2].id].sort())

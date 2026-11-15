@@ -200,7 +200,7 @@ ALTER FUNCTION file_private.erase_storage_action_audit(text[]) OWNER TO postgres
 REVOKE ALL ON FUNCTION file_private.erase_storage_action_audit(text[]) FROM PUBLIC,anon,authenticated,service_role;
 
 CREATE FUNCTION file_private.prune_storage_action_audit(p_limit integer DEFAULT 1000) RETURNS integer
-LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET TimeZone='UTC' AS $$
 DECLARE n integer;
 BEGIN
     IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000 THEN RAISE EXCEPTION 'Invalid audit cleanup limit'; END IF;
