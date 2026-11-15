@@ -105,8 +105,8 @@ it.each(['dm','ai','group','topic','removed_owned_agent','other_human','other_ag
 it('cascades source topics and file items, queues exclusive blobs and preserves a shared copy',async()=>rollback(async()=>{
   const owner=await human(),mine=await agent(owner),peer=await human(),otherPeer=await human()
   const root=await room('group',owner,[owner,mine]),topic=await room('topic',owner,[owner,mine],root)
-  // Two surviving humans keep the positive-control group active; the legacy
-  // one-member archival/byte-expiry rule is a separate unchanged behavior.
+  // Two surviving humans keep the positive-control group active; archived
+  // historical-reader protection remains covered by its own suite.
   const shared=await room('group',peer,[peer,otherPeer,owner])
   // Topics use their source's file container; do not create an invalid private
   // topic container just to exercise the cascade.
