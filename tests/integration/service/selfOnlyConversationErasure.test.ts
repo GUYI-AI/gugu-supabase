@@ -111,6 +111,12 @@ it('cascades source topics and file items, queues exclusive blobs and preserves 
   // Topics use their source's file container; do not create an invalid private
   // topic container just to exercise the cascade.
   const exclusive=await binary(root,owner),copy=await binary(root,owner),kept=await binary(shared,peer,copy.pointer)
+  // Opaque legacy names and NULL ownership cannot be rediscovered from the
+  // erased user prefix after deleting their last conversation reference.
+  const legacy='opaque-'+randomUUID()+'.png'
+  await db.query("INSERT INTO storage.objects(bucket_id,name,metadata)VALUES('avatars',$1,'{\"size\":8,\"mimetype\":\"image/png\"}')",[legacy])
+  await db.query("UPDATE chat.chats SET avatar_storage_bucket_id='avatars',avatar_storage_object_name=$2 WHERE id=$1",[root,legacy])
+  expect((await row("SELECT count(*)::int n FROM chat.file_blobs WHERE bucket_id='avatars' AND object_name=$1",[legacy])).n).toBe(0)
   const folder=(await row("INSERT INTO chat.workspace_items(chat_id,kind,filename,created_by)VALUES($1,'folder','Nested',$2)RETURNING id",[root,owner])).id
   const text=(await row(`INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,inline_text,size_bytes,created_by,parent_id)
     VALUES($1,'document','note.md','text/markdown','fixture',7,$2,$3)RETURNING id`,[root,owner,folder])).id
@@ -125,6 +131,8 @@ it('cascades source topics and file items, queues exclusive blobs and preserves 
   expect((await row('SELECT count(*)::int n FROM chat.file_blob_gc WHERE blob_id=$1',[exclusive.blob_id])).n).toBe(1)
   expect((await row('SELECT chat.file_blob_in_use($1) used',[copy.blob_id])).used).toBe(true)
   expect((await row("SELECT count(*)::int n FROM storage.objects WHERE bucket_id='workspace' AND name=$1",[copy.pointer])).n).toBe(1)
+  expect((await row(`SELECT count(*)::int n FROM chat.file_blob_gc g JOIN chat.file_blobs b ON b.id=g.blob_id
+    WHERE b.bucket_id='avatars' AND b.object_name=$1`,[legacy])).n).toBe(1)
 }))
 
 it('rolls back Auth, conversations, files and registration when a cascade cannot enqueue its blob',async()=>rollback(async()=>{
