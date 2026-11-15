@@ -78,6 +78,13 @@ describe('closed Auth audit actor redaction', () => {
     await context(); await erase()
     expect((await read(id)).payload).toEqual({ actor_id: subject, traits: payload.traits })
   })
+  it.each([null, 'provided'])('retains an email-provider UUID when email is %s', async source => {
+    const payload={actor_id:subject,actor_username:email(),actor_name:'Synthetic',
+      action:'identity_unlinked',traits:{provider:'email',provider_id:subject,identity_id:randomUUID()}}
+    const id=await entry(payload)
+    await context();await erase(ids(),source===null?null:email())
+    expect((await read(id)).payload).toEqual({actor_id:subject,action:'identity_unlinked',traits:payload.traits})
+  })
   it('requires the exact full ordered current-transaction identity context', async () => {
     expect((await refused('SELECT identity.erase_auth_audit_actor($1,$2)', [ids(), email()])).code).toBe('42501')
     await context()

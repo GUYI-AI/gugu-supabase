@@ -42,10 +42,10 @@ BEGIN
     IF target_matches THEN
         result:=result#-'{traits,user_email}'#-'{traits,user_phone}';
     END IF;
-    -- Auth's email identity provider uses the email as provider_id. Other
-    -- providers' opaque IDs and all security IDs/actions/timestamps stay intact.
-    IF p_payload#>>'{traits,provider}'='email' AND (actor_matches
-        OR (p_email IS NOT NULL AND lower(btrim(p_payload#>>'{traits,provider_id}'))=p_email)) THEN
+    -- Email-provider IDs can be UUIDs. Never remove an opaque security ID just
+    -- because its actor matches; clear only a full email-valued legacy ID.
+    IF p_payload#>>'{traits,provider}'='email' AND p_email IS NOT NULL
+        AND lower(btrim(p_payload#>>'{traits,provider_id}'))=p_email THEN
         result:=result#-'{traits,provider_id}';
     END IF;
     RETURN result;
