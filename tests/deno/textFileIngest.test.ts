@@ -1,5 +1,6 @@
 import { handleCommit, handlePlace, Refusal, type AttachmentsDeps } from '../../supabase/functions/_shared/attachments-core.ts'
 import { inspectFileStream } from '../../supabase/functions/_shared/file-inspection.ts'
+import { ObjectStorageError } from '../../supabase/functions/_shared/object-storage.ts'
 import { handleDocumentImport, WORKSPACE_TEXT_MAX_BYTES, workspaceUploadKind } from '../../supabase/functions/_shared/document-import-core.ts'
 
 const assert = (ok: unknown, message: string) => { if (!ok) throw new Error(message) }
@@ -16,7 +17,7 @@ function fixture(bytes: Uint8Array) {
       inspect: async (_key: string, limit: number, retain: number) => ({
         ...await inspectFileStream(new ReadableStream({ start(c) {
           c.enqueue(bytes.subarray(0,511)); c.enqueue(bytes.subarray(511)); c.close()
-        }}), limit, retain), etag: '"immutable"',
+        }}), limit, retain), revision: '"immutable"',
       }),
       promote: async () => {}, exists: async () => true,
     },
@@ -92,7 +93,7 @@ Deno.test('a mixed import honors content_types for JSON documents without stalli
       object_name: suffix, size_bytes: suffix === 'json' ? encode('{\n  "x": 1\n}\n').length : encode(text).length, sha256: null }))
     const inspect = f.deps.objects!.inspect!
     f.deps.objects!.inspect = async (object, limit, retain) => object === 'json'
-      ? { ...await inspectFileStream(new Response(encode('{\n  "x": 1\n}\n')).body!, limit, retain), etag: '"immutable"' }
+      ? { ...await inspectFileStream(new Response(encode('{\n  "x": 1\n}\n')).body!, limit, retain), revision: '"immutable"' }
       : inspect(object, limit, retain)
     f.deps.serviceRpc = async (fn, args) => {
       f.calls.push({ fn, args })
@@ -113,7 +114,7 @@ Deno.test('a mixed import honors content_types for JSON documents without stalli
 Deno.test('a storage adapter returning only its sniffing prefix cannot silently truncate a document', async () => {
   const f = fixture(encode(text))
   f.deps.objects!.inspect = async () => ({ bytes: encode(text).subarray(0,512), sizeBytes: encode(text).length,
-    sha256: 'a'.repeat(64), etag: '"immutable"' })
+    sha256: 'a'.repeat(64), revision: '"immutable"' })
   let refused = false
   try { await handlePlace(f.deps, user, { staging_key: key, chat_id: 'group', file_name: '正文.md' }) }
   catch (error) { refused = (error as { code?: string }).code === 'not_configured' }
@@ -223,7 +224,7 @@ Deno.test('an unreadable item is recorded and passed over; the batch goes on to 
 
 Deno.test('a configuration refusal still stops the batch, naming the item it stopped at', async () => {
   const f = fixture(encode(text)), id = '00000000-0000-4000-8000-000000000001'
-  f.deps.objects!.inspect = undefined
+  f.deps.objects!.inspect = async () => { throw new ObjectStorageError(503, 'not_configured', 'Attachment inspection requires GUGU_FILES_INSPECT_URL and GUGU_FILES_INSPECT_SECRET') }
   f.deps.serviceRpc = async (fn, args) => {
     f.calls.push({ fn, args })
     return { data: fn === 'workspace_document_import_candidates' ? [{ id, version: 1, blob_id: 'blob', filename: 'old.md',
