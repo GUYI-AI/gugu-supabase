@@ -6,7 +6,7 @@ const REFUSALS: Record<string, number> = {
   unauthenticated: 401, verification_required: 401, verification_expired: 401, invalid_code: 401,
   forbidden: 403, membership_disabled: 403, region_mismatch: 403, team_identity_required: 403,
   not_found: 404, invitation_invalid: 404, version_conflict: 409, idempotency_conflict: 409,
-  invitation_used: 409, invalid_recipient: 409, rate_limited: 429, invalid_request: 400, dependency_unavailable: 503,
+  invitation_used: 409, invalid_recipient: 409, revocation_pending: 409, rate_limited: 429, invalid_request: 400, dependency_unavailable: 503,
 };
 export function teamAccountsDependencies(settings: Settings): TeamAccountsDependencies {
   const request = settings.fetch ?? fetch, root = settings.url.replace(/\/+$/, '');

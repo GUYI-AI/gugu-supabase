@@ -112,4 +112,20 @@ it('replays disable with its original revision without transferring legacy chat 
   expect(state.state).toBe('revoking'); expect(state.handoff_complete).toBe(false)
   expect((await refused("SELECT public.team_account_read('profile',$1,$2)", [seat.id, seat.session])).hint).toBe('membership_disabled')
   expect((await db.query('SELECT principal_user_id FROM team_private.members WHERE id=$1', [seat.membership.id])).rows[0].principal_user_id).toBe(seat.id)
+  const restore = { member_id: seat.membership.id, expected_revision: 2, idempotency_key: randomUUID() }
+  expect((await refused('SELECT public.team_member_workflow($1,$2,$3,$4)', ['restore', owner.id, owner.session, restore])).hint).toBe('revocation_pending')
+  await memberFlow(owner, 'revocation_checkpoint', { operation_id: first.operation_id, auth_sessions_revoked: true,
+    auth_banned: true, model_authorization_revoked: true })
+  const revoked = await memberFlow(owner, 'revocation_result', { operation_id: first.operation_id })
+  expect(revoked.state).toBe('complete'); expect(revoked.handoff_complete).toBe(false)
+  const restoring = await memberFlow(owner, 'restore', restore)
+  expect(restoring.membership.state).toBe('disabled')
+  expect((await refused('SELECT public.team_member_workflow($1,$2,$3,$4)', ['restore_finish', owner.id, owner.session,
+    { operation_id: restoring.operation_id }])).hint).toBe('version_conflict')
+  await db.query('DELETE FROM auth.sessions WHERE user_id=$1', [seat.id])
+  const restored = await memberFlow(owner, 'restore_finish', { operation_id: restoring.operation_id })
+  expect(restored.membership.state).toBe('active'); expect(restored.membership.revision).toBe(3)
+  expect(restored.requires_sign_in).toBe(true); expect(restored.handoff_state).toBe('pending')
+  const replayRestore = await memberFlow(owner, 'restore', restore)
+  expect(replayRestore.operation_state).toBe('complete'); expect(replayRestore.membership.revision).toBe(3)
 })

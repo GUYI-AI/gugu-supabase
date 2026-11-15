@@ -14,10 +14,10 @@ Management rechecks the current administrator after waiting for the team lock. S
 
 ## Explicitly unfinished
 
-- Google exchange and restore/email-change reconciliation are not complete; unsupported paths fail closed.
+- Google exchange and email-change reconciliation are not complete; unsupported paths fail closed. Restore keeps the member disabled until Auth unban, global sign-out and a database check for zero remaining sessions finish; it then increments membership revision and requires a fresh sign-in. Interrupted operations replay their original receipt.
 - `asset_custody` separates organization ownership from private-history authority. It currently does not capture all live resources or provide operational handoff. The draft never changes the legacy agent owner, grants the recipient chat membership or claims that custody metadata alone is a finished handoff.
-- `handoff_complete` remains false. A pending revocation must not be reported complete merely because Auth/model credentials were revoked. The UI must retain its original operation rather than creating a second one.
+- Credential revocation completes only after all three checks pass; `handoff_complete` remains false and operational handoff stays separately pending. Neither receipt grants access to private history. The UI retains its original operation rather than creating a second one.
 - Workflow-state cleanup, expired challenge retention and the organization-principal erasure path must join the separately reviewed account-erasure policy before production.
 - Installed-schema tests and a real Edge → official OTP → separate Auth session lifecycle still need to pass. SQL state-machine tests are not email/HTTP evidence.
 
-The full create → invite → spend → cap → adjust → top-up → disable acceptance requires the completed member lifecycle and privacy handoff. Billing/gate fixtures can independently prove financial invariants and stale-session denial, but cannot replace those product paths.
+The full create → invite → spend → cap → adjust → top-up → disable acceptance requires the completed member lifecycle. Operational privacy handoff is a separate pending deliverable; no completed-handoff claim may be inferred from credential revocation. Billing/gate fixtures can independently prove financial invariants and stale-session denial, but cannot replace those product paths.

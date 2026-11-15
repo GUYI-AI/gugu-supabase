@@ -64,8 +64,8 @@ export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
       await deps.rpc('team_member_workflow', sessionArgs(caller, { operation_id: operation, model_authorization_revoked: true }, 'revocation_checkpoint'));
     }
     state = await deps.rpc('team_member_workflow', sessionArgs(caller, { operation_id: operation }, 'revocation_result'));
-    // Custody metadata alone is not operational handoff. The SQL completion
-    // condition stays false until its separate privacy-preserving path attests it.
+    // Credential revocation and operational asset handoff are separate. Never
+    // describe a pending handoff as complete merely because calls are revoked.
     return state;
   }
   return async (request: Request): Promise<Response> => {
@@ -138,6 +138,15 @@ export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
       } else if (action === 'revocation_result') {
         const state = await reconcileRevocation(caller!, body.operation_id);
         data = { state: state.state, operation_id: state.operation_id, checks: state.checks };
+      } else if (action === 'restore') {
+        const operation = await deps.rpc('team_member_workflow', sessionArgs(caller!, body, action));
+        if (operation.operation_state === 'complete') data = { membership: operation.membership, requires_sign_in: true };
+        else {
+          if (!operation.principal_id || !operation.plan) throw new TeamRefusal('dependency_unavailable', 503);
+          await deps.auth.setBan(operation.principal_id, operation.plan, false);
+          await deps.auth.revokeSessions(operation.principal_id, operation.plan);
+          data = await deps.rpc('team_member_workflow', sessionArgs(caller!, { operation_id: operation.operation_id }, 'restore_finish'));
+        }
       } else throw new TeamRefusal('dependency_unavailable', 503);
       return json({ ok: true, data });
     } catch (error) {

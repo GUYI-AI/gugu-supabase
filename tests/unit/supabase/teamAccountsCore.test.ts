@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { createTeamAccountsHandler, type TeamAccountsDependencies } from '../../../supabase/functions/_shared/team-accounts-core'
 const challengeId = '3c939680-61f2-430a-b8e8-b4569cf8a212'
 function fixture() {
-  const rpc = vi.fn(), auth = { currentCaller: vi.fn().mockResolvedValue(null), sendEmailCode: vi.fn(), verifyEmailCode: vi.fn() }
+  const rpc = vi.fn(), auth = { currentCaller: vi.fn().mockResolvedValue(null), sendEmailCode: vi.fn(), verifyEmailCode: vi.fn(),
+    setBan: vi.fn().mockResolvedValue(undefined), revokeSessions: vi.fn().mockResolvedValue(undefined) }
   const deps = { auth, rpc, revokeModel: vi.fn() } as unknown as TeamAccountsDependencies
   return { handle: createTeamAccountsHandler(deps), rpc, auth }
 }
@@ -42,5 +43,36 @@ describe('team member HTTP authorization boundary', () => {
     expect(response.status).toBe(401)
     expect(f.rpc.mock.calls.some(([, args]) => args.p_action === 'verified')).toBe(false)
     expect(f.rpc).toHaveBeenLastCalledWith('team_email_workflow', { p_action: 'rejected', p_input: { challenge_id: challengeId, lease_token: 'lease' } })
+  })
+  it('keeps restoration disabled until unban and global session revocation both finish', async () => {
+    const f = fixture(), order: string[] = [], caller = { id: challengeId, sessionId: challengeId, accountKind: 'team_member' }
+    f.auth.currentCaller.mockResolvedValue(caller)
+    f.rpc.mockImplementation(async (_name, args) => {
+      order.push(args.p_action)
+      return args.p_action === 'restore' ? { operation_id: challengeId, operation_state: 'pending', principal_id: challengeId, plan: {} }
+        : { membership: { state: 'active' }, requires_sign_in: true }
+    })
+    f.auth.setBan.mockImplementation(async () => { order.push('unban') })
+    f.auth.revokeSessions.mockImplementation(async () => { order.push('global_signout') })
+    const request = post({ action: 'restore', member_id: challengeId, expected_revision: 2, idempotency_key: 'restore-original-key' })
+    request.headers.set('authorization', 'Bearer synthetic-token')
+    const response = await f.handle(request)
+    expect(response.status).toBe(200); expect(order).toEqual(['restore', 'unban', 'global_signout', 'restore_finish'])
+    expect((await response.json()).data.requires_sign_in).toBe(true)
+  })
+  it('does not reactivate after failed global signout or repeat Auth mutations for a completed restore', async () => {
+    for (const complete of [false, true]) {
+      const f = fixture(); f.auth.currentCaller.mockResolvedValue({ id: challengeId, sessionId: challengeId, accountKind: 'team_member' })
+      f.rpc.mockResolvedValue({ operation_id: challengeId, operation_state: complete ? 'complete' : 'pending',
+        membership: { state: complete ? 'active' : 'disabled' }, principal_id: challengeId, plan: {} })
+      f.auth.revokeSessions.mockRejectedValue(Error('private Auth diagnostic'))
+      const request = post({ action: 'restore', member_id: challengeId, expected_revision: 2, idempotency_key: 'restore-original-key' })
+      request.headers.set('authorization', 'Bearer synthetic-token')
+      const response = await f.handle(request)
+      expect(response.status).toBe(complete ? 200 : 503)
+      expect(f.rpc.mock.calls.some(([, args]) => args.p_action === 'restore_finish')).toBe(false)
+      if (complete) { expect(f.auth.setBan).not.toHaveBeenCalled(); expect(f.auth.revokeSessions).not.toHaveBeenCalled() }
+      expect(await response.text()).not.toContain('private Auth diagnostic')
+    }
   })
 })

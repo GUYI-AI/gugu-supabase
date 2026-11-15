@@ -114,6 +114,25 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended('team-members:'||actor.team_id::text,0));
     -- A peer operation may have disabled/demoted this actor while it waited.
     actor:=team_private.caller(p_actor,p_session);
+    IF p_action='restore_finish' THEN
+        SELECT * INTO op FROM team_private.member_operations WHERE id=(p_input->>'operation_id')::uuid FOR UPDATE;
+        IF op.id IS NULL OR op.action<>'restore' OR op.actor_member_id<>actor.id OR op.team_id<>actor.team_id THEN
+            PERFORM team_private.refuse('not_found',404);
+        END IF;
+        SELECT * INTO target FROM team_private.members WHERE id=op.target_member_id FOR UPDATE;
+        IF actor.role NOT IN ('superadmin','admin') OR actor.role='admin' AND target.role<>'member' THEN
+            PERFORM team_private.refuse('forbidden');
+        END IF;
+        IF op.state='complete' THEN RETURN op.result; END IF;
+        IF target.state<>'disabled' OR target.revision<>(op.result#>>'{membership,revision}')::bigint
+            OR EXISTS(SELECT 1 FROM auth.sessions WHERE user_id=target.principal_user_id)
+            OR NOT EXISTS(SELECT 1 FROM auth.users WHERE id=target.principal_user_id AND deleted_at IS NULL
+                AND (banned_until IS NULL OR banned_until<=now())) THEN PERFORM team_private.refuse('version_conflict',409); END IF;
+        UPDATE team_private.members SET state='active',revision=revision+1,updated_at=clock_timestamp() WHERE id=target.id RETURNING * INTO target;
+        UPDATE team_private.member_operations SET state='complete',result=jsonb_build_object('membership',team_private.member_json(target),
+            'requires_sign_in',true,'handoff_state','pending') WHERE id=op.id RETURNING * INTO op;
+        RETURN op.result;
+    END IF;
     IF p_action='bind_invitation' THEN
         SELECT * INTO invitation FROM team_private.invitations WHERE id=(p_input->>'invitation_id')::uuid FOR UPDATE;
         IF actor.role NOT IN ('superadmin','admin') OR invitation.team_id IS DISTINCT FROM actor.team_id
@@ -137,7 +156,9 @@ BEGIN
                 auth_banned=auth_banned OR COALESCE((p_input->>'auth_banned')::boolean,false),
                 model_authorization_revoked=model_authorization_revoked OR COALESCE((p_input->>'model_authorization_revoked')::boolean,false)
               WHERE id=op.id RETURNING * INTO op;
-            IF op.auth_sessions_revoked AND op.auth_banned AND op.model_authorization_revoked AND op.handoff_complete THEN
+            -- Revocation is its own completion boundary. Operational asset
+            -- handoff remains separately pending and grants no private history.
+            IF op.auth_sessions_revoked AND op.auth_banned AND op.model_authorization_revoked THEN
                 UPDATE team_private.member_operations SET state='complete' WHERE id=op.id RETURNING * INTO op;
             END IF;
         END IF;
@@ -155,7 +176,7 @@ BEGIN
         IF op.request_digest<>request_hash THEN PERFORM team_private.refuse('idempotency_conflict',409); END IF;
         IF actor.role='admin' AND EXISTS(SELECT 1 FROM team_private.members
             WHERE id=op.target_member_id AND role<>'member') THEN PERFORM team_private.refuse('forbidden'); END IF;
-        RETURN op.result||jsonb_build_object('operation_id',op.id);
+        RETURN op.result||jsonb_build_object('operation_id',op.id,'operation_state',op.state);
     END IF;
     IF p_action='invite' THEN
         IF p_input->>'role' IS DISTINCT FROM 'member' THEN PERFORM team_private.refuse('forbidden'); END IF;
@@ -192,6 +213,14 @@ BEGIN
         -- force-stop an agent process: an already-issued upstream stream may
         -- finish and settle. Never reassign its legacy owner/private history.
         UPDATE team_private.asset_custody SET custodian_member_id=recipient.id WHERE team_id=actor.team_id AND custodian_member_id=target.id;
+    ELSIF p_action='restore' THEN
+        -- A failed/incomplete credential revocation cannot be undone by making
+        -- the member active. The Edge unbans and globally signs out first.
+        IF NOT EXISTS(SELECT 1 FROM team_private.member_operations WHERE target_member_id=target.id AND action='disable'
+            AND auth_sessions_revoked AND auth_banned AND model_authorization_revoked
+            AND (result#>>'{membership,revision}')::bigint=target.revision) THEN
+            PERFORM team_private.refuse('revocation_pending',409);
+        END IF;
     ELSE
         -- Restore and email change require their Auth-side reconciliation. They
         -- remain closed until that part of the workflow is installed and tested.
@@ -200,8 +229,9 @@ BEGIN
     INSERT INTO team_private.member_operations(actor_member_id,action,idempotency_key,request_digest,team_id,target_member_id,recipient_member_id,
         state,handoff_complete,result) VALUES(actor.id,p_action,p_input->>'idempotency_key',request_hash,actor.team_id,target.id,recipient.id,
         CASE WHEN p_action='set_role' THEN 'complete' ELSE 'pending' END,false,
-        jsonb_build_object('membership',team_private.member_json(target),'handoff',jsonb_build_object('recipient_member_id',recipient.id))) RETURNING * INTO op;
-    RETURN op.result||jsonb_build_object('operation_id',op.id);
+        jsonb_build_object('membership',team_private.member_json(target),'principal_id',target.principal_user_id,
+            'plan',team_private.principal_plan(target),'handoff',jsonb_build_object('recipient_member_id',recipient.id,'state','pending'))) RETURNING * INTO op;
+    RETURN op.result||jsonb_build_object('operation_id',op.id,'operation_state',op.state);
 END $$;
 ALTER FUNCTION public.team_member_workflow(text,uuid,uuid,jsonb) OWNER TO postgres;
 REVOKE ALL ON FUNCTION public.team_member_workflow(text,uuid,uuid,jsonb) FROM PUBLIC,anon,authenticated;
