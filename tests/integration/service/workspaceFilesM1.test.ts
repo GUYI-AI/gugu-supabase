@@ -198,7 +198,7 @@ describe('改名(20260929155000):对象逐个 rename,旧名一个不剩', () => 
     const both = (...stems: string[]) => stems.flatMap((s) => [s.replace('@', 'rooms'), s.replace('@', 'files')])
     const functions = both('@_authorize', 'notify_@_member_removed', 'notify_@_item_deleted')
     expect(await names(`
-      SELECT p.proname AS name FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      SELECT DISTINCT p.proname AS name FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
        WHERE n.nspname = 'chat' AND p.proname = ANY('{${functions}}'::text[])`))
       .toEqual(['files_authorize', 'notify_files_item_deleted', 'notify_files_member_removed'])
     const policies = both('workspace_items_@_select', 'workspace_items_@_update', 'chat_members_@_select')

@@ -183,7 +183,7 @@ describe('retained community user-event producers', () => {
     const { rows: senders } = await db.query<{ signature: string }>(`
       SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
       WHERE p.oid=ANY($1::regprocedure[])
-        AND p.prosrc LIKE '%gugu:user:%:events%' AND p.prosrc LIKE '%realtime.send(%'`, [signatures])
+        AND p.prosrc LIKE '%gugu:user:%:events%' AND p.prosrc LIKE '%identity.send_team_realtime(%'`, [signatures])
     expect(senders).toEqual([{ signature: 'chat.send_user_event(jsonb,text,text,boolean)' }])
     const { rows: routed } = await db.query<{ name: string }>(`
       SELECT n.nspname||'.'||p.proname AS name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace

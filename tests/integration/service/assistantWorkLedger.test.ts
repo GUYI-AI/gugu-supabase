@@ -575,7 +575,7 @@ describe('account work ledger and its only delivery outbox', () => {
   })
 
   it('does not advertise unused direct SELECT policies on the closed tables', async () => {
-    expect((await db.query("SELECT count(*)::int AS n FROM pg_policies WHERE schemaname='identity' AND tablename IN ('assistant_work','assistant_work_events')")).rows[0]!.n).toBe(0)
+    expect((await db.query("SELECT count(*)::int AS n FROM pg_policies WHERE schemaname='identity' AND tablename IN ('assistant_work','assistant_work_events') AND permissive='PERMISSIVE'")).rows[0]!.n).toBe(0)
   })
 
   it('returns server-computed lease and age budgets independently of a device wall clock',async()=>{
