@@ -100,6 +100,32 @@ describe('multipart upload state',()=>{
     expect((await claim(1,[early,late,fresh])).map(r=>r.staging_key)).toEqual([early])
     expect((await claim(1,[early,late,fresh])).map(r=>r.staging_key)).toEqual([late])
   })
+  const permitOf=async(key:string)=>(await db.query("SELECT r.created_at,r.expires_at,r.expires_at>now() AS live,extract(epoch FROM r.expires_at-now()) AS left FROM chat.file_transfer_reservations r JOIN chat.file_transfer_uploads u ON u.reservation_id=r.id WHERE u.staging_key=$1",[key])).rows[0]
+  const age=(key:string,issued:string,expires:string)=>db.query(`UPDATE chat.file_transfer_reservations SET created_at=now()-interval '${issued}',expires_at=now()+interval '${expires}' WHERE id=(SELECT reservation_id FROM chat.file_transfer_uploads WHERE staging_key=$1)`,[key])
+  it('an upload that keeps reporting keeps its permit past the permit length; one that stopped expires as before',async()=>{
+    const [reporting,stopped]=[await permit(),await permit()]
+    await parts(reporting,'U1');await parts(stopped,'U2')
+    // Issued 400 s ago with a 120 s permit: still live only because it has been reporting.
+    await age(reporting,'400 seconds','10 seconds')
+    await parts(reporting,null,[1])
+    expect(Number((await permitOf(reporting)).left)).toBe(120)
+    expect((await db.query('SELECT chat.file_managed_upload_for($1,$2) AS r',[reporting,owner])).rows[0].r.blob_id).toBeNull()
+    await age(stopped,'400 seconds','-1 seconds')
+    await parts(stopped,null,[1])
+    expect((await permitOf(stopped)).live).toBe(false)
+    expect((await reject('SELECT chat.file_managed_upload_for($1,$2)',[stopped,owner])).hint).toBe('file_transfer_expired')
+  })
+  it('never extends a permit beyond a day after it was issued, nor one already used',async()=>{
+    const [old,used]=[await permit(),await permit()]
+    await parts(old,'U1');await parts(used,'U2')
+    await age(old,'1 day - 30 seconds','5 seconds')
+    await parts(old,null,[1])
+    const p=await permitOf(old)
+    expect(new Date(p.expires_at).getTime()-new Date(p.created_at).getTime()).toBe(24*3600*1000)
+    await db.query("UPDATE chat.file_transfer_reservations SET state='settled',expires_at=now()+interval '5 seconds' WHERE id=(SELECT reservation_id FROM chat.file_transfer_uploads WHERE staging_key=$1)",[used])
+    await parts(used,null,[1])
+    expect(Number((await permitOf(used)).left)).toBe(5)
+  })
   // upload-parts and upload-complete refuse through file_managed_upload_for: an expired permit, and an upload already sent.
   it('the permit check the routes rely on refuses an expired permit and reports a sent upload\'s blob',async()=>{
     const expired=await permit()

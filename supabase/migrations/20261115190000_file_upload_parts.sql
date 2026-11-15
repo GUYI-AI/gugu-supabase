@@ -9,12 +9,18 @@ ALTER TABLE chat.file_transfer_uploads
 
 -- Records the upload id if the row has none (the first of two concurrent openers wins; both get the recorded one) and
 -- merges the reported part numbers. Returns the row's id and parts. The caller has checked the key is the user's.
+-- An upload that keeps reporting keeps its permit: each call moves a live, unused permit's expiry to one permit length
+-- from now, at most a day after it was issued (the bucket abandons unfinished multipart uploads after a day). One that
+-- stops reporting expires as before, and its reserved quota is released as before.
 CREATE FUNCTION chat.file_managed_upload_parts(p_key text,p_user text,p_upload_id text,p_done integer[]) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 DECLARE u chat.file_transfer_uploads%ROWTYPE;
 BEGIN
     SELECT * INTO u FROM chat.file_transfer_uploads WHERE staging_key=p_key AND account_id=p_user FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'Upload has no quota reservation' USING HINT='file_transfer_denied'; END IF;
+    UPDATE chat.file_transfer_reservations SET expires_at=greatest(expires_at,least(created_at+interval '1 day',
+            now()+make_interval(secs=>chat.file_transfer_parameter(chat.file_transfer_settings(),'upload_permit_seconds')::integer)))
+        WHERE id=u.reservation_id AND state<>'settled' AND expires_at>now();
     UPDATE chat.file_transfer_uploads SET
         upload_id=COALESCE(upload_id,p_upload_id),
         parts_done=CASE WHEN COALESCE(upload_id,p_upload_id) IS NULL THEN '{}'
