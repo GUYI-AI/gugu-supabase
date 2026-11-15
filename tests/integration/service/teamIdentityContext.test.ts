@@ -8,7 +8,7 @@ beforeAll(async () => {
   if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw Error('Disposable loopback database required')
   db = new pg.Client({ connectionString: url.href }); await db.connect()
 })
-beforeEach(async () => { await db.query('BEGIN') })
+beforeEach(async () => { await db.query('BEGIN'); await db.query("UPDATE team_private.deployment SET region='cn' WHERE singleton") })
 afterEach(async () => { await db.query('ROLLBACK') })
 afterAll(async () => { await db?.end() })
 async function auth(kind?: string) {
