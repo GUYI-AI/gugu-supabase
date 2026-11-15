@@ -30,6 +30,9 @@ Existing records do not establish a distinct deliberate-deletion cause, so this
 release does not emit `deleted` from those records. Existing expiry records also
 do not identify the person or operation that caused a cloud release.
 
+A returned page resolves its sources in one batch of joins, after existing
+pagination. Scalar resolution uses the same source predicate.
+
 The original readers retain authorization, pagination, ordering, defaults, and
 their old fields behind closed implementation functions. The new predicates and
 implementation functions are not callable by API roles. Unreadable references
@@ -37,3 +40,7 @@ retain their old refusal and reveal no additional cause or timestamp.
 
 Clients encountering an older server without these fields should keep their
 existing display behavior rather than treating a missing field as expiry.
+
+The reproducible large-folder comparison is `node scripts/bench-file-availability.mjs`
+after starting and installing this checkout's isolated fixture. It rolls back all
+synthetic rows and temporary baseline grants; it accepts no external database URL.

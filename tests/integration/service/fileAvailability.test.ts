@@ -158,7 +158,8 @@ describe('overall readable file availability', () => {
     const file = await cloud()
     await user(outsider)
     expect(await value('SELECT chat.file_resolve_as($1,$2) AS v', [{ message_id: file.message }, outsider])).toEqual({ status: 'gone', availability: 'unavailable', expired_at: null })
-    for (const sql of ['SELECT chat.file_blob_availability($1,$2)', 'SELECT chat.workspace_version_availability($1,1)']) {
+    for (const sql of ['SELECT chat.file_blob_availability($1,$2)', 'SELECT chat.workspace_version_availability($1,1)',
+      'SELECT * FROM chat.file_availability_batch(ARRAY[$1::uuid],ARRAY[1])']) {
       expect((await reject(sql, sql.includes('file_blob_') ? [file.blob, group] : [file.id])).code).toBe('42501')
     }
     expect((await reject('SELECT * FROM chat.workspace_list_as_availability_base($1,$2)', [group, outsider])).code).toBe('42501')
