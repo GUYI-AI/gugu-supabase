@@ -93,7 +93,7 @@ it.each(['dm','ai','group','topic','removed_owned_agent','other_human','other_ag
   const members=[owner,mine,...(kind==='other_human'?[peer]:['other_agent','other_archived_agent'].includes(kind)?[theirs]:[])]
   const target=await room(['removed_owned_agent','other_human','other_agent','other_archived_agent'].includes(kind)?'group':kind,owner,members,source)
   if(kind==='removed_owned_agent')await db.query('UPDATE identity.users SET removed_at=now() WHERE id=$1',[mine])
-  if(kind==='other_archived_agent')await db.query('UPDATE identity.users SET archived_at=now() WHERE id=$1',[theirs])
+  if(kind==='other_archived_agent')await db.query('UPDATE identity.users SET session_archived_at=now() WHERE id=$1',[theirs])
   await db.query('DELETE FROM auth.users WHERE id=$1',[owner])
   const retained=['other_human','other_agent','other_archived_agent'].includes(kind)
   expect((await row('SELECT count(*)::int n FROM chat.chats WHERE id=$1',[target])).n).toBe(retained?1:0)
