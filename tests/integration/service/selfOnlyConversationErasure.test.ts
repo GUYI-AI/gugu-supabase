@@ -115,7 +115,7 @@ it('cascades source topics and file items, queues exclusive blobs and preserves 
   // erased user prefix after deleting their last conversation reference.
   const legacy='opaque-'+randomUUID()+'.png'
   await db.query("INSERT INTO storage.objects(bucket_id,name,metadata)VALUES('avatars',$1,'{\"size\":8,\"mimetype\":\"image/png\"}')",[legacy])
-  await db.query("UPDATE chat.chats SET avatar_storage_bucket_id='avatars',avatar_storage_object_name=$2 WHERE id=$1",[root,legacy])
+  await db.query("UPDATE chat.chats SET avatar_url='https://fixture.invalid/storage/v1/object/public/avatars/'||$2,avatar_storage_bucket_id='avatars',avatar_storage_object_name=$2 WHERE id=$1",[root,legacy])
   expect((await row("SELECT count(*)::int n FROM chat.file_blobs WHERE bucket_id='avatars' AND object_name=$1",[legacy])).n).toBe(0)
   const folder=(await row("INSERT INTO chat.workspace_items(chat_id,kind,filename,created_by)VALUES($1,'folder','Nested',$2)RETURNING id",[root,owner])).id
   const text=(await row(`INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,inline_text,size_bytes,created_by,parent_id)
@@ -157,6 +157,19 @@ it('keeps the helper closed and rejects a forged context without deleting anythi
   await expect(db.query('SELECT identity.erase_self_only_conversations($1)',[[owner,mine]])).rejects.toMatchObject({code:'42501'})
   await db.query('ROLLBACK TO refused')
   expect((await row('SELECT count(*)::int n FROM chat.chats WHERE id=$1',[target])).n).toBe(1)
+}))
+
+it('refuses an unsupported nested-topic cascade instead of deleting an outside participant',async()=>rollback(async()=>{
+  const owner=await human(),mine=await agent(owner),peer=await human()
+  const root=await room('group',owner,[owner,mine]),child=await room('topic',owner,[owner,mine],root)
+  // Product create_topic rejects this shape; seed a legacy inconsistency via
+  // the owned database without weakening any trigger or membership policy.
+  const nested=await room('topic',owner,[owner,mine,peer],child)
+  await db.query('SAVEPOINT nested_refused')
+  await expect(db.query('DELETE FROM auth.users WHERE id=$1',[owner])).rejects.toMatchObject({code:'55000',message:'Nested source topics require explicit repair before erasure'})
+  await db.query('ROLLBACK TO nested_refused')
+  expect((await row('SELECT count(*)::int n FROM chat.chats WHERE id=ANY($1)',[[root,child,nested]])).n).toBe(3)
+  expect((await row('SELECT count(*)::int n FROM auth.users WHERE id=$1',[owner])).n).toBe(1)
 }))
 
 it('preserves a member who commits a join before erasure obtains the chat lock',async()=>{

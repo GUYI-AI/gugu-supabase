@@ -11,16 +11,18 @@ BEGIN
           AND c.delete_user_ids=p_ids AND c.subject_user_id=p_ids[1]) THEN
         RAISE EXCEPTION 'Conversation erasure requires the complete Auth deletion context' USING ERRCODE='42501';
     END IF;
-    SELECT array_agg(c.id),array_agg(DISTINCT COALESCE(c.source_chat_id,c.id)) INTO candidates,roots
-    FROM chat.chats c WHERE c.creator_user_id=ANY(p_ids)
-      OR EXISTS(SELECT 1 FROM chat.chat_members m WHERE m.chat_id=c.id AND m.user_id=ANY(p_ids));
+    WITH affected AS (
+      SELECT m.chat_id id FROM chat.chat_members m WHERE m.user_id=ANY(p_ids)
+      UNION SELECT c.id FROM chat.chats c WHERE c.creator_user_id=ANY(p_ids)
+    ) SELECT array_agg(c.id),array_agg(DISTINCT COALESCE(c.source_chat_id,c.id)) INTO candidates,roots
+    FROM affected a JOIN chat.chats c ON c.id=a.id;
     IF candidates IS NULL THEN RETURN 0; END IF;
 
     -- Sources before their topics, before any membership row or publishing DML.
     -- A new membership/topic FK cannot pass this chat FOR UPDATE fence. Recheck
     -- membership only after acquiring it, including a join that committed first.
     FOR room IN SELECT c.id FROM chat.chats c
-      WHERE c.id=ANY(roots) OR c.source_chat_id=ANY(roots)
+      WHERE c.id=ANY(roots) OR (c.kind='topic' AND c.source_chat_id=ANY(roots))
       ORDER BY COALESCE(c.source_chat_id,c.id),(c.source_chat_id IS NOT NULL),c.id FOR UPDATE
     LOOP locked_rooms:=array_append(locked_rooms,room.id); END LOOP;
     PERFORM 1 FROM chat.chat_members m WHERE m.chat_id=ANY(locked_rooms)
@@ -39,6 +41,13 @@ BEGIN
         IF EXISTS(SELECT 1 FROM chat.chats t JOIN chat.chat_members m ON m.chat_id=t.id
           WHERE t.source_chat_id=room.id AND NOT m.user_id=ANY(p_ids)) THEN
             RAISE EXCEPTION 'A source conversation has surviving topic participants' USING ERRCODE='55000';
+        END IF;
+        -- Product topic creation rejects topics of topics. Do not let an
+        -- inconsistent nested chain evade the one-level participant/object
+        -- checks through a deeper foreign-key cascade.
+        IF EXISTS(SELECT 1 FROM chat.chats child JOIN chat.chats nested ON nested.source_chat_id=child.id
+          WHERE child.source_chat_id=room.id) THEN
+            RAISE EXCEPTION 'Nested source topics require explicit repair before erasure' USING ERRCODE='55000';
         END IF;
 
         WITH rooms AS (SELECT room.id AS id UNION SELECT t.id FROM chat.chats t WHERE t.source_chat_id=room.id),
