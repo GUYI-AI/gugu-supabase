@@ -48,12 +48,52 @@ async function founder() {
 it('keeps every workflow RPC server-only and all private state inaccessible to API roles', async () => {
   for (const role of ['anon', 'authenticated']) {
     for (const signature of ['public.team_email_workflow(text,jsonb)', 'public.team_account_provision(text,jsonb)',
-      'public.team_account_read(text,uuid,uuid,jsonb)', 'public.team_member_workflow(text,uuid,uuid,jsonb)']) {
+      'public.team_account_read(text,uuid,uuid,jsonb)', 'public.team_member_workflow(text,uuid,uuid,jsonb)', 'public.team_account_google(uuid,uuid,uuid)']) {
       expect((await db.query('SELECT has_function_privilege($1,$2,\'EXECUTE\') ok', [role, signature])).rows[0].ok).toBe(false)
     }
     for (const table of ['email_challenges', 'invitations', 'member_operations', 'asset_custody'])
       expect((await db.query('SELECT has_table_privilege($1,$2,\'SELECT\') ok', [role, 'team_private.' + table])).rows[0].ok).toBe(false)
   }
+})
+
+it('resolves an OAuth-verified external subject through its own live session without promoting it to a team identity', async () => {
+  // The Edge's fresh Google proof is covered separately; this checks only the
+  // server-only lookup and its live-session/region/independent-principal rules.
+  const owner = await founder(), external = randomUUID(), session = randomUUID()
+  await db.query(`INSERT INTO auth.users(id,aud,role,email,email_confirmed_at,created_at)
+    VALUES($1,'authenticated','authenticated',$2,now(),now())`, [external, owner.email])
+  await db.query('INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())', [session, external])
+  const result = (await db.query('SELECT public.team_account_google($1,$2,NULL) r', [external, session])).rows[0].r
+  expect(result.membership.identity_id).toBe(owner.id); expect(result.membership.identity_id).not.toBe(external)
+  await db.query('DELETE FROM auth.sessions WHERE id=$1', [session])
+  expect((await refused('SELECT public.team_account_google($1,$2,NULL)', [external, session])).hint).toBe('unauthenticated')
+})
+
+it('requires the original member plus the new email proof and revokes sessions before completing email confirmation', async () => {
+  const owner = await founder(), address = randomUUID() + '@workflow.invalid', next = randomUUID() + '@workflow.invalid'
+  const invitation = await memberFlow(owner, 'invite', { email: address, role: 'member', idempotency_key: randomUUID() })
+  const token = hash(randomUUID())
+  await memberFlow(owner, 'bind_invitation', { invitation_id: invitation.invitation_id, token_digest: token })
+  const proof = await receipt(address, 'accept_invitation', { invitation_digest: token })
+  const member = await activate(await provision('accept_invitation', { receipt_digest: proof.digest, invitation_digest: token, idempotency_key: randomUUID() }))
+  const change = await memberFlow(owner, 'change_email', { member_id: member.membership.id, expected_revision: 1,
+    new_email: next, idempotency_key: randomUUID() })
+  await emailFlow('sent', { challenge_id: change.challenge_id, sent: true })
+  expect((await db.query('SELECT email_normalized FROM team_private.members WHERE id=$1', [member.membership.id])).rows[0].email_normalized).toBe(address)
+  const input = { challenge_id: change.challenge_id, idempotency_key: randomUUID() }
+  expect((await refused('SELECT public.team_member_workflow($1,$2,$3,$4)', ['email_change_claim', owner.id, owner.session, input])).hint).toBe('original_member_required')
+  const claim = await memberFlow(member, 'email_change_claim', input)
+  expect(claim.stage).toBe('verify')
+  const commit = await memberFlow(member, 'email_change_commit', { ...input, lease_token: claim.lease_token, verified_email: next })
+  expect(commit.membership.revision).toBe(2); expect(commit.stage).toBe('auth_cleanup')
+  const replay = await memberFlow(member, 'email_change_claim', input)
+  expect(replay.operation_id).toBe(commit.operation_id); expect(replay.stage).toBe('auth_cleanup')
+  expect((await refused('SELECT public.team_member_workflow($1,$2,$3,$4)', ['email_change_finish', member.id, member.session,
+    { operation_id: commit.operation_id }])).hint).toBe('version_conflict')
+  await db.query('DELETE FROM auth.sessions WHERE user_id=$1', [member.id])
+  const done = await memberFlow(member, 'email_change_finish', { operation_id: commit.operation_id })
+  expect(done.requires_sign_in).toBe(true)
+  expect((await db.query('SELECT email_normalized FROM team_private.members WHERE id=$1', [member.membership.id])).rows[0].email_normalized).toBe(next)
 })
 
 it('expires verification without extending the original deadline and refuses the wrong lease', async () => {

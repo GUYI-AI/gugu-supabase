@@ -94,12 +94,55 @@ ALTER FUNCTION public.team_account_provision(text,jsonb) OWNER TO postgres;
 REVOKE ALL ON FUNCTION public.team_account_provision(text,jsonb) FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.team_account_provision(text,jsonb) TO service_role;
 
+-- The Edge requires a current Auth-verified Google identity and a fresh signed
+-- OAuth AMR before entering this server-only lookup. No client email is trusted.
+CREATE FUNCTION public.team_account_google(p_actor uuid,p_session uuid,p_team_id uuid DEFAULT NULL)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE address text; seat team_private.members%ROWTYPE; choices jsonb; local_region text;
+BEGIN
+    local_region:=identity.team_deployment_region();
+    IF local_region IS NULL THEN PERFORM team_private.refuse('dependency_unavailable',503); END IF;
+    SELECT lower(u.email) INTO address FROM auth.users u JOIN auth.sessions s ON s.user_id=u.id
+      WHERE u.id=p_actor AND s.id=p_session AND u.email_confirmed_at IS NOT NULL AND u.deleted_at IS NULL
+        AND (u.banned_until IS NULL OR u.banned_until<=now()) AND (s.not_after IS NULL OR s.not_after>now())
+        AND COALESCE(u.raw_app_meta_data->>'gugu_account_kind','personal')<>'team_member';
+    IF address IS NULL THEN PERFORM team_private.refuse('unauthenticated',401); END IF;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('team_id',t.id,'team_name',t.name,'role',m.role,
+        'member_state',m.state,'region',t.region) ORDER BY t.id),'[]'::jsonb) INTO choices
+      FROM team_private.members m JOIN team_private.teams t ON t.id=m.team_id
+      WHERE m.email_normalized=address AND m.state='active' AND t.state='active' AND t.region=local_region;
+    IF p_team_id IS NULL AND jsonb_array_length(choices)>1 THEN
+        RETURN jsonb_build_object('refusal','context_required','contexts',choices);
+    END IF;
+    SELECT * INTO seat FROM team_private.members m WHERE m.email_normalized=address AND m.state='active'
+      AND EXISTS(SELECT 1 FROM team_private.teams t WHERE t.id=m.team_id AND t.state='active' AND t.region=local_region)
+      AND (p_team_id IS NULL OR m.team_id=p_team_id) ORDER BY m.id LIMIT 1 FOR UPDATE;
+    IF seat.id IS NULL THEN PERFORM team_private.refuse('membership_disabled'); END IF;
+    RETURN jsonb_build_object('plan',team_private.principal_plan(seat),'membership',team_private.member_json(seat));
+END $$;
+ALTER FUNCTION public.team_account_google(uuid,uuid,uuid) OWNER TO postgres;
+REVOKE ALL ON FUNCTION public.team_account_google(uuid,uuid,uuid) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.team_account_google(uuid,uuid,uuid) TO service_role;
+
 CREATE FUNCTION public.team_member_workflow(p_action text,p_actor uuid,p_session uuid,p_input jsonb)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE actor team_private.members%ROWTYPE; target team_private.members%ROWTYPE; recipient team_private.members%ROWTYPE;
     op team_private.member_operations%ROWTYPE; invitation team_private.invitations%ROWTYPE;
     request_hash text:=encode(sha256(convert_to(p_input::text,'UTF8')),'hex'); c team_private.email_challenges%ROWTYPE;
 BEGIN
+    IF p_action='email_change_finish' THEN
+        -- The confirming member deliberately revoked this original session.
+        -- This service-only checkpoint therefore verifies its stored binding
+        -- and zero live sessions instead of accepting a new caller session.
+        SELECT * INTO op FROM team_private.member_operations WHERE id=(p_input->>'operation_id')::uuid FOR UPDATE;
+        SELECT * INTO target FROM team_private.members WHERE id=op.target_member_id FOR UPDATE;
+        IF op.id IS NULL OR op.action<>'confirm_email_change' OR op.source_auth_session_id IS DISTINCT FROM p_session
+          OR target.principal_user_id IS DISTINCT FROM p_actor OR op.actor_member_id IS DISTINCT FROM target.id
+          OR target.state<>'active' OR target.revision IS DISTINCT FROM (op.result#>>'{membership,revision}')::bigint
+          OR EXISTS(SELECT 1 FROM auth.sessions WHERE user_id=p_actor) THEN PERFORM team_private.refuse('version_conflict',409); END IF;
+        UPDATE team_private.member_operations SET auth_sessions_revoked=true,state='complete' WHERE id=op.id;
+        RETURN jsonb_build_object('state','changed','membership',op.result->'membership','requires_sign_in',true);
+    END IF;
     IF p_action='invitation_info' THEN
         SELECT * INTO invitation FROM team_private.invitations WHERE token_digest=p_input->>'invitation_digest';
         IF invitation.id IS NULL OR invitation.state<>'invited' OR invitation.expires_at<=clock_timestamp() THEN
@@ -114,6 +157,45 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended('team-members:'||actor.team_id::text,0));
     -- A peer operation may have disabled/demoted this actor while it waited.
     actor:=team_private.caller(p_actor,p_session);
+    IF p_action IN ('email_change_claim','email_change_commit') THEN
+        SELECT * INTO c FROM team_private.email_challenges WHERE id=(p_input->>'challenge_id')::uuid FOR UPDATE;
+        IF c.id IS NULL OR c.purpose<>'change_email' OR c.target_member_id IS DISTINCT FROM actor.id
+          OR c.team_id IS DISTINCT FROM actor.team_id THEN PERFORM team_private.refuse('original_member_required',403); END IF;
+        IF NOT EXISTS(SELECT 1 FROM team_private.members administrator WHERE administrator.id=c.administrator_id
+          AND administrator.team_id=actor.team_id AND administrator.state='active'
+          AND (administrator.role='superadmin' OR administrator.role='admin' AND actor.role='member')) THEN
+            PERFORM team_private.refuse('forbidden',403);
+        END IF;
+        SELECT * INTO op FROM team_private.member_operations WHERE actor_member_id=actor.id
+          AND subject_email_digest IS NULL AND action='confirm_email_change' AND idempotency_key=p_input->>'idempotency_key' FOR UPDATE;
+        IF op.id IS NOT NULL THEN
+            IF op.source_auth_session_id IS DISTINCT FROM p_session OR op.result->>'challenge_id'<>c.id::text THEN
+                PERFORM team_private.refuse('idempotency_conflict',409);
+            END IF;
+            RETURN op.result||jsonb_build_object('operation_id',op.id,'stage','auth_cleanup');
+        END IF;
+        IF c.expires_at<=clock_timestamp() THEN PERFORM team_private.refuse('verification_expired',401); END IF;
+        IF c.expected_revision IS DISTINCT FROM actor.revision THEN PERFORM team_private.refuse('version_conflict',409); END IF;
+        IF p_action='email_change_claim' THEN
+            IF c.state<>'challenge' OR c.attempts>=5 THEN PERFORM team_private.refuse('invalid_code',401); END IF;
+            UPDATE team_private.email_challenges SET state='verifying',attempts=attempts+1,lease_token=gen_random_uuid()
+              WHERE id=c.id RETURNING * INTO c;
+            RETURN jsonb_build_object('stage','verify','challenge_id',c.id,'email',c.email_normalized,'lease_token',c.lease_token);
+        END IF;
+        IF c.state<>'verifying' OR c.lease_token IS DISTINCT FROM (p_input->>'lease_token')::uuid
+          OR c.email_normalized IS DISTINCT FROM lower(p_input->>'verified_email') THEN PERFORM team_private.refuse('invalid_code',401); END IF;
+        IF EXISTS(SELECT 1 FROM team_private.members WHERE team_id=actor.team_id AND email_normalized=c.email_normalized AND id<>actor.id) THEN
+            PERFORM team_private.refuse('version_conflict',409);
+        END IF;
+        UPDATE team_private.members SET email_normalized=c.email_normalized,revision=revision+1,updated_at=clock_timestamp()
+          WHERE id=actor.id RETURNING * INTO target;
+        INSERT INTO team_private.member_operations(actor_member_id,action,idempotency_key,request_digest,team_id,target_member_id,source_auth_session_id,result)
+          VALUES(actor.id,'confirm_email_change',p_input->>'idempotency_key',encode(sha256(convert_to(c.id::text,'UTF8')),'hex'),
+            actor.team_id,actor.id,p_session,jsonb_build_object('challenge_id',c.id,'membership',team_private.member_json(target),
+              'principal_id',target.principal_user_id,'plan',team_private.principal_plan(target),'requires_sign_in',true)) RETURNING * INTO op;
+        UPDATE team_private.email_challenges SET state='consumed',lease_token=NULL,operation_id=op.id WHERE id=c.id;
+        RETURN op.result||jsonb_build_object('operation_id',op.id,'stage','auth_cleanup');
+    END IF;
     IF p_action='restore_finish' THEN
         SELECT * INTO op FROM team_private.member_operations WHERE id=(p_input->>'operation_id')::uuid FOR UPDATE;
         IF op.id IS NULL OR op.action<>'restore' OR op.actor_member_id<>actor.id OR op.team_id<>actor.team_id THEN
@@ -190,7 +272,7 @@ BEGIN
         INSERT INTO team_private.member_operations(actor_member_id,action,idempotency_key,request_digest,team_id,target_member_id,state,result)
           VALUES(actor.id,p_action,p_input->>'idempotency_key',request_hash,actor.team_id,target.id,'complete',
             jsonb_build_object('invitation_id',invitation.id,'seed',invitation.seed,'expires_at',invitation.expires_at,'state','invited',
-                'region',(SELECT region FROM team_private.teams WHERE id=actor.team_id))) RETURNING * INTO op;
+                'email',invitation.email_normalized,'region',(SELECT region FROM team_private.teams WHERE id=actor.team_id))) RETURNING * INTO op;
         RETURN op.result||jsonb_build_object('operation_id',op.id);
     END IF;
     SELECT * INTO target FROM team_private.members WHERE id=(p_input->>'member_id')::uuid AND team_id=actor.team_id FOR UPDATE;
@@ -221,9 +303,23 @@ BEGIN
             AND (result#>>'{membership,revision}')::bigint=target.revision) THEN
             PERFORM team_private.refuse('revocation_pending',409);
         END IF;
+    ELSIF p_action='change_email' THEN
+        IF p_input->>'new_email' IS NULL OR length(p_input->>'new_email')>254
+          OR p_input->>'new_email' !~ '^[^[:space:]@]+@[^[:space:]@]+[.][^[:space:]@]+$'
+          OR lower(p_input->>'new_email')=target.email_normalized THEN PERFORM team_private.refuse('invalid_request',400); END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('team-email:'||lower(p_input->>'new_email'),0));
+        IF EXISTS(SELECT 1 FROM team_private.email_challenges WHERE email_normalized=lower(p_input->>'new_email')
+            AND created_at>clock_timestamp()-interval '60 seconds') THEN PERFORM team_private.refuse('rate_limited',429); END IF;
+        UPDATE team_private.email_challenges SET state='failed',lease_token=NULL WHERE target_member_id=target.id
+          AND purpose='change_email' AND state IN ('sending','challenge','verifying');
+        INSERT INTO team_private.email_challenges(email_normalized,purpose,team_id,target_member_id,administrator_id,expected_revision)
+          VALUES(lower(p_input->>'new_email'),'change_email',actor.team_id,target.id,actor.id,target.revision) RETURNING * INTO c;
+        INSERT INTO team_private.member_operations(actor_member_id,action,idempotency_key,request_digest,team_id,target_member_id,state,result)
+          VALUES(actor.id,p_action,p_input->>'idempotency_key',request_hash,actor.team_id,target.id,'complete',
+            jsonb_build_object('challenge_id',c.id,'expires_at',c.expires_at,'state','verification_pending')) RETURNING * INTO op;
+        RETURN op.result||jsonb_build_object('operation_id',op.id);
     ELSE
-        -- Restore and email change require their Auth-side reconciliation. They
-        -- remain closed until that part of the workflow is installed and tested.
+        -- Unrecognized operations fail without changing member state.
         PERFORM team_private.refuse('dependency_unavailable',503);
     END IF;
     INSERT INTO team_private.member_operations(actor_member_id,action,idempotency_key,request_digest,team_id,target_member_id,recipient_member_id,

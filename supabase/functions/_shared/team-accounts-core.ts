@@ -111,6 +111,13 @@ export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
         const prepared = await deps.rpc('team_account_provision', { p_action: action, p_input: body });
         if (prepared.refusal === 'context_required') return json({ ok: false, error: { code: 'context_required', message: 'Choose a team.', contexts: prepared.contexts }, request_id: requestId }, 409);
         data = await login(prepared);
+      } else if (action === 'google_sign_in') {
+        if (!caller?.googleVerified || caller.accountKind === 'team_member') throw new TeamRefusal('verification_required', 401);
+        const prepared = await deps.rpc('team_account_google', { p_actor: caller.id, p_session: caller.sessionId, p_team_id: body.team_id ?? null });
+        if (prepared.refusal === 'context_required') return json({ ok: false, error: { code: 'context_required', message: 'Choose a team.', contexts: prepared.contexts }, request_id: requestId }, 409);
+        data = await login(prepared);
+        try { await deps.auth.logout(token!); }
+        catch (error) { await deps.auth.logout(data.session.access_token); throw error; }
       } else if (action === 'invitation_info') {
         data = await deps.rpc('team_member_workflow', { p_action: action, p_actor: null, p_session: null,
           p_input: { invitation_digest: await digest(body.invitation_token) } });
@@ -122,6 +129,7 @@ export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
         if (origin.protocol !== 'https:' || origin.username || origin.password || origin.search || origin.hash
             || !['', '/'].includes(origin.pathname)) throw new TeamRefusal('dependency_unavailable', 503);
         const invitation = await deps.rpc('team_member_workflow', sessionArgs(caller!, body, action));
+        if (typeof invitation.email !== 'string' || !(await deps.auth.ensureAnchor(invitation.email))) throw new TeamRefusal('dependency_unavailable', 503);
         const opaque = await deps.auth.invitationToken(invitation.invitation_id, invitation.seed);
         await deps.rpc('team_member_workflow', sessionArgs(caller!, { invitation_id: invitation.invitation_id, token_digest: await digest(opaque) }, 'bind_invitation'));
         if (!['cn', 'hk'].includes(invitation.region)) throw new TeamRefusal('dependency_unavailable', 503);
@@ -147,6 +155,30 @@ export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
           await deps.auth.revokeSessions(operation.principal_id, operation.plan);
           data = await deps.rpc('team_member_workflow', sessionArgs(caller!, { operation_id: operation.operation_id }, 'restore_finish'));
         }
+      } else if (action === 'change_email') {
+        const pending = await deps.rpc('team_member_workflow', sessionArgs(caller!, body, action));
+        const challenge = await deps.rpc('team_email_workflow', { p_action: 'delivery', p_input: { challenge_id: pending.challenge_id } });
+        if (challenge.state === 'sending') {
+          let sent = false; try { sent = await deps.auth.sendEmailCode(challenge.email); } catch { /* safe failure only */ }
+          await deps.rpc('team_email_workflow', { p_action: 'sent', p_input: { challenge_id: pending.challenge_id, sent } });
+          if (!sent) throw new TeamRefusal('dependency_unavailable', 503);
+        }
+        data = { challenge_id: pending.challenge_id, expires_at: pending.expires_at, state: 'pending' };
+      } else if (action === 'confirm_email_change') {
+        let prepared = await deps.rpc('team_member_workflow', sessionArgs(caller!,
+          { challenge_id: body.challenge_id, idempotency_key: body.idempotency_key }, 'email_change_claim'));
+        if (prepared.stage === 'verify') {
+          let proof = null; try { proof = await deps.auth.verifyEmailCode(prepared.email, body.code); } catch { /* no raw Auth error */ }
+          if (!proof || proof.email !== prepared.email) {
+            await deps.rpc('team_email_workflow', { p_action: 'rejected', p_input: { challenge_id: body.challenge_id, lease_token: prepared.lease_token } });
+            throw new TeamRefusal('invalid_code', 401);
+          }
+          prepared = await deps.rpc('team_member_workflow', sessionArgs(caller!, { challenge_id: body.challenge_id,
+            idempotency_key: body.idempotency_key, lease_token: prepared.lease_token, verified_email: proof.email }, 'email_change_commit'));
+        }
+        if (prepared.stage !== 'auth_cleanup' || !prepared.principal_id || !prepared.plan) throw new TeamRefusal('dependency_unavailable', 503);
+        await deps.auth.revokeSessions(prepared.principal_id, prepared.plan);
+        data = await deps.rpc('team_member_workflow', sessionArgs(caller!, { operation_id: prepared.operation_id }, 'email_change_finish'));
       } else throw new TeamRefusal('dependency_unavailable', 503);
       return json({ ok: true, data });
     } catch (error) {

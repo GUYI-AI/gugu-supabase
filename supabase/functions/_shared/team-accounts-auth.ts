@@ -54,6 +54,19 @@ export function teamAuth(settings: Settings) {
     }
     return session;
   }
+  async function ensureAnchor(address: string): Promise<boolean> {
+    // Set the non-payer marker before INSERT triggers run. Existing personal
+    // identities are never changed or adopted by their email alone.
+    const anchor = await call('/auth/v1/admin/users', 'POST', settings.serviceKey, settings.serviceKey, {
+      email: address, email_confirm: false, app_metadata: { gugu_account_kind: 'team_login_anchor' },
+    });
+    const duplicate = [409, 422].includes(anchor.status)
+      && ['email_exists', 'user_already_exists'].includes(anchor.data?.code ?? anchor.data?.error_code);
+    if (!anchor.ok) return duplicate;
+    return UUID.test(anchor.data?.id ?? '') && typeof anchor.data?.email === 'string'
+      && email(anchor.data.email) === email(address)
+      && anchor.data.app_metadata?.gugu_account_kind === 'team_login_anchor';
+  }
   return {
     async currentCaller(token: string): Promise<TeamAuthCaller | null> {
       const result = await call('/auth/v1/user', 'GET', settings.anonKey, token);
@@ -64,27 +77,23 @@ export function teamAuth(settings: Settings) {
       try { const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'); claims = JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, '='))); }
       catch { return null; }
       if (!UUID.test(claims?.session_id ?? '') || claims.sub !== user.id) return null;
-      const googleVerified = Array.isArray(user.identities) && user.identities.some((identity: any) =>
+      // A linked Google identity alone does not prove this sign-in used OAuth.
+      // Claims are read only after Auth validated this exact bearer and subject.
+      const now = Math.floor(Date.now() / 1000);
+      const recentOAuth = Array.isArray(claims.amr) && claims.amr.some((entry: any) =>
+        entry?.method === 'oauth' && Number.isSafeInteger(entry.timestamp)
+        && entry.timestamp <= now + 30 && entry.timestamp >= now - 300);
+      const googleVerified = recentOAuth && Array.isArray(user.identities) && user.identities.some((identity: any) =>
         identity.provider === 'google' && identity.identity_data?.email_verified === true
         && typeof identity.identity_data?.email === 'string' && email(identity.identity_data.email) === email(user.email));
       return { id: user.id, email: email(user.email), sessionId: claims.session_id,
         accountKind: user.app_metadata?.gugu_account_kind ?? 'personal', googleVerified };
     },
     async sendEmailCode(address: string): Promise<boolean> {
-      // A new verification-only identity must be marked before its INSERT
-      // triggers run. It cannot receive personal registration credits or act as
-      // a personal payer. Never rewrite an existing personal account's marker.
-      const anchor = await call('/auth/v1/admin/users', 'POST', settings.serviceKey, settings.serviceKey, {
-        email: address, email_confirm: false, app_metadata: { gugu_account_kind: 'team_login_anchor' },
-      });
-      const duplicate = [409, 422].includes(anchor.status)
-        && ['email_exists', 'user_already_exists'].includes(anchor.data?.code ?? anchor.data?.error_code);
-      if (!anchor.ok && !duplicate) return false;
-      if (anchor.ok && (!UUID.test(anchor.data?.id ?? '') || typeof anchor.data?.email !== 'string'
-          || email(anchor.data.email) !== email(address)
-          || anchor.data.app_metadata?.gugu_account_kind !== 'team_login_anchor')) return false;
+      if (!(await ensureAnchor(address))) return false;
       return (await call('/auth/v1/otp', 'POST', settings.anonKey, settings.anonKey, { email: address, create_user: false })).ok;
     },
+    ensureAnchor,
     async verifyEmailCode(address: string, code: string): Promise<{ id: string; email: string } | null> {
       const verified = await call('/auth/v1/verify', 'POST', settings.anonKey, settings.anonKey,
         { type: 'email', email: address, token: code });

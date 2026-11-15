@@ -57,6 +57,7 @@ CREATE TABLE team_private.member_operations (
     auth_sessions_revoked boolean NOT NULL DEFAULT false,
     auth_banned boolean NOT NULL DEFAULT false,
     model_authorization_revoked boolean NOT NULL DEFAULT false,
+    source_auth_session_id uuid,
     handoff_complete boolean NOT NULL DEFAULT false,
     result jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),

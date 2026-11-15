@@ -69,7 +69,8 @@ describe('team official Auth adapter', () => {
     expect((fetcher.mock.calls as unknown as [string][])[1][0]).toContain('/logout?scope=local')
   })
   it('requires Auth-verified Google identity data and a matching current session subject', async () => {
-    const sessionId = randomUUID(), token = 'header.' + btoa(JSON.stringify({ sub: principalId, session_id: sessionId })) + '.signature'
+    const sessionId = randomUUID(), claims = { sub: principalId, session_id: sessionId,
+      amr: [{ method: 'oauth', timestamp: Math.floor(Date.now() / 1000) }] }, token = 'header.' + btoa(JSON.stringify(claims)) + '.signature'
     for (const [identity, expected] of [
       [{ provider: 'google', identity_data: { email_verified: true, email: plan.alias } }, true],
       [{ provider: 'google', identity_data: { email_verified: false, email: plan.alias } }, false],
@@ -81,6 +82,12 @@ describe('team official Auth adapter', () => {
     }
     const { api } = adapter([user()])
     expect(await api.currentCaller('header.' + btoa(JSON.stringify({ sub: randomUUID(), session_id: sessionId })) + '.signature')).toBeNull()
+    for (const amr of [undefined, [{ method: 'otp', timestamp: Math.floor(Date.now() / 1000) }],
+      [{ method: 'oauth', timestamp: Math.floor(Date.now() / 1000) - 301 }]]) {
+      const { api } = adapter([{ ...user(), identities: [{ provider: 'google', identity_data: { email_verified: true, email: plan.alias } }] }])
+      const result = await api.currentCaller('header.' + btoa(JSON.stringify({ ...claims, amr })) + '.signature')
+      expect(result?.googleVerified).toBe(false)
+    }
   })
   it('binds invitation proofs to both private seed and invitation id', async () => {
     const { api } = adapter([]), invitation = randomUUID(), seed = randomUUID()

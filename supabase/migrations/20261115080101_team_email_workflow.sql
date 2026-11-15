@@ -30,7 +30,9 @@ BEGIN
         SELECT * INTO c FROM team_private.email_challenges WHERE id=(p_input->>'challenge_id')::uuid FOR UPDATE;
         IF c.id IS NULL THEN PERFORM team_private.refuse('verification_required',401); END IF;
         IF c.expires_at<=now_at THEN PERFORM team_private.refuse('verification_expired',401); END IF;
-        IF p_action='sent' THEN
+        IF p_action='delivery' THEN
+            IF c.state NOT IN ('sending','challenge') THEN PERFORM team_private.refuse('version_conflict',409); END IF;
+        ELSIF p_action='sent' THEN
             IF c.state<>'sending' THEN PERFORM team_private.refuse('version_conflict',409); END IF;
             UPDATE team_private.email_challenges SET state=CASE WHEN (p_input->>'sent')::boolean THEN 'challenge' ELSE 'failed' END
               WHERE id=c.id RETURNING * INTO c;

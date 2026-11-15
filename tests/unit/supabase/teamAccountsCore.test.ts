@@ -3,7 +3,8 @@ import { createTeamAccountsHandler, type TeamAccountsDependencies } from '../../
 const challengeId = '3c939680-61f2-430a-b8e8-b4569cf8a212'
 function fixture() {
   const rpc = vi.fn(), auth = { currentCaller: vi.fn().mockResolvedValue(null), sendEmailCode: vi.fn(), verifyEmailCode: vi.fn(),
-    setBan: vi.fn().mockResolvedValue(undefined), revokeSessions: vi.fn().mockResolvedValue(undefined) }
+    setBan: vi.fn().mockResolvedValue(undefined), revokeSessions: vi.fn().mockResolvedValue(undefined),
+    issueSession: vi.fn(), logout: vi.fn(), createPrincipal: vi.fn() }
   const deps = { auth, rpc, revokeModel: vi.fn() } as unknown as TeamAccountsDependencies
   return { handle: createTeamAccountsHandler(deps), rpc, auth }
 }
@@ -74,5 +75,41 @@ describe('team member HTTP authorization boundary', () => {
       if (complete) { expect(f.auth.setBan).not.toHaveBeenCalled(); expect(f.auth.revokeSessions).not.toHaveBeenCalled() }
       expect(await response.text()).not.toContain('private Auth diagnostic')
     }
+  })
+  it('refuses a linked Google identity without a fresh official OAuth proof', async () => {
+    const f = fixture(); f.auth.currentCaller.mockResolvedValue({ id: challengeId, sessionId: challengeId, accountKind: 'personal', googleVerified: false })
+    const request = post({ action: 'google_sign_in' }); request.headers.set('authorization', 'Bearer synthetic-token')
+    expect((await f.handle(request)).status).toBe(401); expect(f.rpc).not.toHaveBeenCalled()
+  })
+  it('exchanges the verified Google bearer for an independently checked team principal', async () => {
+    const f = fixture(), principal = '31880bd8-1d6b-47db-9f92-adcaab6496df'
+    f.auth.currentCaller.mockResolvedValueOnce({ id: challengeId, sessionId: challengeId, accountKind: 'personal', googleVerified: true })
+      .mockResolvedValueOnce({ id: principal, sessionId: principal, accountKind: 'team_member' })
+    f.auth.issueSession.mockResolvedValue({ access_token: 'team-session', user: { id: principal } })
+    f.rpc.mockImplementation(async name => name === 'team_account_google'
+      ? { membership: { id: principal, identity_id: principal }, plan: {} }
+      : { membership: { identity_id: principal, state: 'active' }, context: { member_identity_id: principal } })
+    const request = post({ action: 'google_sign_in' }); request.headers.set('authorization', 'Bearer synthetic-google')
+    const response = await f.handle(request); expect(response.status).toBe(200)
+    expect(f.rpc).toHaveBeenNthCalledWith(1, 'team_account_google', { p_actor: challengeId, p_session: challengeId, p_team_id: null })
+    expect((await response.json()).data.session.user.id).toBe(principal)
+    expect(f.auth.createPrincipal).not.toHaveBeenCalled()
+  })
+  it('keeps confirmation tied to the original member and performs Auth cleanup after verified email commit', async () => {
+    const f = fixture(), order: string[] = []
+    f.auth.currentCaller.mockResolvedValue({ id: challengeId, sessionId: challengeId, accountKind: 'team_member' })
+    f.auth.verifyEmailCode.mockImplementation(async () => { order.push('official_verify'); return { email: 'new@example.invalid' } })
+    f.auth.revokeSessions.mockImplementation(async () => { order.push('global_signout') })
+    f.rpc.mockImplementation(async (_name, args) => {
+      order.push(args.p_action)
+      if (args.p_action === 'email_change_claim') return { stage: 'verify', email: 'new@example.invalid', lease_token: 'lease' }
+      if (args.p_action === 'email_change_commit') return { stage: 'auth_cleanup', principal_id: challengeId, plan: {}, operation_id: challengeId }
+      return { requires_sign_in: true }
+    })
+    const request = post({ action: 'confirm_email_change', challenge_id: challengeId, code: '123456', idempotency_key: 'email-original-key' })
+    request.headers.set('authorization', 'Bearer original-member-session')
+    const response = await f.handle(request); expect(response.status).toBe(200)
+    expect(order).toEqual(['email_change_claim', 'official_verify', 'email_change_commit', 'global_signout', 'email_change_finish'])
+    expect((await response.json()).data.requires_sign_in).toBe(true)
   })
 })
