@@ -15,6 +15,7 @@ let otherLogin:typeof seats[number]
 const targetDevice='gate-device-'+randomUUID()
 const transportReady=new Set<string>()
 let fileFixture:Fixture|null=null,fileService:Running|null=null
+let fileLoginRole:string|null=null
 const fileMachines:Machine[]=[],filePages:Page[]=[]
 const options={auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false}}
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms))
@@ -74,7 +75,15 @@ beforeAll(async()=>{
 afterAll(async()=>{
   for(const p of filePages)p.close()
   for(const m of fileMachines)m.socket.destroy()
-  await fileService?.close();await fileFixture?.cleanup()
+  await fileService?.close()
+  // pg.end() resolves at local socket shutdown; the server can still be
+  // retiring that backend. Do not race Fixture.cleanup's forced termination
+  // against a closing pool connection and turn its 57P01 into an uncaught event.
+  // A genuine leaked connection fails this bounded readback instead of being
+  // hidden by cleanup or by ignoring the error.
+  if(fileLoginRole)await until(async()=>(await db.query(
+    'SELECT count(*)::int n FROM pg_stat_activity WHERE usename=$1',[fileLoginRole])).rows[0].n===0,5000)
+  await fileFixture?.cleanup()
   for(const c of clients)await c.removeAllChannels()
   if(db){
     if(objectKey){const removed=await admin.storage.from('feedback-screenshots').remove([objectKey]);expect(removed.error).toBeNull()}
@@ -143,7 +152,8 @@ it('denies old HTTP JWTs and stops content on old live private subscriptions aft
 it('checks the same real Auth session on file HTTP reads and live document messages',async()=>{
   fileFixture=new Fixture();await fileFixture.connect()
   const status=JSON.parse(execFileSync(resolve('node_modules/.bin/supabase'),['status','--workdir',resolve('.local/test-db'),'--output','json'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}))
-  fileService=await startFiles(filesConfig(await fileFixture.filesLogin(),url+'/auth/v1/.well-known/jwks.json',{
+  const filesDbUrl=await fileFixture.filesLogin();fileLoginRole=new URL(filesDbUrl).username
+  fileService=await startFiles(filesConfig(filesDbUrl,url+'/auth/v1/.well-known/jwks.json',{
     jwtSecret:status.JWT_SECRET?new TextEncoder().encode(status.JWT_SECRET):null,
   }))
   const item=await fileFixture.file(chat,seats[0].id,'live-gate.md','text/markdown','seed\n')
