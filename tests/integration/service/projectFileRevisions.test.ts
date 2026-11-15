@@ -432,18 +432,30 @@ describe('temporary generations reuse managed budgets and private key issuance',
     expect((await db.query('SELECT chat.file_managed_upload_as($1,$2,$3,128) AS r',[randomUUID(),group,owner])).rows[0].r.max_bytes).toBe(128)
     expect((await request()).transfer_status).toBe('requested')
   })
-  // The published file is 123 bytes; whichever of the two limits is lower is the one the reader is told.
-  it.each([['file_max_bytes',122],['temporary_group_bytes',122]])('refuses a reader at once, with both sizes, when the file is over %s',async(limit,bytes)=>{
+  // The published file is 123 bytes. The holder's file-accept refuses above the group's temporary space and file size
+  // and the global file size; whichever is lowest is the one the reader is told.
+  it.each([
+    ['the file size',{file_max_bytes:122},null],
+    ['the group temporary space',{temporary_group_bytes:122},null],
+    ['the global file size under a larger group one',{file_max_bytes:122},{file_max_bytes:1000}],
+  ])('refuses a new transfer at once, with both sizes, over %s',async(_name,global,override)=>{
     await service()
-    await db.query('UPDATE chat.file_transfer_limits SET settings=settings||$1',[{[limit]:bytes}])
+    await db.query('UPDATE chat.file_transfer_limits SET settings=settings||$1',[global])
+    if(override) await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('group',$1,$2)",[group,override])
     const id=randomUUID()
     await user(member)
     const refused=await fails('SELECT chat.file_temporary_request($1,$2,$3)',[{item_id:item},member,id])
     expect([refused.message,refused.hint]).toEqual(['File is 123 bytes; transfers through the server are at most 122 bytes','file_transfer_too_large'])
     await service()
     expect((await db.query('SELECT id FROM chat.file_temporary_transfers WHERE id=$1',[id])).rows).toEqual([])
-    await db.query('UPDATE chat.file_transfer_limits SET settings=settings||$1',[{[limit]:123}])
+    await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"file_max_bytes\":123,\"temporary_group_bytes\":10000}' WHERE scope='global'")
     expect((await request(id)).transfer_status).toBe('requested')
+  })
+  it('still serves a ready copy after the limit drops below the file',async()=>{
+    const id=await ready()
+    await service()
+    await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"file_max_bytes\":122}'")
+    expect(await request()).toMatchObject({transfer_id:id,transfer_status:'ready'})
   })
   it('wakes the holding device\'s channel with only the request id, not a renderer-only user bus',async()=>{
     const id=randomUUID(),transfer=await request(id)

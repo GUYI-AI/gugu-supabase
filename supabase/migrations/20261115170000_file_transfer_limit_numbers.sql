@@ -1,8 +1,8 @@
 -- A refused transfer says the limit it hit, in bytes, so a client can pass the number on as it is.
 -- 1. An upload over the configured size names `file_max_bytes`.
--- 2. A reader asking for a device file larger than what may pass through the server is refused when it asks, with
---    both numbers, instead of waiting for a holder whose acceptance is bound to be refused. The plaintext size is
---    compared: the holder's acceptance still checks the exact ciphertext length.
+-- 2. A reader asking for a new transfer of a device file larger than what may pass through the server is refused when
+--    it asks, with both numbers, instead of waiting for a holder whose acceptance is bound to be refused. The plaintext
+--    size is compared: the holder's acceptance still checks the exact ciphertext length.
 DO $limits$
 DECLARE r record; definition text;
 BEGIN
@@ -11,16 +11,21 @@ BEGIN
          $old$RAISE EXCEPTION 'File exceeds configured upload size' USING$old$,
          $new$RAISE EXCEPTION 'File exceeds configured upload size of % bytes',chat.file_transfer_parameter(cfg,'file_max_bytes') USING$new$),
         ('chat.file_temporary_request(jsonb,text,uuid)',
-         $old$        RAISE EXCEPTION 'Temporary transfer is disabled for this file' USING HINT='file_transfer_denied';
-    END IF;$old$,
-         $new$        RAISE EXCEPTION 'Temporary transfer is disabled for this file' USING HINT='file_transfer_denied';
-    END IF;
-    cfg:=chat.file_transfer_settings('group',r->>'chat_id');
-    IF (r->>'size_bytes')::bigint>least(chat.file_transfer_parameter(cfg,'temporary_group_bytes'),chat.file_transfer_parameter(cfg,'file_max_bytes')) THEN
-        RAISE EXCEPTION 'File is % bytes; transfers through the server are at most % bytes',r->>'size_bytes',
-            least(chat.file_transfer_parameter(cfg,'temporary_group_bytes'),chat.file_transfer_parameter(cfg,'file_max_bytes'))
-            USING HINT='file_transfer_too_large';
-    END IF;$new$)
+         $old$        IF t.id IS NULL THEN
+$old$,
+         $new$        IF t.id IS NULL THEN
+            -- The holder's file-accept refuses above these three (temporary expiry checks the group's two, acceptance
+            -- the global file size), so a new transfer that would be refused there is refused here. Reused copies are not.
+            DECLARE most bigint:=least(chat.file_transfer_parameter(chat.file_transfer_settings('group',r->>'chat_id'),'temporary_group_bytes'),
+                chat.file_transfer_parameter(chat.file_transfer_settings('group',r->>'chat_id'),'file_max_bytes'),
+                chat.file_transfer_parameter(cfg,'file_max_bytes'));
+            BEGIN
+                IF (r->>'size_bytes')::bigint>most THEN
+                    RAISE EXCEPTION 'File is % bytes; transfers through the server are at most % bytes',r->>'size_bytes',most
+                        USING HINT='file_transfer_too_large';
+                END IF;
+            END;
+$new$)
     ) AS patches(signature,before_text,after_text)
     LOOP
         SELECT pg_get_functiondef(r.signature::regprocedure) INTO definition;
