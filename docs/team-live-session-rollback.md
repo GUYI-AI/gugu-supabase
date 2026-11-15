@@ -61,3 +61,25 @@ command in this change applies it:
    staged rollout. Identity/financial rows and original late settlements remain.
 
 The full restoration script above is intentionally unavailable in this state.
+
+## Trigger scope and execution path
+
+| Installed trigger | Full restoration | Reason |
+| --- | --- | --- |
+| `auth.sessions.team_file_session_closed` | Removed | It runs on every logout/session deletion, including personal sessions. With zero team principals and a closed region, removing it removes that extra personal-path work. |
+| `auth.users.team_identity_erasure_guard` | Removed | It runs on every Auth-user deletion. The no-team precondition permits removal without deleting any identity to bypass the guard. |
+| `team_private.members.team_member_principal_guard` | Retained | Protects principal binding integrity; no calls on the zero-member personal delete/logout path. |
+| `team_private.members.team_member_gate_changed` | Retained | Preserves membership revision invalidation; no calls on the zero-member personal delete/logout path. |
+
+Reactivation requires a reviewed forward repair restoring the Auth triggers as
+well as hook/policies/publishers; region activation must check the active gate.
+The migration-backed CI measures Auth DELETE trigger timings before/after (64
+samples after eight warmups for logout and user deletion), server lock-body time,
+and a forced 500ms lock timeout. These component timings exclude HTTP/Auth
+transport; results are recorded here after the exact-head run completes.
+
+The normal execution path is a named CD repair `team-live-session-gate` with
+`count`, `rehearse` and `apply`: fixed `ops/count-team-live-session-gate.sql` and
+this rollback SQL, with rehearsal replacing only the final COMMIT. The CD
+registration is a companion private-operations change, targeted for the same
+12:30 review handoff. Direct shared/production SQL execution is not an alternative.

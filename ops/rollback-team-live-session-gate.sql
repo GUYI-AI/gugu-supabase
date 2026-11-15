@@ -14,9 +14,12 @@ DECLARE
     setting text;
     definition text;
     restored_body text;
+    permission record;
+    original_acl aclitem[];
     hooks integer:=0;
     policies integer:=0;
     producers integer:=0;
+    auth_triggers integer:=0;
 BEGIN
     IF current_user<>'postgres' THEN
         RAISE EXCEPTION 'Privileged operational rollback is required' USING ERRCODE='42501';
@@ -24,6 +27,7 @@ BEGIN
     -- Prevent a concurrent Auth creation, metadata update, session or principal
     -- binding from passing between the zero-principal check and the COMMIT.
     LOCK TABLE auth.users,auth.sessions,team_private.members IN SHARE MODE;
+    PERFORM set_config('gugu.team_rollback_lock_started_at',clock_timestamp()::text,true);
     SELECT region INTO STRICT local_region FROM team_private.deployment WHERE singleton FOR UPDATE;
     IF local_region IS NOT NULL THEN
         RAISE EXCEPTION 'Close the deployment region before restoring the personal path' USING ERRCODE='55000';
@@ -94,12 +98,29 @@ BEGIN
           AND p.oid<>'public.team_publish_realtime(text,jsonb,text)'::regprocedure
     LOOP
         definition:=pg_get_functiondef(r.oid);
+        original_acl:=COALESCE(r.proacl,acldefault('f',r.proowner));
+        IF EXISTS(SELECT 1 FROM aclexplode(original_acl) WHERE grantor<>r.proowner) THEN
+            RAISE EXCEPTION 'Delegated producer grants require separate review' USING ERRCODE='55000';
+        END IF;
         restored_body:=replace(r.prosrc,'identity.send_team_realtime(','realtime.send(');
         EXECUTE replace(definition,r.prosrc,restored_body);
+        -- The community CREATE FUNCTION event trigger revokes API execution
+        -- even on replacement. Replay only the captured ACL, in its prior order.
+        FOR permission IN SELECT DISTINCT a.grantee FROM pg_proc p,
+            LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a WHERE p.oid=r.oid
+        LOOP
+            EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %s',r.signature,
+                CASE WHEN permission.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(permission.grantee)) END);
+        END LOOP;
+        FOR permission IN SELECT * FROM aclexplode(original_acl) WITH ORDINALITY ORDER BY ordinality LOOP
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %s%s',r.signature,
+                CASE WHEN permission.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(permission.grantee)) END,
+                CASE WHEN permission.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+        END LOOP;
         IF EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=r.oid
-          AND (p.proowner,p.proacl,p.prosecdef,p.proconfig,p.provolatile,p.proparallel,p.proleakproof)
+          AND (p.proowner,COALESCE(p.proacl,acldefault('f',p.proowner)),p.prosecdef,p.proconfig,p.provolatile,p.proparallel,p.proleakproof)
               IS DISTINCT FROM
-              (r.proowner,r.proacl,r.prosecdef,r.proconfig,r.provolatile,r.proparallel,r.proleakproof)) THEN
+              (r.proowner,original_acl,r.prosecdef,r.proconfig,r.provolatile,r.proparallel,r.proleakproof)) THEN
             RAISE EXCEPTION 'Producer security attributes changed during rollback' USING ERRCODE='55000';
         END IF;
         producers:=producers+1;
@@ -116,13 +137,29 @@ BEGIN
         END IF;
         hooks:=hooks+1;
     END LOOP;
+    FOR r IN SELECT t.* FROM pg_trigger t WHERE NOT t.tgisinternal AND
+        ((t.tgrelid='auth.sessions'::regclass AND t.tgname='team_file_session_closed')
+          OR (t.tgrelid='auth.users'::regclass AND t.tgname='team_identity_erasure_guard'))
+    LOOP
+        IF (r.tgrelid='auth.sessions'::regclass AND
+              (r.tgfoid<>'team_private.notify_auth_session_closed()'::regprocedure OR r.tgtype<>9))
+          OR (r.tgrelid='auth.users'::regclass AND
+              (r.tgfoid<>'team_private.prevent_principal_erasure()'::regprocedure OR r.tgtype<>11)) THEN
+            RAISE EXCEPTION 'An unexpected Auth trigger must not be removed' USING ERRCODE='55000';
+        END IF;
+        EXECUTE format('DROP TRIGGER %I ON %s',r.tgname,r.tgrelid::regclass);
+        auth_triggers:=auth_triggers+1;
+    END LOOP;
     PERFORM set_config('gugu.team_rollback_hooks',hooks::text,true);
     PERFORM set_config('gugu.team_rollback_policies',policies::text,true);
     PERFORM set_config('gugu.team_rollback_producers',producers::text,true);
+    PERFORM set_config('gugu.team_rollback_auth_triggers',auth_triggers::text,true);
 END $rollback$;
 NOTIFY pgrst,'reload config';
 SELECT current_setting('gugu.team_rollback_hooks')::int AS hook_settings_reset,
        current_setting('gugu.team_rollback_policies')::int AS policies_removed,
        current_setting('gugu.team_rollback_producers')::int AS producers_restored,
-       0::int AS team_principals;
+       current_setting('gugu.team_rollback_auth_triggers')::int AS auth_triggers_removed,
+       0::int AS team_principals,
+       ceil(EXTRACT(EPOCH FROM clock_timestamp()-current_setting('gugu.team_rollback_lock_started_at')::timestamptz)*1000)::int AS lock_held_ms;
 COMMIT;
