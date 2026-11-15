@@ -57,10 +57,12 @@ const options = {
 }
 const args = process.argv.slice(2)
 const run = (filters) => {
-  const excludeAudit = args.length === 0 && filters.includes('--maxWorkers=4') ? ['--exclude', '**/fileStorageAudit.test.ts', '--exclude', '**/unifiedAuthAuditHttp.test.ts'] : []
+  const excludeAudit = args.length === 0 && filters.includes('--maxWorkers=4') ? ['--exclude', '**/fileStorageAudit.test.ts', '--exclude', '**/unifiedAuthAuditHttp.test.ts', '--exclude', '**/selfOnlyConversationErasure.test.ts'] : []
   return execFileSync(path.join(root, 'node_modules/.bin/vitest'), ['run', '--project', 'integration', ...filters, ...excludeAudit], options)
 }
 if (args.length === 0) {
+  // The measured predecessor changes function DDL; do not overlap other suites.
+  run(['--maxWorkers=1', 'tests/integration/service/selfOnlyConversationErasure.test.ts'])
   run(['--maxWorkers=1', 'tests/integration/service/fileStorageAudit.test.ts', 'tests/integration/service/unifiedAuthAuditHttp.test.ts'])
   // Quota configuration and next-idle-pass GC assertions share the global quota lock.
   // Keep their suites isolated; the GC race suite still runs its own concurrent transactions.
