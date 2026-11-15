@@ -8,12 +8,10 @@ One GIN expression index covers this small reference array. Message text, result
 
 All command statements use the indexed projection while retaining their original mutation predicates and payload transformations. Each statement keeps its own snapshot; no cached candidate-ID array can omit a command that becomes visible between statements. The existing chat → command → identity/device lock order and sorted command locking remain unchanged.
 
-The releases are forward-only and independent of team identity:
+The single forward release `071502` is independent of team identity. Its ordinary index creation, pure projection/permissions and guarded erasure replacement commit atomically. An unexpected predecessor rolls the transaction back, including the index. The draft's separate `071503`/`071504` files were never deployed and have been folded into this release.
 
-- `071502`: pure projection and explicit permissions.
-- `071503`: exactly one `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, headed `-- gugu:transaction off`.
-- `071504`: guarded replacement of the command block in the existing erasure function. An unexpected predecessor aborts installation.
+Release review chose ordinary creation after both scale simulations met the agreed limits: build at most one second and longest concurrent writer at most one second. On 15,000 generated command rows the build took 79.057 ms and the longest writer 77.997 ms; on 156,000 rows, 831.122 ms and 829.222 ms. Concurrent creation took 78.344/942.710 ms, with longest writers 1.472/8.121 ms and no observed lock samples. These are synthetic loopback measurements, not a staging clone or production timing, and leave a finite write-lock window. Actual shared deployment duration remains a CD acceptance item.
 
-Before shared rollout, an isolated clone must compare concurrent and ordinary index creation time and write-blocking intervals, verify index readiness/replay, measure insert/status-update WAL and latency, and exercise the real Auth hard-delete path with ordinary account relationships. Target under three seconds for the agreed fixture; report actual results and background load rather than extrapolating from an empty account. The default migration uses concurrent creation; changing that choice requires release review.
+Before shared rollout, verify readiness/replay, insert and payload-update WAL/latency, the four command plans and both message-reference filters. Exercise the real Auth hard-delete path with ordinary account relationships; target under three seconds for the agreed fixture. Synthetic Auth measurements do not replace retrying the preserved shared fixture after the reviewed deployment.
 
 The current failed fixture is preserved for diagnosis. These changes have not been deployed. Email delivery, client entry points, financial anonymization and broader residual-reference cleanup remain separate release gates.

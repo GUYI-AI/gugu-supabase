@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
 
@@ -11,6 +12,19 @@ beforeAll(async () => {
 beforeEach(async () => { await db.query('BEGIN') })
 afterEach(async () => { await db.query('ROLLBACK') })
 afterAll(async () => { await db?.end() })
+
+it('rolls back projection and ordinary index together when the erasure predecessor differs', async () => {
+  // The installed function is already upgraded, so it intentionally cannot
+  // match the migration's old block. The enclosing transaction is disposable.
+  await db.query('DROP INDEX identity.gugu_device_commands_erasure_refs_idx')
+  await db.query('DROP FUNCTION identity.command_erasure_references_v1(text,jsonb)')
+  await db.query('SAVEPOINT before_rejected_upgrade')
+  await expect(db.query(readFileSync('supabase/migrations/20261115071502_command_erasure_references.sql', 'utf8')))
+    .rejects.toThrow('Unexpected account erasure command predecessor')
+  await db.query('ROLLBACK TO SAVEPOINT before_rejected_upgrade')
+  expect((await db.query(`SELECT to_regprocedure('identity.command_erasure_references_v1(text,jsonb)') fn,
+    to_regclass('identity.gugu_device_commands_erasure_refs_idx') idx`)).rows[0]).toEqual({ fn: null, idx: null })
+})
 
 it('indexes exactly the original JSON-reference predicate, including legacy recipient values', async () => {
   const targets = ['human', 'agent', '5', 'true', '{"legacy": "id"}']
