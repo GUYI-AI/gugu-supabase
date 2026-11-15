@@ -3,7 +3,11 @@
 -- Never pass this entire script as one driver query or wrap it in BEGIN.
 SET ROLE supabase_auth_admin;
 SET lock_timeout='100ms';
-SET statement_timeout='120s';
+\if :{?auth_audit_statement_ms}
+\else
+\set auth_audit_statement_ms 120000
+\endif
+SET statement_timeout=:'auth_audit_statement_ms';
 SET search_path=pg_catalog;
 DO $before$
 BEGIN
