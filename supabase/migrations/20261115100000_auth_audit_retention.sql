@@ -79,7 +79,7 @@ ALTER FUNCTION identity.erase_auth_audit_actor(text[],text) OWNER TO postgres;
 REVOKE ALL ON FUNCTION identity.erase_auth_audit_actor(text[],text) FROM PUBLIC,anon,authenticated,service_role;
 
 CREATE FUNCTION identity.prune_auth_audit_log(p_limit integer DEFAULT 100) RETURNS integer
-LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='100ms' AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='100ms' SET TimeZone='UTC' AS $$
 DECLARE n integer;
 BEGIN
     IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000 THEN

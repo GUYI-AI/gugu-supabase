@@ -107,6 +107,12 @@ describe('bounded Auth audit retention', () => {
     expect(await prune()).toBe(1); expect(await read(old)).toBeUndefined()
     for (const id of [boundary, fresh, undated]) expect(await read(id)).toBeDefined()
   })
+  it('keeps a full 180 UTC days when the caller uses a daylight-saving timezone', async () => {
+    await db.query("SET LOCAL TimeZone='America/New_York'")
+    const boundary=await entry({},'15552000 seconds'),older=await entry({},'15552000.000001 seconds')
+    expect(await prune()).toBe(1)
+    expect(await read(boundary)).toBeDefined();expect(await read(older)).toBeUndefined()
+  })
   it('limits each default batch and converges without touching new records', async () => {
     await db.query("INSERT INTO auth.audit_log_entries(id,payload,created_at) SELECT gen_random_uuid(),'{}',now()-interval '181 days' FROM generate_series(1,150)")
     const fresh = await entry({})
