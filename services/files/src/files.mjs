@@ -364,7 +364,11 @@ export function createFileService(config, { log, pool: givenPool }) {
     for (const doc of hp().documents.values()) {
       for (const conn of doc.getConnections()) {
         const c = conn.context
-        if (c?.itemId && c?.userId && c?.actorId) connections.push({ conn, itemId: c.itemId, userId: c.userId, actorId: c.actorId })
+        if (c?.teamSessionRequired && Date.now() >= c.authExpiresAt) {
+          conn.close({ code: 4401, reason: 'bad-credential' })
+          continue
+        }
+        if (c?.itemId && c?.userId && c?.actorId) connections.push({ conn, itemId: c.itemId, userId: c.userId, actorId: c.actorId, sessionId: c.sessionId ?? null })
       }
     }
     if (!connections.length) return
@@ -372,15 +376,15 @@ export function createFileService(config, { log, pool: givenPool }) {
     // database's current item + delegated-actor authorization in one batch;
     // cached chat membership must neither preserve nor revoke access on its own.
     const { rows } = await pool.query(
-      `SELECT p.item_id::text, p.user_id, p.actor_id, g.chat_id
-         FROM unnest($1::uuid[], $2::text[], $3::text[]) AS p(item_id, user_id, actor_id)
-         CROSS JOIN LATERAL chat.files_authorize(p.item_id, p.user_id, p.actor_id) g`,
-      [connections.map((c) => c.itemId), connections.map((c) => c.userId), connections.map((c) => c.actorId)],
+      `SELECT p.item_id::text, p.user_id, p.actor_id, p.session_id, g.chat_id
+         FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[]) AS p(item_id, user_id, actor_id, session_id)
+         CROSS JOIN LATERAL chat.files_authorize(p.item_id, p.user_id, p.actor_id, p.session_id) g`,
+      [connections.map((c) => c.itemId), connections.map((c) => c.userId), connections.map((c) => c.actorId), connections.map((c) => c.sessionId)],
     )
-    const key = (/** @type {string} */ itemId, /** @type {string} */ userId, /** @type {string} */ actorId) => `${itemId}\u0000${userId}\u0000${actorId}`
-    const allowed = new Map(rows.map((r) => [key(r.item_id, r.user_id, r.actor_id), r.chat_id]))
-    for (const { conn, itemId, userId, actorId } of connections) {
-      const chatId = allowed.get(key(itemId, userId, actorId))
+    const key = (/** @type {string} */ itemId, /** @type {string} */ userId, /** @type {string} */ actorId, /** @type {string | null} */ sessionId) => `${itemId}\u0000${userId}\u0000${actorId}\u0000${sessionId ?? ""}`
+    const allowed = new Map(rows.map((r) => [key(r.item_id, r.user_id, r.actor_id, r.session_id), r.chat_id]))
+    for (const { conn, itemId, userId, actorId, sessionId } of connections) {
+      const chatId = allowed.get(key(itemId, userId, actorId, sessionId))
       if (chatId) conn.context.chatId = chatId
       else {
         conn.close({ code: 4403, reason: 'removed-from-group' })
@@ -476,11 +480,12 @@ export function createFileService(config, { log, pool: givenPool }) {
         if (!ref) throw new Denied('not-found')
         // 子协议带 `as.<agentId>` 就是代这个 agent 打开:判据和 HTTP 的 X-Gugu-As-Agent 同一处,之后这条连接的
         // actor(presence 的章、self、被移出群时断开)都是这个 agent。
-        const grant = await authorizeItem(pool, ref.itemId, identity.userId, asAgentFromProtocols(offered))
+        const grant = await authorizeItem(pool, ref.itemId, identity.userId, asAgentFromProtocols(offered), identity.sessionId)
         if (grant.kind !== 'document') throw new Denied('not-a-document', 409)
         if (grant.epoch !== ref.epoch) throw new Denied(`stale-epoch:${grant.epoch}`, 409)
         return {
-          userId: identity.userId,
+          userId: identity.userId, sessionId: identity.sessionId,
+          teamSessionRequired: grant.teamSessionRequired, authExpiresAt: identity.exp * 1000,
           actorId: grant.actorId,
           actorName: grant.actorName,
           color: colorFor(grant.actorId),
@@ -556,6 +561,11 @@ export function createFileService(config, { log, pool: givenPool }) {
     // 一笔内容改动落地之前:换了人、或停够了,上一轮记成一版(G2)。
     /** @param {any} data */
     async beforeHandleMessage(data) {
+      const actorContext = data.connection?.context
+      if (actorContext?.teamSessionRequired) {
+        if (Date.now() >= actorContext.authExpiresAt) throw new Denied('bad-credential', 401)
+        await authorizeItem(pool, actorContext.itemId, actorContext.userId, actorContext.actorId, actorContext.sessionId)
+      }
       await openFiles.hooks.beforeHandleMessage(data)
       const head = readHead(data.update)
       if (!((head.type === 0 || head.type === 4) && head.payloadLength > 0)) return
@@ -714,7 +724,7 @@ export function createFileService(config, { log, pool: givenPool }) {
     try {
       const identity = await verify(bearerFromAuthorization(header(req.headers, 'authorization')))
       const asAgent = header(req.headers, 'x-gugu-as-agent')?.trim() || null
-      const grant = await authorizeItem(pool, itemId, identity.userId, asAgent)
+      const grant = await authorizeItem(pool, itemId, identity.userId, asAgent, identity.sessionId)
       if (grant.kind !== 'document') throw new Denied('not-a-document', 409)
 
       if (!isEdit) {
@@ -745,7 +755,7 @@ export function createFileService(config, { log, pool: givenPool }) {
         throw new Denied('bad-request', 400)
       }
       if (m[2] === '/replace') return send(res, 200, await replaceIncoming({ pool, files: openFiles, hp: hp(), itemId, identity, grant, body,
-        open: () => openDirect(itemId, grant, { userId: identity.userId, actorId: grant.actorId, chatId: grant.chatId, itemId, via: 'http' }) }))
+        open: () => openDirect(itemId, grant, { userId: identity.userId, sessionId: identity.sessionId, actorId: grant.actorId, chatId: grant.chatId, itemId, via: 'http' }) }))
       if (typeof body?.old !== 'string' || typeof body?.new !== 'string') throw new Denied('bad-request', 400)
       if (body.old === '') throw new Denied('empty-old', 400)
 
@@ -758,10 +768,10 @@ export function createFileService(config, { log, pool: givenPool }) {
         settled: (name) => openFiles.settled(name),
         open: async () => {
           // After a swap: the grant again, for the generation the database has now.
-          if (reauthorize) g = await authorizeItem(pool, itemId, identity.userId, asAgent)
+          if (reauthorize) g = await authorizeItem(pool, itemId, identity.userId, asAgent, identity.sessionId)
           reauthorize = true
           const opened = await openDirect(itemId, g, {
-            userId: identity.userId,
+            userId: identity.userId, sessionId: identity.sessionId,
             actorId: g.actorId,
             chatId: g.chatId,
             itemId,
