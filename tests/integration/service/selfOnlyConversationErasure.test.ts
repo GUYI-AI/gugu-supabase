@@ -105,7 +105,9 @@ it('cascades source topics and file items, queues exclusive blobs and preserves 
   const owner=await human(),mine=await agent(owner),peer=await human()
   const root=await room('group',owner,[owner,mine]),topic=await room('topic',owner,[owner,mine],root)
   const shared=await room('group',peer,[peer,owner])
-  const exclusive=await binary(root,owner),copy=await binary(topic,owner),kept=await binary(shared,peer,copy.pointer)
+  // Topics use their source's file container; do not create an invalid private
+  // topic container just to exercise the cascade.
+  const exclusive=await binary(root,owner),copy=await binary(root,owner),kept=await binary(shared,peer,copy.pointer)
   const text=(await row(`INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,inline_text,size_bytes,created_by)
     VALUES($1,'document','note.md','text/markdown','fixture',7,$2)RETURNING id`,[root,owner])).id
   await db.query('DELETE FROM auth.users WHERE id=$1',[owner])
@@ -153,7 +155,8 @@ it('does not let a concurrent join resurrect a conversation already being delete
     await erase.query('BEGIN');await erase.query('DELETE FROM auth.users WHERE id=$1',[owner])
     await join.query('BEGIN');await join.query("SET LOCAL lock_timeout='5s'")
     const pending=join.query("INSERT INTO chat.chat_members(chat_id,user_id,role)VALUES($1,$2,'member')",[target,peer]).then(()=>null,error=>error)
-    await waitingFor(jp,ep);await erase.query('COMMIT');expect(await pending).toMatchObject({code:'23503'})
+    await waitingFor(jp,ep);await erase.query('COMMIT')
+    expect(await pending).toMatchObject({code:'P0001',message:'cannot add membership for absent chat '+target})
     await join.query('ROLLBACK')
     expect((await row('SELECT count(*)::int n FROM chat.chats WHERE id=$1',[target])).n).toBe(0)
   }finally{await erase.query('ROLLBACK');await join.query('ROLLBACK');await erase.end();await join.end()}
