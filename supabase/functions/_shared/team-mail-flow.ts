@@ -5,8 +5,9 @@ export interface InvitationMail {
   operationId: string; invitationId: string; to: string; teamName: string; invitationUrl: string; expiresAt: string;
 }
 export interface InvitationMailer {
+  recipientPolicy(to: string): 'off' | 'allowed' | 'blocked';
   canSend(to: string): boolean;
-  send(input: InvitationMail): Promise<{ state: 'accepted' | 'failed' | 'unknown'; reason_code: 'smtp_accepted' | 'smtp_rejected' | 'smtp_result_unknown' }>;
+  send(input: InvitationMail): Promise<{ state: 'accepted' | 'failed' | 'unknown'; reason_code: 'smtp_accepted' | 'smtp_rejected' | 'smtp_result_unknown' | 'recipient_not_allowed' }>;
 }
 interface Dependencies {
   auth: Pick<ReturnType<typeof teamAuth>, 'ensureAnchor' | 'sendEmailCode'>;
@@ -56,6 +57,11 @@ export function teamMailFlow(deps: Dependencies) {
         // Replays use the durable receipt before checking current SMTP settings.
         if (permit.state === 'accepted') return response;
         if (permit.state !== 'pending') {
+          throw new TeamRefusal('dependency_unavailable', 503);
+        }
+        if (deps.invitationMailer?.recipientPolicy(permit.recipient_email) === 'blocked') {
+          permit = checked(await deps.rpc('team_mail_delivery', args('reject_recipient', scope, request, caller)));
+          response.delivery = { operation_id: permit.delivery_id, state: permit.state, reason_code: permit.reason_code };
           throw new TeamRefusal('dependency_unavailable', 503);
         }
         if (!deps.invitationMailer?.canSend(permit.recipient_email)) {
