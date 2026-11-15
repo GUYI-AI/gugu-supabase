@@ -112,9 +112,12 @@ it('rolls back Auth, identity, group and early audit redaction when the late fil
 })
 
 it.each([null, ''])('actual Auth DELETE still redacts complete IDs when OLD.email is %s', async email => {
-  const id = randomUUID(); users.push(id)
-  await db.query(`INSERT INTO auth.users(id,aud,role,email,raw_app_meta_data,created_at,updated_at)
-    VALUES($1,'authenticated','authenticated',$2,'{"provider":"email"}',now(),now())`, [id, email])
+  // Start with a real Auth-created identity/session scope. A bare SQL user row
+  // need not be addressable by the Auth Admin API even though a SQL DELETE works.
+  const { id } = await create()
+  await db.query('UPDATE auth.users SET email=$2 WHERE id=$1', [id, email])
+  const readable = await auth('admin/users/' + id)
+  expect(readable.status).toBe(200); await readable.body?.cancel()
   const event = await audit({ actor_id: id, actor_username: 'synthetic@unified-audit.invalid', actor_name: 'Synthetic' })
   const operation = await fileAudit(id)
   const response = await auth('admin/users/' + id, 'DELETE', { should_soft_delete: false })
