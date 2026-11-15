@@ -102,22 +102,41 @@ it.each(['dm','ai','group','topic','removed_owned_agent','other_human','other_ag
 }))
 
 it('cascades source topics and file items, queues exclusive blobs and preserves a shared copy',async()=>rollback(async()=>{
-  const owner=await human(),mine=await agent(owner),peer=await human()
+  const owner=await human(),mine=await agent(owner),peer=await human(),otherPeer=await human()
   const root=await room('group',owner,[owner,mine]),topic=await room('topic',owner,[owner,mine],root)
-  const shared=await room('group',peer,[peer,owner])
+  // Two surviving humans keep the positive-control group active; the legacy
+  // one-member archival/byte-expiry rule is a separate unchanged behavior.
+  const shared=await room('group',peer,[peer,otherPeer,owner])
   // Topics use their source's file container; do not create an invalid private
   // topic container just to exercise the cascade.
   const exclusive=await binary(root,owner),copy=await binary(root,owner),kept=await binary(shared,peer,copy.pointer)
-  const text=(await row(`INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,inline_text,size_bytes,created_by)
-    VALUES($1,'document','note.md','text/markdown','fixture',7,$2)RETURNING id`,[root,owner])).id
+  const folder=(await row("INSERT INTO chat.workspace_items(chat_id,kind,filename,created_by)VALUES($1,'folder','Nested',$2)RETURNING id",[root,owner])).id
+  const text=(await row(`INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,inline_text,size_bytes,created_by,parent_id)
+    VALUES($1,'document','note.md','text/markdown','fixture',7,$2,$3)RETURNING id`,[root,owner,folder])).id
+  await db.query('SAVEPOINT guarded_folder')
+  await expect(db.query('DELETE FROM chat.workspace_items WHERE id=$1',[folder])).rejects.toMatchObject({code:'23503',hint:'workspace_folder_not_empty'})
+  await db.query('ROLLBACK TO guarded_folder')
   await db.query('DELETE FROM auth.users WHERE id=$1',[owner])
   expect((await row('SELECT count(*)::int n FROM chat.chats WHERE id=ANY($1)',[[root,topic]])).n).toBe(0)
-  expect((await row('SELECT count(*)::int n FROM chat.workspace_items WHERE id=ANY($1::uuid[])',[[exclusive.id,copy.id,text]])).n).toBe(0)
+  expect((await row('SELECT count(*)::int n FROM chat.workspace_items WHERE id=ANY($1::uuid[])',[[exclusive.id,copy.id,text,folder]])).n).toBe(0)
   expect((await row('SELECT count(*)::int n FROM chat.workspace_items WHERE id=$1',[kept.id])).n).toBe(1)
   expect((await row('SELECT chat.file_blob_in_use($1) used',[exclusive.blob_id])).used).toBe(false)
   expect((await row('SELECT count(*)::int n FROM chat.file_blob_gc WHERE blob_id=$1',[exclusive.blob_id])).n).toBe(1)
   expect((await row('SELECT chat.file_blob_in_use($1) used',[copy.blob_id])).used).toBe(true)
   expect((await row("SELECT count(*)::int n FROM storage.objects WHERE bucket_id='workspace' AND name=$1",[copy.pointer])).n).toBe(1)
+}))
+
+it('rolls back Auth, conversations, files and registration when a cascade cannot enqueue its blob',async()=>rollback(async()=>{
+  const owner=await human(),mine=await agent(owner),target=await room('group',owner,[owner,mine]),file=await binary(target,owner)
+  // This is serial owned-fixture DDL, not a weakened application guard.
+  await db.query(`ALTER TABLE chat.file_blob_gc ADD CONSTRAINT self_only_queue_failure CHECK(blob_id<>'${file.blob_id}'::uuid) NOT VALID`)
+  await db.query('SAVEPOINT rejected_delete')
+  await expect(db.query('DELETE FROM auth.users WHERE id=$1',[owner])).rejects.toMatchObject({code:'23514',constraint:'self_only_queue_failure'})
+  await db.query('ROLLBACK TO rejected_delete')
+  expect((await row('SELECT count(*)::int n FROM auth.users WHERE id=$1',[owner])).n).toBe(1)
+  expect((await row('SELECT count(*)::int n FROM chat.chats WHERE id=$1',[target])).n).toBe(1)
+  expect((await row('SELECT count(*)::int n FROM chat.workspace_items WHERE id=$1',[file.id])).n).toBe(1)
+  expect((await row('SELECT count(*)::int n FROM identity.account_audit_redaction_jobs WHERE source_subject_id=$1',[owner])).n).toBe(0)
 }))
 
 it('keeps the helper closed and rejects a forged context without deleting anything',async()=>rollback(async()=>{
