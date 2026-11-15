@@ -4,10 +4,10 @@ CREATE FUNCTION public.team_account_provision(p_action text,p_input jsonb)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE c team_private.email_challenges%ROWTYPE; op team_private.member_operations%ROWTYPE;
     seat team_private.members%ROWTYPE; invitation team_private.invitations%ROWTYPE;
-    choices jsonb; request_hash text; email_hash text; key text; region text; tid uuid;
+    choices jsonb; request_hash text; email_hash text; key text; local_region text; tid uuid;
 BEGIN
-    region:=identity.team_deployment_region();
-    IF region IS NULL THEN PERFORM team_private.refuse('dependency_unavailable',503); END IF;
+    local_region:=identity.team_deployment_region();
+    IF local_region IS NULL THEN PERFORM team_private.refuse('dependency_unavailable',503); END IF;
     IF p_action='activate' THEN
         SELECT * INTO seat FROM team_private.members WHERE id=(p_input->>'member_id')::uuid FOR UPDATE;
         IF seat.id IS NULL OR seat.planned_principal_id IS DISTINCT FROM (p_input->>'principal_id')::uuid
@@ -20,7 +20,7 @@ BEGIN
               AND u.raw_app_meta_data->>'gugu_account_kind'='team_member'
               AND u.raw_app_meta_data->>'gugu_team_id'=seat.team_id::text
               AND u.raw_app_meta_data->>'gugu_member_id'=seat.id::text
-              AND u.raw_app_meta_data->>'gugu_team_region'=t.region AND t.region=region) THEN
+              AND u.raw_app_meta_data->>'gugu_team_region'=t.region AND t.region=local_region) THEN
             PERFORM team_private.refuse('dependency_unavailable',503);
         END IF;
         UPDATE team_private.members SET principal_user_id=planned_principal_id,state='active',updated_at=clock_timestamp()
@@ -52,7 +52,7 @@ BEGIN
         IF c.state<>'verified' THEN PERFORM team_private.refuse('verification_required',401); END IF;
         IF p_action='create' THEN
             IF length(btrim(p_input->>'name')) NOT BETWEEN 1 AND 100 THEN PERFORM team_private.refuse('invalid_request',400); END IF;
-            INSERT INTO team_private.teams(name,region) VALUES(btrim(p_input->>'name'),region) RETURNING id INTO tid;
+            INSERT INTO team_private.teams(name,region) VALUES(btrim(p_input->>'name'),local_region) RETURNING id INTO tid;
             INSERT INTO team_private.members(team_id,email_normalized,role,state,planned_principal_id,display_name)
               VALUES(tid,c.email_normalized,'superadmin','provisioning',gen_random_uuid(),split_part(c.email_normalized,'@',1)) RETURNING * INTO seat;
         ELSIF p_action='accept_invitation' THEN
@@ -70,12 +70,12 @@ BEGIN
             SELECT COALESCE(jsonb_agg(jsonb_build_object('team_id',t.id,'team_name',t.name,'role',m.role,
                 'member_state',m.state,'region',t.region) ORDER BY t.id),'[]'::jsonb) INTO choices
               FROM team_private.members m JOIN team_private.teams t ON t.id=m.team_id
-              WHERE m.email_normalized=c.email_normalized AND m.state='active' AND t.state='active' AND t.region=region;
+              WHERE m.email_normalized=c.email_normalized AND m.state='active' AND t.state='active' AND t.region=local_region;
             IF p_input->>'team_id' IS NULL AND jsonb_array_length(choices)>1 THEN
                 RETURN jsonb_build_object('refusal','context_required','contexts',choices);
             END IF;
             SELECT * INTO seat FROM team_private.members m WHERE m.email_normalized=c.email_normalized AND m.state='active'
-              AND EXISTS(SELECT 1 FROM team_private.teams t WHERE t.id=m.team_id AND t.state='active' AND t.region=region)
+              AND EXISTS(SELECT 1 FROM team_private.teams t WHERE t.id=m.team_id AND t.state='active' AND t.region=local_region)
               AND (p_input->>'team_id' IS NULL OR m.team_id=(p_input->>'team_id')::uuid) ORDER BY m.id LIMIT 1 FOR UPDATE;
             IF seat.id IS NULL THEN PERFORM team_private.refuse('membership_disabled'); END IF;
             IF c.team_id IS NOT NULL AND seat.team_id<>c.team_id THEN PERFORM team_private.refuse('forbidden'); END IF;
@@ -83,7 +83,7 @@ BEGIN
         INSERT INTO team_private.member_operations(subject_email_digest,action,idempotency_key,request_digest,team_id,target_member_id)
           VALUES(email_hash,p_action,key,request_hash,seat.team_id,seat.id) RETURNING * INTO op;
     END IF;
-    IF NOT EXISTS(SELECT 1 FROM team_private.teams WHERE id=seat.team_id AND region=region AND state IN ('active','provisioning')) THEN
+    IF NOT EXISTS(SELECT 1 FROM team_private.teams t WHERE t.id=seat.team_id AND t.region=local_region AND t.state IN ('active','provisioning')) THEN
         PERFORM team_private.refuse('region_mismatch');
     END IF;
     UPDATE team_private.email_challenges SET state='consumed',operation_id=op.id WHERE id=c.id;
