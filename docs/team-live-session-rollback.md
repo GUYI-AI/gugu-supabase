@@ -76,7 +76,23 @@ well as hook/policies/publishers; region activation must check the active gate.
 The migration-backed CI measures Auth DELETE trigger timings before/after (64
 samples after eight warmups for logout and user deletion), server lock-body time,
 and a forced 500ms lock timeout. These component timings exclude HTTP/Auth
-transport; results are recorded here after the exact-head run completes.
+transport. The complete migration-backed run 43671482462 at `be59691` passed all
+seven rollback cases and the full integration suite (1682 passed, two existing
+skips across 182 files). It measured:
+
+| Component | Before: median / p95 | After: median / p95 |
+| --- | --- | --- |
+| Personal session DELETE: added team-trigger time | 0.101 / 0.129 ms | 0 / 0 ms (Auth trigger removed) |
+| Personal Auth-user DELETE: added team-trigger time | 0.128 / 0.145 ms | 0 / 0 ms (Auth triggers removed) |
+| Member-trigger calls in those personal paths | 0 | 0 |
+
+The server measured a 31 ms lock body; the whole SQL round trip, including
+commit, was 31.673 ms, an upper bound on total lock duration in this fixture.
+A conflicting session-table writer caused a clean `55P03` failure at 501.351 ms
+with the 500 ms lock timeout. After rollback to the test savepoint, partially
+acquired Auth-user ShareLocks were zero and hooks/producers were unchanged.
+No production latency or complete HTTP logout/account-deletion duration is
+claimed from this component benchmark.
 
 The normal execution path is a named CD repair `team-live-session-gate` with
 `count`, `rehearse` and `apply`: fixed `ops/count-team-live-session-gate.sql` and
