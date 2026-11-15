@@ -1,5 +1,9 @@
 -- Refuse unapproved recipients without taking a send lease or quota slot.
 -- Preserve the previous mail receipt and locking rules in this forward change.
+ALTER TABLE team_private.mail_deliveries DROP CONSTRAINT mail_deliveries_reason_code_check;
+ALTER TABLE team_private.mail_deliveries ADD CONSTRAINT mail_deliveries_reason_code_check
+  CHECK(reason_code IS NULL OR reason_code IN ('smtp_accepted','smtp_rejected','smtp_result_unknown',
+    'identity_unavailable','code_accepted','code_result_unknown','lease_expired','recipient_not_allowed'));
 DO $recipient_refusal$
 DECLARE definition text; anchor text;
 BEGIN
