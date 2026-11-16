@@ -34,7 +34,7 @@ describe('allowlisted Edge events', () => {
     const out = capture(), log = createSafeLogger('attachments', { failed: 'error' })
     log('failed', fields as SafeLogFields)
     expect(out.lines.join('\n')).not.toContain(marker)
-    expect(out.records()).toMatchObject([{ event: 'log_input_rejected', reason: 'log_input_rejected', level: 'warn', count: 1 }])
+    expect(out.records()).toMatchObject([{ event: 'log_input_rejected', reason: 'log_input_rejected', level: 'WARNING', count: 1 }])
     expect(log.snapshot()).toEqual({ accepted: 0, rejected: 1, write_failed: 0 })
   })
 
@@ -65,7 +65,7 @@ describe('allowlisted Edge events', () => {
     const out = capture(), definitions = { failed: 'error' as const }, log = createSafeLogger('attachments', definitions)
     Object.assign(definitions, { failed: marker })
     log('failed')
-    expect(out.records()[0]).toMatchObject({ level: 'error', event: 'failed' })
+    expect(out.records()[0]).toMatchObject({ level: 'ERROR', event: 'failed' })
     for (const [name, defs] of [[marker, { failed: 'error' }], ['attachments', { [marker]: 'error' }], ['attachments', {}]]) {
       expect(() => createSafeLogger(name as string, defs as Record<string, 'error'>)).toThrow('Invalid safe log definition')
     }

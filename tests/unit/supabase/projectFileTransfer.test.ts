@@ -61,7 +61,7 @@ describe('temporary file HTTP protocol',()=>{
       expect(f.userRpc).toHaveBeenCalledWith('file_temporary_accept',{p_id:transfer,p_size:128})
       expect(f.objects.upload).toHaveBeenCalled()
       expect(stderr).toHaveBeenCalledTimes(1)
-      expect(JSON.parse(stderr.mock.calls[0]![0])).toMatchObject({ service: 'edge', function: 'attachments', event: 'gc_result_log_failed', entry: 'file-accept', level: 'error', count: 1 })
+      expect(JSON.parse(stderr.mock.calls[0]![0])).toMatchObject({ service: 'edge', function: 'attachments', event: 'gc_result_log_failed', entry: 'file-accept', level: 'ERROR', count: 1 })
     } finally {stderr.mockRestore()}
   })
   it('refuses modified ciphertext and malformed key material before publication',async()=>{

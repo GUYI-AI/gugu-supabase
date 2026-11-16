@@ -72,7 +72,8 @@ export function createSafeLogger<const Events extends Record<string, SafeLogLeve
       // Only this newly built object is serialized. No input object or toJSON reaches JSON.stringify.
       const record: Record<string, unknown> = {
         schema_version: 1, service: 'edge', boot_id: bootId, sequence: ++sequence,
-        emitted_at: new Date().toISOString(), function: functionName, event, level,
+        emitted_at: new Date().toISOString(), function: functionName, event,
+        level: level === 'info' ? 'INFO' : level === 'warn' ? 'WARNING' : 'ERROR',
         count: fields.count ?? 1, reason: event,
       }
       for (const key of FIELDS) {
@@ -87,7 +88,7 @@ export function createSafeLogger<const Events extends Record<string, SafeLogLeve
       stats.write_failed++
     }
   }
-  const logger = ((event: string, input: unknown = {}) => {
+  const logger = (event: string, input: unknown = {}) => {
     try {
       const level = typeof event === 'string' ? events.get(event) : undefined
       const fields = fieldsOf(input)
@@ -99,7 +100,6 @@ export function createSafeLogger<const Events extends Record<string, SafeLogLeve
     } catch { /* No exception object is retained or printed. */ }
     stats.rejected++
     write('log_input_rejected', 'warn', { count: 1 })
-  }) as SafeLogger<Extract<keyof Events, string>>
-  logger.snapshot = () => Object.freeze({ ...stats })
-  return logger
+  }
+  return Object.assign(logger, { snapshot: () => Object.freeze({ ...stats }) })
 }

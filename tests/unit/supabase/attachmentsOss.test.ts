@@ -787,7 +787,7 @@ describe('直传表单、签名链接、回收', () => {
       expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 1, deleted: 1, failed: 0 })
       expect(f.removed).toEqual(['workspace/c/u/old'])
       expect(stderr).toHaveBeenCalledTimes(1)
-      expect(JSON.parse(stderr.mock.calls[0]![0])).toMatchObject({ service: 'edge', function: 'attachments', event: 'gc_result_log_failed', reason: 'gc_result_log_failed', entry: 'kick', level: 'error', count: 1 })
+      expect(JSON.parse(stderr.mock.calls[0]![0])).toMatchObject({ service: 'edge', function: 'attachments', event: 'gc_result_log_failed', reason: 'gc_result_log_failed', entry: 'kick', level: 'ERROR', count: 1 })
     } finally { stderr.mockRestore() }
   })
   it.each([false, true])('gc preserves the original exception when summary logging throws (stderr unavailable: %s)', async stderrFails => {
@@ -799,7 +799,7 @@ describe('直传表单、签名链接、回收', () => {
     try {
       await expect(handleGc(f.deps, 'kick')).rejects.toBe(original)
       expect(stderr).toHaveBeenCalledTimes(1)
-      expect(JSON.parse(stderr.mock.calls[0]![0])).toMatchObject({ service: 'edge', function: 'attachments', event: 'gc_result_log_failed', reason: 'gc_result_log_failed', entry: 'kick', level: 'error', count: 1 })
+      expect(JSON.parse(stderr.mock.calls[0]![0])).toMatchObject({ service: 'edge', function: 'attachments', event: 'gc_result_log_failed', reason: 'gc_result_log_failed', entry: 'kick', level: 'ERROR', count: 1 })
     } finally { stderr.mockRestore() }
   })
   it('gc excludes sensitive exception fields from its fallback log', async () => {
@@ -815,7 +815,7 @@ describe('直传表单、签名链接、回收', () => {
       const output = JSON.stringify(stderr.mock.calls)
       for (const value of sensitive) expect(output).not.toContain(value)
       expect(stderr).toHaveBeenCalledTimes(1)
-      expect(JSON.parse(stderr.mock.calls[0]![0])).toMatchObject({ service: 'edge', function: 'attachments', event: 'gc_result_log_failed', reason: 'gc_result_log_failed', entry: 'kick', level: 'error', count: 1 })
+      expect(JSON.parse(stderr.mock.calls[0]![0])).toMatchObject({ service: 'edge', function: 'attachments', event: 'gc_result_log_failed', reason: 'gc_result_log_failed', entry: 'kick', level: 'ERROR', count: 1 })
     } finally { stderr.mockRestore() }
   })
 })
