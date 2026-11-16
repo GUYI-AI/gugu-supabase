@@ -16,7 +16,7 @@ function fixture() {
     flow: vi.fn(async args => {
       if (args.p_action === 'attempt') return { ok: true, lease_token: lease, request: workflow('verifying') }
       if (args.p_action === 'verified' || args.p_action === 'retry' || args.p_action === 'execute') return { ok: true, request: workflow('processing'), user_id: user.id, lease_token: lease }
-      if (args.p_action === 'finish') return { ok: true, request: workflow(args.p_error_code === null ? 'deleted' : args.p_error_code === 'outcome_unknown' ? 'processing' : 'retry_wait') }
+      if (args.p_action === 'finish') return { ok: true, request: workflow(args.p_error_code === null ? 'deleted' : 'processing') }
       if (args.p_action === 'begin' || args.p_action === 'sent') return { ok: true, request: workflow('challenge') }
       return { ok: true, request: null }
     }),
@@ -57,17 +57,16 @@ describe('self deletion HTTP boundary', () => {
     expect(f.deps.hardDelete).not.toHaveBeenCalled()
     expect(f.deps.flow).toHaveBeenCalledWith(expect.objectContaining({ p_action: 'verification_failed', p_lease_token: lease }))
   })
-  it('returns failure for a definite Auth failure and in-progress for an unknown outcome', async () => {
-    const f = fixture(); vi.mocked(f.deps.hardDelete).mockResolvedValue('failed')
-    expect((await f.call('confirm', confirm)).status).toBe(503)
-    vi.mocked(f.deps.hardDelete).mockResolvedValue('unknown')
+  it.each(['failed', 'unknown'] as const)('keeps %s deletion results unresolved instead of authorizing another delete', async outcome => {
+    const f = fixture(); vi.mocked(f.deps.hardDelete).mockResolvedValue(outcome)
     const response = await f.call('confirm', confirm)
     expect(response.status).toBe(202); expect((await response.json()).request.state).toBe('processing')
+    expect(f.deps.flow).toHaveBeenLastCalledWith(expect.objectContaining({ p_action: 'finish', p_error_code: 'outcome_unknown' }))
   })
-  it('uses a verified authorization for a retry without verifying the consumed OTP again', async () => {
-    const f = fixture()
-    expect((await f.call('retry', { request_id: requestId, receipt_token: receipt })).status).toBe(200)
-    expect(f.deps.verifyCode).not.toHaveBeenCalled(); expect(f.deps.hardDelete).toHaveBeenCalledOnce()
+  it('propagates unresolved retry refusal without consuming OTP or dispatching another DELETE', async () => {
+    const f = fixture(); vi.mocked(f.deps.flow).mockResolvedValue({ ok: false, error: 'request_active', status: 409 })
+    expect((await f.call('retry', { request_id: requestId, receipt_token: receipt })).status).toBe(409)
+    expect(f.deps.verifyCode).not.toHaveBeenCalled(); expect(f.deps.hardDelete).not.toHaveBeenCalled()
   })
   it.each(['state_conflict', 'authorization_expired'])('never dispatches Auth deletion after execution recheck rejects %s', async error => {
     const f = fixture(), original = f.deps.flow
@@ -151,10 +150,13 @@ describe('official Auth adapter', () => {
     expect(JSON.parse(String(f.calls[2].init?.body))).toEqual({ should_soft_delete: false })
     expect(f.calls[2].init?.headers).toMatchObject({ authorization: 'Bearer server', apikey: 'server' })
   })
-  it('does not confuse an uncertain deletion or an existing Auth user with success', async () => {
-    const f = adapter([{ status: 200, body: user }, { status: 500 }, { status: 200, body: user }])
-    expect(await f.deps.hardDelete(user.id)).toBe('failed')
-    const g = adapter([{ status: 200, body: user }])
-    expect(await g.deps.hardDelete(user.id)).toBe('unknown')
+  it.each([200, 400, 401, 403, 409, 500, 502, 503, 504])('does not treat DELETE HTTP %s plus a present account as a terminated transaction', async status => {
+    const f = adapter([{ status: 200, body: user }, { status }, { status: 200, body: user }])
+    expect(await f.deps.hardDelete(user.id)).toBe('unknown')
+    expect(f.calls.filter(call => call.init?.method === 'DELETE')).toHaveLength(1)
+  })
+  it('keeps a transport failure unknown', async () => {
+    const f = adapter([{ status: 200, body: user }])
+    expect(await f.deps.hardDelete(user.id)).toBe('unknown')
   })
 })

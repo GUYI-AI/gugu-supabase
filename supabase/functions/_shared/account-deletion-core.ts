@@ -68,7 +68,7 @@ export function createAccountDeletionHandler(deps: DeletionDependencies): (req: 
     let outcome: 'absent' | 'failed' | 'unknown';
     try { outcome = await deps.hardDelete(userId); } catch { outcome = 'unknown'; }
     return deps.flow({ p_action: 'finish', p_request_id: requestId, p_lease_token: lease,
-      p_error_code: outcome === 'absent' ? null : outcome === 'failed' ? 'auth_delete_failed' : 'outcome_unknown' });
+      p_error_code: outcome === 'absent' ? null : 'outcome_unknown' });
   }
   return async (req) => {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
