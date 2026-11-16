@@ -128,9 +128,12 @@ describe('the message is there before its bytes', ()=>{
     await user()
     const mine=(await db.query('SELECT chat.attachment_pending_mine() AS r')).rows[0].r
     // Its name too: finish classifies the bytes by it (a text file is a document), and a restart has nothing else to go by.
-    expect(mine).toEqual([
+    // A set, not a sequence: the function orders by blob creation time, which is the same instant for every blob made in
+    // this test's one transaction.
+    expect(mine).toHaveLength(2)
+    expect(mine).toEqual(expect.arrayContaining([
       expect.objectContaining({staging_key:send.key,message_id:send.message,chat_id:group,as:sender,sha256:send.digest,size_bytes:60,file_name:'photo.png'}),
-      expect.objectContaining({staging_key:whisper.key,message_id:whisper.message,file_name:'photo.png'})])
+      expect.objectContaining({staging_key:whisper.key,message_id:whisper.message,file_name:'photo.png'})]))
     expect(await settle(whisper.key,whisper.digest)).toMatchObject({status:'ready'})
     await user(receiver)
     expect((await db.query('SELECT chat.attachment_pending_mine() AS r')).rows[0].r).toEqual([])
