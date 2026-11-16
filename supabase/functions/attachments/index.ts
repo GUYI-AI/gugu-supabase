@@ -13,6 +13,8 @@ import {
   handleShare,
   handleGc,
   handleUpload,
+  handleUploadComplete,
+  handleUploadParts,
   handleUrls,
   principalOf,
   Refusal,
@@ -184,6 +186,10 @@ Deno.serve(async (request) => {
         return json(await handleFileResolve(deps,who.user.id,body))
       case 'upload':
         return json(await handleUpload(deps, who.user.id,body))
+      case 'upload-parts':
+        return json(await handleUploadParts(deps, who.user.id, body))
+      case 'upload-complete':
+        return json(await handleUploadComplete(deps, who.user.id, body))
       case 'session-commit':
         return json({ attachment: await handleSessionCommit(deps, who.user.id, body) })
       case 'session-revoke':

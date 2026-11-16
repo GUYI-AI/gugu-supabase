@@ -188,8 +188,10 @@ export async function ossSignedRequest(cfg: OssConfig, req: {
   headers?: Record<string, string>
   internal?: boolean
   query?: Record<string, string>
+  /** Headers bound into the signature besides content-type, content-md5 and x-oss-* (V4 AdditionalHeaders). */
+  additional?: string[]
 }): Promise<{ url: string; headers: Record<string, string> }> {
-  const signed = await ossSign(cfg, { method: req.method, key: req.key, headers: req.headers, query: req.query })
+  const signed = await ossSign(cfg, { method: req.method, key: req.key, headers: req.headers, query: req.query, additional: req.additional })
   const endpoint = req.internal ? cfg.endpointInternal : cfg.endpointPublic
   return { url: `https://${cfg.bucket}.${endpoint}/${uriEncode(objectKey(cfg, req.key), true)}${signed.query ? '?' + signed.query : ''}`, headers: signed.headers }
 }
@@ -201,6 +203,7 @@ export async function ossRequest(cfg: OssConfig, fetchFn: FetchLike, req: {
   body?: BodyInit
   internal?: boolean
   query?: Record<string, string>
+  additional?: string[]
 }): Promise<Response> {
   const { url, headers } = await ossSignedRequest(cfg, req)
   return fetchFn(url, { method: req.method, headers, body: req.body })
