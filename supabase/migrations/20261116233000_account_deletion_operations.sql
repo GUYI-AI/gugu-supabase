@@ -136,7 +136,7 @@ BEGIN
     OR p_receipt_digest IS NULL OR p_receipt_digest !~ '^[a-f0-9]{64}$' THEN
     RETURN jsonb_build_object('ok',false,'error','invalid_request','status',400);
   END IF;
-  IF p_action NOT IN ('result','finish','verification_failed') AND NOT COALESCE(
+  IF p_action NOT IN ('result','finish','verification_failed','cancel_preparation') AND NOT COALESCE(
       (SELECT enabled FROM account_deletion_private.operation_access WHERE singleton),false) THEN
     RETURN jsonb_build_object('ok',false,'error','operation_unavailable','status',503);
   END IF;
@@ -353,6 +353,10 @@ BEGIN
   RETURN jsonb_build_object('ok',false,'error','invalid_action','status',400);
 EXCEPTION WHEN lock_not_available THEN
   RETURN jsonb_build_object('ok',false,'error','operation_busy','status',503);
+WHEN insufficient_privilege THEN
+  -- Device helpers reject with fixed 42501. The exception subtransaction
+  -- rolls back parent CAS/intent changes before returning this safe category.
+  RETURN jsonb_build_object('ok',false,'error','preparation_unavailable','status',503);
 END $$;
 ALTER FUNCTION public.account_deletion_operation_flow(text,text,text,uuid,uuid,text,text,integer,uuid,uuid,text,text,uuid,uuid) OWNER TO postgres;
 REVOKE ALL ON FUNCTION public.account_deletion_operation_flow(text,text,text,uuid,uuid,text,text,integer,uuid,uuid,text,text,uuid,uuid) FROM PUBLIC,anon,authenticated,service_role;

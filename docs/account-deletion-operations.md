@@ -22,7 +22,9 @@ and does not require the deleted login. It grants no OTP, confirmation or DELETE
 New tables have RLS and no API table privileges. The only public RPC is
 service_role-only; private preparation helpers have no ordinary API grants.
 The operation_access singleton defaults enabled=false. Unknown access state
-fails closed. Accepted finish/result paths remain available for reconciliation.
+fails closed. Accepted finish/result paths remain available for reconciliation;
+authenticated pre-confirm cancellation also remains available under its original
+owner/SID and whole-operation closure checks when the admission gate is disabled.
 
 ## Explicit intents
 

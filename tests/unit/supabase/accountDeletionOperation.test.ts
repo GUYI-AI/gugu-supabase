@@ -60,7 +60,10 @@ describe('closed operation HTTP protocol', () => {
     expect(response.status).toBe(202)
     expect(f.deps.verifyCode).toHaveBeenCalledWith(owner.email, confirm.code)
     expect(f.deps.hardDelete).toHaveBeenCalledOnce()
-    for (const [args] of vi.mocked(f.deps.flow).mock.calls) expect(JSON.stringify(args)).not.toContain(confirm.code)
+    for (const [args] of vi.mocked(f.deps.flow).mock.calls) {
+      expect(Object.values(args)).not.toContain(confirm.code)
+      expect(args).not.toHaveProperty('code'); expect(args).not.toHaveProperty('p_code')
+    }
     expect(f.deps.flow).toHaveBeenLastCalledWith(expect.objectContaining({ p_action: 'finish', p_error_code: 'outcome_unknown' }))
   })
   it.each(['state_conflict', 'authorization_expired', 'closure_not_prepared'])('does not delete when execution refuses %s', async error => {

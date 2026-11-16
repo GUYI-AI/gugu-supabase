@@ -100,6 +100,13 @@ describe('recoverable deletion operation authority', () => {
     expect((await flow('claim_confirmation', f)).error).toBe('request_active')
     expect((await db.query('SELECT count(*)::int n FROM account_deletion_private.confirmation_intents')).rows[0].n).toBe(0)
   })
+  it('rolls back whole-operation closure when the real helper contract refuses with 42501', async () => {
+    const f = await fixture(); await challenge(f)
+    await db.query(`CREATE OR REPLACE FUNCTION account_deletion_private.device_preparation_cancel(p_operation_id uuid,p_native_generation uuid,p_server_generation uuid)
+      RETURNS jsonb LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'CLOSURE_PREPARATION_CANNOT_CANCEL' USING ERRCODE='42501'; END $$`)
+    expect((await flow('cancel_preparation', f))).toMatchObject({ ok: false, error: 'preparation_unavailable', status: 503 })
+    expect((await db.query('SELECT state,confirm_started_at,preparation_cancelled FROM account_deletion_private.operations')).rows[0]).toEqual({ state: 'open', confirm_started_at: null, preparation_cancelled: false })
+  })
   it('recovers committed absence without Auth and clears original identity links', async () => {
     const f = await fixture(); await challenge(f)
     await db.query('DELETE FROM auth.users WHERE id=$1', [f.p_user_id])
