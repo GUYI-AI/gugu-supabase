@@ -116,6 +116,17 @@ LANGUAGE sql VOLATILE SET search_path=pg_catalog AS $$
 $$;
 REVOKE ALL ON FUNCTION account_deletion_private.operation_view(account_deletion_private.operations) FROM PUBLIC,anon,authenticated,service_role;
 
+CREATE FUNCTION account_deletion_private.operation_caller_is_current(p_user_id uuid,p_session_id uuid,p_email_digest text)
+RETURNS boolean LANGUAGE sql VOLATILE SET search_path=pg_catalog AS $$
+  SELECT EXISTS(SELECT 1 FROM auth.users u JOIN auth.sessions s ON s.user_id=u.id
+    WHERE u.id=p_user_id AND s.id=p_session_id AND (s.not_after IS NULL OR s.not_after>clock_timestamp())
+      AND u.email_confirmed_at IS NOT NULL AND u.deleted_at IS NULL
+      AND (u.banned_until IS NULL OR u.banned_until<=clock_timestamp())
+      AND encode(sha256(convert_to(lower(u.email),'UTF8')),'hex')=p_email_digest)
+$$;
+REVOKE ALL ON FUNCTION account_deletion_private.operation_caller_is_current(uuid,uuid,text)
+  FROM PUBLIC,anon,authenticated,service_role;
+
 CREATE FUNCTION public.account_deletion_operation_flow(
   p_action text,p_operation_digest text,p_receipt_digest text,
   p_user_id uuid DEFAULT NULL,p_session_id uuid DEFAULT NULL,p_email_digest text DEFAULT NULL,
@@ -162,6 +173,12 @@ BEGIN
   IF original_sid IS NOT NULL THEN PERFORM 1 FROM auth.sessions WHERE id=original_sid FOR KEY SHARE NOWAIT; END IF;
   SELECT * INTO o FROM account_deletion_private.operations WHERE operation_digest=p_operation_digest FOR UPDATE;
   now_at:=clock_timestamp();
+  -- The advisory/parent wait may outlive the original SID. Key-share locks
+  -- protect identity rows, never the clock or mutable authorization attributes.
+  IF p_action IN ('register','begin','claim_confirmation','prepare_device','read_preparation','cancel_preparation')
+    AND NOT account_deletion_private.operation_caller_is_current(p_user_id,p_session_id,p_email_digest) THEN
+    RETURN jsonb_build_object('ok',false,'error','unauthorized','status',401);
+  END IF;
   IF o.id IS NULL AND p_action IN ('register','begin') THEN
     SELECT * INTO STRICT rollout FROM account_deletion_private.access WHERE singleton;
     IF rollout.test_only AND rollout.test_user_id IS DISTINCT FROM p_user_id THEN
@@ -224,9 +241,13 @@ BEGIN
       IF o.state NOT IN ('open','closed_before_confirm') OR o.confirm_started_at IS NOT NULL THEN
         RETURN jsonb_build_object('ok',false,'error','request_active','status',409);
       END IF;
-      UPDATE account_deletion_private.operations SET state='closed_before_confirm',revision=revision+1,updated_at=now_at
-        WHERE id=o.id AND state='open' RETURNING * INTO o;
-      IF NOT FOUND THEN SELECT * INTO o FROM account_deletion_private.operations WHERE operation_digest=p_operation_digest; END IF;
+      IF o.state='open' THEN
+        UPDATE account_deletion_private.operations SET state='closed_before_confirm',revision=revision+1,updated_at=clock_timestamp()
+          WHERE id=o.id AND state='open' AND confirm_started_at IS NULL
+            AND account_deletion_private.operation_caller_is_current(user_id,session_id,email_digest)
+          RETURNING * INTO o;
+        IF NOT FOUND THEN RETURN jsonb_build_object('ok',false,'error','unauthorized','status',401); END IF;
+      END IF;
     ELSIF o.state<>'open' AND p_action='prepare_device' THEN
       RETURN jsonb_build_object('ok',false,'error','request_active','status',409);
     END IF;
@@ -238,7 +259,13 @@ BEGIN
       EXECUTE 'SELECT account_deletion_private.device_preparation_cancel($1,$2,$3)' INTO prep USING o.id,p_native_generation,p_server_generation;
       IF prep->>'cancelled'='true' AND prep->>'native_generation'=p_native_generation::text
         AND prep->>'server_generation'=p_server_generation::text THEN
-        UPDATE account_deletion_private.operations SET preparation_cancelled=true WHERE id=o.id RETURNING * INTO o;
+        -- Closing the whole pre-confirmation operation also fences a late OTP
+        -- send receipt. Its child must stop occupying the account's single
+        -- active-request slot. Never retire a verification or DELETE here.
+        UPDATE account_deletion_private.requests SET state='expired',lease_token=NULL,lease_until=NULL
+          WHERE operation_id=o.id AND state IN ('sending','challenge');
+        UPDATE account_deletion_private.operations SET preparation_cancelled=true,send_lease=NULL
+          WHERE id=o.id RETURNING * INTO o;
       END IF;
     END IF;
     RETURN jsonb_build_object('ok',true,'operation',account_deletion_private.operation_view(o),'preparation',prep);

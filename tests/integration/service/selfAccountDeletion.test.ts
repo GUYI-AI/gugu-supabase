@@ -2,6 +2,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { beginDeletionFixture, endDeletionFixture } from './accountDeletionFixtureLock'
 
 let db: pg.Client
 const hash = (s: string) => createHash('sha256').update(s).digest('hex')
@@ -10,8 +11,8 @@ beforeAll(async () => {
   if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw Error('Disposable loopback database required')
   db = new pg.Client({ connectionString: url.href }); await db.connect()
 })
-beforeEach(async () => { await db.query('BEGIN') })
-afterEach(async () => { await db.query('ROLLBACK') })
+beforeEach(async () => { await beginDeletionFixture(db) }, 25_000)
+afterEach(async () => { await endDeletionFixture(db) })
 afterAll(async () => { await db?.end() })
 type Args = Record<string, string | null>
 async function flow(action: string, args: Args = {}) {

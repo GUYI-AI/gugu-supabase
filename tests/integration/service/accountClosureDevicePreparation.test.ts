@@ -2,6 +2,7 @@
 import { randomUUID, createHash } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { beginDeletionFixture, endDeletionFixture } from './accountDeletionFixtureLock'
 let db: pg.Client
 let database: string
 beforeAll(async () => {
@@ -10,8 +11,8 @@ beforeAll(async () => {
   database = url.href
   db = new pg.Client({ connectionString: database }); await db.connect()
 })
-beforeEach(async () => { await db.query('BEGIN') })
-afterEach(async () => { await db.query('ROLLBACK') })
+beforeEach(async () => { await beginDeletionFixture(db) }, 25_000)
+afterEach(async () => { await endDeletionFixture(db) })
 afterAll(async () => { await db?.end() })
 async function rejected(run: () => Promise<unknown>) {
   await db.query('SAVEPOINT denied')

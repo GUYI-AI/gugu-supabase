@@ -18,6 +18,8 @@ domains. The private database stores only digests. Only the verified Auth caller
 selects an owner, email and SID; body fields cannot choose them. Mutations require
 that original live SID, including not_after. Result recovery needs the capability
 and does not require the deleted login. It grants no OTP, confirmation or DELETE.
+Auth authority is checked again after account/parent lock waits; the
+pre-confirmation closure CAS also requires the original SID to remain current.
 
 New tables have RLS and no API table privileges. The only public RPC is
 service_role-only; private preparation helpers have no ordinary API grants.
@@ -80,6 +82,11 @@ code does not erase that boundary. Confirming/processing never cancel, and the
 native controller cannot use a child expiry or a boolean supplied by a renderer
 as cancellation proof. Cloud closure precedes same-generation native unsealing;
 partial local cancellation preserves its protected checkpoint and secrets.
+Successful pre-confirmation closure retires only this operation's sending or
+challenge child and clears its send lease in that transaction. A late send
+receipt cannot revive the child. Send-rate history remains, so a new operation
+still observes the existing cooldown and account limits. This retirement never
+applies to verification or an unknown DELETE outcome.
 
 Account advisory admission precedes identity key-share NOWAIT guards, then the
 operation parent, request/confirmation rows, and a preparation helper's device
@@ -110,6 +117,13 @@ dependencies. Installed-schema fixtures target only a disposable loopback
 database, use transaction-local synthetic preparation helpers, and roll back.
 Those helpers validate the common protocol contract, not device heartbeats,
 native process exit, actual Auth mail transport or physical key security.
+Separate committed fixtures use the real device helpers and two contenders to
+check both cancel/confirmation orderings and SID expiry while waiting for
+account admission. All three deletion suites take the same bounded session
+mutex on their observer before BEGIN and release it after rollback and fixture
+cleanup; contenders never take that test mutex. The fixture restores all three
+global switches and removes only its synthetic rows in finally. New fixtures
+remain unexecuted until a separate validation result identifies their exact head.
 The author has not installed a database or run shared-account requests.
 
 First install #317's fixed reconciliation migration, then this migration, then
