@@ -6,6 +6,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 interface DatabaseClient {
   connect(): Promise<void>
@@ -34,7 +35,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await db?.end() })
 beforeEach(async () => {
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   human = randomUUID(); agent = randomUUID(); sourceAgent = randomUUID()
   chat = randomUUID(); device = `human-events-${randomUUID()}`
   await db.query('INSERT INTO auth.users(id,email) VALUES ($1::uuid,$2)', [human, `${human}@example.test`])
@@ -174,12 +175,14 @@ describe('retained community user-event producers', () => {
         : name === 'chat.broadcast_to_chat_member_user_events' ? '(text,text,jsonb)'
           : name === 'identity.fan_agent_presence_to_viewers' ? '(text,jsonb)' : '()'}`),
       'chat.send_user_event(jsonb,text,text,boolean)',
+      'chat.flush_user_revisions()',
     ]
     const { rows: writers } = await db.query<{ signature: string }>(`
       SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
       WHERE p.oid=ANY($1::regprocedure[])
         AND p.prosrc ~* 'INSERT[[:space:]]+INTO[[:space:]]+chat[.]account_revisions'`, [signatures])
-    expect(writers).toEqual([{ signature: 'chat.append_user_revision(text,text,jsonb,boolean)' }])
+    // Publishing stages; the commit flush is the one journal writer and sends the wake for the staged producers.
+    expect(writers).toEqual([{ signature: 'chat.flush_user_revisions()' }])
     const { rows: senders } = await db.query<{ signature: string }>(`
       SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
       WHERE p.oid=ANY($1::regprocedure[])
@@ -188,10 +191,11 @@ describe('retained community user-event producers', () => {
     const { rows: routed } = await db.query<{ name: string }>(`
       SELECT n.nspname||'.'||p.proname AS name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
       WHERE p.oid=ANY($1::regprocedure[]) AND p.prosrc LIKE '%chat.send_user_event(%' ORDER BY name`, [signatures])
-    expect(routed.map((row) => row.name)).toEqual(sources.map((source) => source.name).sort())
+    const staged = ['chat.publish_user_revision', 'identity.fan_agent_presence_to_viewers']
+    expect(routed.map((row) => row.name)).toEqual([...sources.map((source) => source.name).filter((name) => !staged.includes(name)), 'chat.flush_user_revisions'].sort())
   })
 
-  it('one append validates every event, advances only human heads, and publish delegates once', async () => {
+  it('one append validates every event, advances only human heads at the flush, and publish wakes once', async () => {
     const allowed = [
       'agent_changed', 'chat_changed', 'chat_members_changed', 'chat_meta_changed',
       'delivery_changed', 'device_changed', 'friend_requests_changed', 'friendship_changed',
@@ -201,19 +205,18 @@ describe('retained community user-event producers', () => {
     ]
     for (const event of allowed) {
       const { rows: headBefore } = await db.query<{ revision: string }>('SELECT revision FROM chat.account_revision_heads WHERE user_id=$1', [human])
-      const { rows: appended } = await db.query<{ human: string; agent: string | null }>(
-        "SELECT chat.append_user_revision($1,$3,'{}',false) AS human,chat.append_user_revision($2,$3,'{}',false) AS agent", [human, agent, event])
-      expect(BigInt(appended[0]!.human)).toBe(BigInt(headBefore[0]!.revision) + 1n)
-      expect(appended[0]!.agent).toBeNull()
+      const head = async () => BigInt((await db.query<{ revision: string }>('SELECT revision FROM chat.account_revision_heads WHERE user_id=$1', [human])).rows[0]!.revision)
       const before = (await events(human, 'im_revision_advanced')).length
-      const { rows: published } = await db.query<{ human: string; agent: string | null }>(
-        "SELECT chat.publish_user_revision($1,$3,'{}',false) AS human,chat.publish_user_revision($2,$3,'{}',false) AS agent", [human, agent, event])
-      expect(BigInt(published[0]!.human)).toBe(BigInt(appended[0]!.human) + 1n)
-      expect(published[0]!.agent).toBeNull()
+      await db.query("SELECT chat.append_user_revision($1,$3,'{}',false),chat.append_user_revision($2,$3,'{}',false)", [human, agent, event])
+      expect(await head()).toBe(BigInt(headBefore[0]!.revision) + 1n)
+      expect(await events(human, 'im_revision_advanced')).toHaveLength(before)
+      await db.query("SELECT chat.publish_user_revision($1,$3,'{}',false),chat.publish_user_revision($2,$3,'{}',false)", [human, agent, event])
+      expect(await head()).toBe(BigInt(headBefore[0]!.revision) + 2n)
       expect(await events(human, 'im_revision_advanced')).toHaveLength(before + 1)
     }
     const { rows: agentHead } = await db.query<{ revision: string }>('SELECT revision FROM chat.account_revision_heads WHERE user_id=$1', [agent])
-    expect(agentHead).toEqual([{ revision: '0' }])
+    // Agents are no event recipients: the flush never creates a head for them.
+    expect(agentHead).toEqual([])
     const { rows: agentRows } = await db.query<{ n: string }>('SELECT count(*) AS n FROM chat.account_revisions WHERE user_id=$1', [agent])
     expect(agentRows).toEqual([{ n: '0' }])
     expect(await events(agent, 'im_revision_advanced')).toEqual([])
@@ -242,9 +245,8 @@ describe('retained community user-event producers', () => {
 
   it('missing identities are skipped and the shared helpers do not expose an end-user RPC', async () => {
     const missing = randomUUID()
-    const { rows } = await db.query<{ revision: string | null }>(
-      "SELECT chat.publish_user_revision($1,'chat_changed','{}',false) AS revision", [missing])
-    expect(rows).toEqual([{ revision: null }])
+    await db.query("SELECT chat.publish_user_revision($1,'chat_changed','{}',false)", [missing])
+    expect((await db.query('SELECT 1 FROM chat.account_revision_heads WHERE user_id=$1', [missing])).rows).toEqual([])
     await db.query("SELECT chat.send_user_event('{\"test\":true}','test',$1,true)", [topic(missing)])
     expect(await events(missing, 'test')).toEqual([])
     for (const fn of ['chat.is_user_event_recipient(text)', 'chat.send_user_event(jsonb,text,text,boolean)']) {

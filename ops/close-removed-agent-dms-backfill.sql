@@ -44,13 +44,11 @@ CREATE TEMP TABLE close_targets ON COMMIT DROP AS
    WHERE agent.type = 'agent' AND agent.removed_at IS NOT NULL
      AND peer.conversation_deleted_at IS NULL;
 
--- Same lock order as archive_user and delete_my_dm_conversation: chat rows (sorted), then every
--- affected member's revision head, then the seats.
+-- Same lock order as archive_user: chat rows (sorted), then their lines, then the seats.
 DO $locks$
 BEGIN
   PERFORM 1 FROM chat.chats c WHERE c.id IN (SELECT chat_id FROM close_targets) ORDER BY c.id FOR UPDATE;
-  PERFORM chat.lock_revision_heads(ARRAY(SELECT DISTINCT m.user_id FROM chat.active_members m
-    WHERE m.chat_id IN (SELECT chat_id FROM close_targets) ORDER BY 1));
+  PERFORM chat.lock_lines(ARRAY(SELECT chat_id FROM close_targets));
 END $locks$;
 
 WITH closed AS (

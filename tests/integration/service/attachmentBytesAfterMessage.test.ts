@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 // gugu (owner 11-15): a message is its text and its files' index. A declared commit sends the message before its bytes;
 // readers see the attachment pending (never the message), the function's hash settles it or fails it, a restarted sender
@@ -59,7 +60,7 @@ beforeAll(async()=>{
 })
 afterAll(async()=>{await db?.end()})
 beforeEach(async()=>{
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   sender=randomUUID();receiver=randomUUID();outsider=randomUUID();group=randomUUID()
   for (const id of [sender,receiver,outsider]) await db.query("INSERT INTO auth.users(id,aud,role,email,raw_app_meta_data,raw_user_meta_data,created_at,updated_at) VALUES($1,'authenticated','authenticated',$2,'{\"provider\":\"email\"}','{}',now(),now())",[id,id+'@pending.invalid'])
   for (const id of [sender,receiver,outsider]) await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human',$1) ON CONFLICT (id) DO NOTHING",[id])
