@@ -229,9 +229,15 @@ it.each(['remove-first', 'seat-first'])('commits %s admission/removal with no ca
     await removing.query('SET LOCAL ROLE authenticated')
     const remove = () => removing.query('SELECT identity.archive_user($1,true)', [agent])
     const seat = () => seating.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [secondRoom, agent])
-    if (order === 'remove-first') { await remove(); await seat() }
-    else { await seat(); await remove() }
-    await removing.query('COMMIT'); await seating.query('COMMIT')
+    // A new seat waits for its member's liveness change and the other way round (chat_members_lock_joiner_liveness):
+    // the second one parks until the first commits, and neither deadlocks.
+    if (order === 'remove-first') {
+      await remove(); const seated = seat()
+      await removing.query('COMMIT'); await seated; await seating.query('COMMIT')
+    } else {
+      await seat(); const removed = remove()
+      await seating.query('COMMIT'); await removed; await removing.query('COMMIT')
+    }
     expect((await db.query('SELECT count(*)::int AS n FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [secondRoom, agent])).rows[0].n).toBe(1)
     expect((await db.query('SELECT * FROM chat.active_members WHERE user_id=$1', [agent])).rows).toEqual([])
     expect((await db.query('SELECT is_live FROM identity.member_liveness WHERE user_id=$1', [agent])).rows).toEqual([{ is_live: false }])

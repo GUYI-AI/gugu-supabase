@@ -1,7 +1,9 @@
 -- Roll back 20261116160000_revision_heads_commit_flush: revision heads are locked again where events are published,
 -- and chat.lock_chat_revision_recipients locks the line members' heads again. Revisions already written stay; nothing
--- staged is lost (the flush runs before it is dropped). chat.lock_lines stays: ops/close-removed-agent-dms-backfill.sql
--- and its rollback call it. Run it before any older operational rollback that edits these functions.
+-- staged is lost (the flush runs before it is dropped). chat.lock_lines stays so ops/close-removed-agent-dms-backfill.sql
+-- and its rollback still run, but after this rollback they no longer serialize with archive_user or fan-outs (those
+-- lock heads again): run those two scripts from the commit before this release instead. Run this rollback before any
+-- older operational rollback that edits these functions.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 
@@ -673,6 +675,8 @@ GRANT EXECUTE ON FUNCTION chat.clear_messages_for_me(text) TO authenticated;
 GRANT EXECUTE ON FUNCTION identity.archive_user(text,boolean) TO authenticated;
 GRANT EXECUTE ON FUNCTION identity.set_agent_session_archival(text,text,uuid,bigint,timestamp with time zone,jsonb) TO authenticated;
 
+DROP TRIGGER chat_members_lock_joiner_liveness ON chat.chat_members;
+DROP FUNCTION chat.lock_joiner_liveness();
 DROP FUNCTION chat.flush_user_revisions();
 DROP FUNCTION chat.stage_user_revision(text, text, jsonb, boolean, text);
 DROP TABLE chat.pending_user_revisions;

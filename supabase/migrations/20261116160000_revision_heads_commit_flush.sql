@@ -25,12 +25,12 @@
 -- |   deletion, meta, topic activity, |                                                              |   after joining or receives its revision
 -- |   roster, membership)             |                                                              |
 -- | membership change (add_group_agent| chat row FOR UPDATE where the RPC takes it (add_group_agent, | concurrent fan-outs on the line finish before
--- |   provision, decide_group_join,   |   provision_taskpage_agent, decide_group_join; flood rule)   |   it or see the new members
--- |   create_topic, topic join, leave)|   -> line (roster/membership triggers)                       |
--- | session archival                  | member_liveness -> lines of all the agent's chats (sorted)   | an in-flight message admits before archival or
--- |                                   |   -> users row                                               |   sees the archived agent
--- | archive_user (remove identity)    | DM chat rows (sorted) -> lines of all its chats (sorted)     | fan-outs see the removal or finish before it
--- |                                   |   -> users row                                               |
+-- |   provision, decide_group_join,   |   provision_taskpage_agent, decide_group_join; member limit) |   it or see the new members; a new seat waits
+-- |   create_topic, topic join, leave)|   -> new member's liveness FOR SHARE -> line (roster triggers)|   for its member's archival / removal
+-- | session archival                  | member_liveness -> lines of the agent's chats and of its     | an in-flight message admits before archival or
+-- |                                   |   woken chats (sorted) -> users row                          |   sees the archived agent
+-- | archive_user (remove identity)    | member_liveness -> DM chat rows (sorted) -> lines of all its | fan-outs see the removal or finish before it
+-- |                                   |   chats (sorted) -> users row                                |
 -- | device presence                   | none of its own (the old sorted heads pre-lock only ordered  | -
 -- |                                   |   the two publishes of one device update; staging does that) |
 -- | heads flush (every transaction    | at commit, after all body work: heads of staged users, sorted| per-user revisions contiguous, in commit order,
@@ -89,30 +89,26 @@ CREATE FUNCTION chat.flush_user_revisions() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'chat', 'public', 'pg_catalog' AS $$
 DECLARE
     staged chat.pending_user_revisions%ROWTYPE;
+    recipients TEXT[];
     target_user_id TEXT;
     next_revision BIGINT;
-    wake_head BIGINT;
-    wake_kind TEXT;
+    wakes TEXT[];
 BEGIN
     -- One event per staged row; the first one to fire flushes the whole transaction, the rest find their row gone.
     IF NOT EXISTS (SELECT 1 FROM chat.pending_user_revisions p WHERE p.id = NEW.id) THEN
         RETURN NULL;
     END IF;
-    -- The one pass over heads, in user-id order. A user erased later in this transaction is no recipient now.
-    FOR target_user_id IN
-        SELECT DISTINCT p.user_id FROM chat.pending_user_revisions p
-         WHERE p.transaction_id = pg_current_xact_id() AND chat.is_user_event_recipient(p.user_id)
-         ORDER BY p.user_id
-    LOOP
+    -- A user erased later in this transaction is no recipient now. Read once: the same set is locked and written.
+    SELECT array_agg(u ORDER BY u) INTO recipients FROM (
+        SELECT DISTINCT p.user_id AS u FROM chat.pending_user_revisions p
+         WHERE p.transaction_id = pg_current_xact_id() AND chat.is_user_event_recipient(p.user_id)) r;
+    -- The one pass over heads, in user-id order.
+    FOREACH target_user_id IN ARRAY COALESCE(recipients, '{}'::text[]) LOOP
         INSERT INTO chat.account_revision_heads (user_id) VALUES (target_user_id) ON CONFLICT (user_id) DO NOTHING;
         PERFORM 1 FROM chat.account_revision_heads h WHERE h.user_id = target_user_id FOR NO KEY UPDATE;
     END LOOP;
-    FOR target_user_id IN
-        SELECT DISTINCT p.user_id FROM chat.pending_user_revisions p
-         WHERE p.transaction_id = pg_current_xact_id() AND chat.is_user_event_recipient(p.user_id)
-         ORDER BY p.user_id
-    LOOP
-        wake_kind := 'none';
+    FOREACH target_user_id IN ARRAY COALESCE(recipients, '{}'::text[]) LOOP
+        wakes := '{}';
         FOR staged IN
             SELECT * FROM chat.pending_user_revisions p
              WHERE p.transaction_id = pg_current_xact_id() AND p.user_id = target_user_id
@@ -123,15 +119,12 @@ BEGIN
             RETURNING h.revision INTO next_revision;
             INSERT INTO chat.account_revisions (user_id, revision, event, resource_key, tombstone)
             VALUES (target_user_id, next_revision, staged.event, staged.resource_key, staged.tombstone);
-            wake_kind := CASE
-                WHEN wake_kind = 'always' OR staged.wake = 'always' THEN 'always'
-                WHEN staged.wake = 'presence' THEN 'presence'
-                ELSE wake_kind END;
+            wakes := wakes || staged.wake;
         END LOOP;
-        wake_head := next_revision;
-        IF wake_kind = 'always' OR (wake_kind = 'presence' AND chat.claim_presence_wake(target_user_id)) THEN
+        -- A presence change claims its throttle whenever it is staged, as it did when it woke on its own.
+        IF ('presence' = ANY (wakes) AND chat.claim_presence_wake(target_user_id)) OR 'always' = ANY (wakes) THEN
             PERFORM chat.send_user_event(
-                jsonb_build_object('revision', wake_head),
+                jsonb_build_object('revision', next_revision),
                 'im_revision_advanced',
                 'gugu:user:' || target_user_id || ':events',
                 true
@@ -486,8 +479,11 @@ BEGIN
             END;
         END IF;
         v_group := CASE WHEN v_prior = 'pending_approval' THEN '' ELSE v_target END;
-        -- Only the chat invariants: ALL would also fire chat.flush_user_revisions here, taking revision heads mid-transaction.
-        SET CONSTRAINTS chat.chats_membership_invariants_trg, chat.chats_status_invariants_trg IMMEDIATE;
+        -- Every deferrable constraint except the revision flush (ALL would run chat.flush_user_revisions here and take
+        -- revision heads mid-transaction). A new deferrable constraint belongs in this list.
+        SET CONSTRAINTS chat.chats_membership_invariants_trg, chat.chats_status_invariants_trg, chat.files_replace_deadline,
+            identity.gugu_device_commands_user_id_fkey, chat.message_agent_sends_message_id_fkey,
+            identity.gugu_devices_user_id_fkey IMMEDIATE;
       EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'provision_taskpage_agent: project group enrollment failed for agent % in group % [%]: %', v_minted.id, v_target, SQLSTATE, SQLERRM;
         v_group := '';
@@ -540,6 +536,8 @@ BEGIN
   END IF;
   IF p_remove_social_identity AND EXISTS (SELECT 1 FROM identity.users u WHERE u.id = p_user_id
     AND u.type = 'agent' AND u.owner_user_id = caller AND u.removed_at IS NULL) THEN
+    -- Same first lock as set_agent_session_archival: the identity's liveness row, then chats, then lines.
+    PERFORM 1 FROM identity.member_liveness WHERE user_id = p_user_id FOR NO KEY UPDATE;
     SELECT array_agg(c.id ORDER BY c.id) INTO dms FROM chat.chats c
       WHERE c.kind = 'dm' AND EXISTS (SELECT 1 FROM chat.active_members a WHERE a.chat_id = c.id AND a.user_id = p_user_id);
     PERFORM 1 FROM chat.chats c WHERE c.id = ANY(dms) ORDER BY c.id FOR UPDATE;
@@ -605,7 +603,13 @@ BEGIN
   -- Admission runs inside the message's line lock (broadcast_message_created takes it before
   -- messages_c_record_agent_admission). Take the lines of every chat this agent is in, sorted, before the state
   -- transition, so an in-flight message either admits before archival or sees the archived agent.
-  PERFORM chat.lock_lines(ARRAY(SELECT mine.chat_id FROM chat.live_identity_members mine WHERE mine.user_id = agent.id));
+  -- The lines of the chats whose wakes the backfill below may block are taken in the same sorted call. A chat the
+  -- agent joins meanwhile waits on its member_liveness row (chat_members_lock_joiner_liveness).
+  PERFORM chat.lock_lines(ARRAY(
+    SELECT mine.chat_id FROM chat.live_identity_members mine WHERE mine.user_id = agent.id
+    UNION
+    SELECT m.chat_id FROM chat.message_agent_wakes w JOIN chat.messages m ON m.id = w.message_id
+     WHERE w.agent_user_id = agent.id));
   SELECT * INTO agent FROM identity.users
     WHERE id = p_agent_user_id AND type = 'agent' AND owner_user_id = auth.uid()::text FOR NO KEY UPDATE;
   IF NOT FOUND OR agent.device_id IS DISTINCT FROM p_device_id THEN
@@ -676,6 +680,21 @@ BEGIN
     'revision', p_revision, 'operation_id', p_operation_id);
 END;
 $function$;
+
+-- A new seat waits for a change of its member's liveness (session archival, identity removal) and the other way
+-- round: set_agent_session_archival and archive_user lock the lines of the chats the identity is in when they start,
+-- and a chat it joins after that must not slip past them. (The joiner's own revision head used to give this.)
+CREATE FUNCTION chat.lock_joiner_liveness() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog' AS $$
+BEGIN
+    PERFORM 1 FROM identity.member_liveness l WHERE l.user_id = NEW.user_id FOR SHARE;
+    RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION chat.lock_joiner_liveness() FROM PUBLIC, anon, authenticated, service_role;
+-- After chat_members_enforce_group_member_limit (name order), which takes the chat row first.
+CREATE TRIGGER chat_members_lock_joiner_liveness BEFORE INSERT ON chat.chat_members
+    FOR EACH ROW EXECUTE FUNCTION chat.lock_joiner_liveness();
 
 DROP FUNCTION chat.lock_revision_heads(text[]);
 

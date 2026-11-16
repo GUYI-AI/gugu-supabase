@@ -215,6 +215,33 @@ describe('membership and fan-out of one line stay serialized', () => {
   })
 })
 
+describe('a session archival and a join of the same agent stay serialized', () => {
+  // Archival locks the lines of the chats the agent is in when it starts. A join of that agent into another chat waits
+  // on the agent's member_liveness row, so no message there can wake it between the join and the archival's commit.
+  it('a join during the archival waits for it, and the joined chat does not wake the archived agent', async () => {
+    const owner = await human('archival owner'), peer = await human('archival peer')
+    const host = await device(owner)
+    const archived = await agent(owner, host, 'Flush Archive')
+    const chat = await group(owner, [peer])
+    const t = await connect(), j = await connect()
+    const tPid = await pidOf(t), jPid = await pidOf(j)
+    const at = new Date().toISOString()
+    await begin(t, owner)
+    await t.query('SELECT identity.set_agent_session_archival($1,$2,$3,1,$4,$5)',
+      [archived, host, randomUUID(), at, JSON.stringify([{ id: randomUUID(), archived_at: at, restored_at: null }])])
+    await begin(j, owner)
+    const joining = outcome(j.query('SELECT chat.add_group_agent($1,$2,NULL,$3,false)', [chat, archived, owner]))
+      .then(async (error) => { await j.query(error ? 'ROLLBACK' : 'COMMIT'); return error })
+    await blockedBy(jPid, tPid, 'the join did not wait for the archival')
+    await t.query('COMMIT')
+    await joining
+    const message = randomUUID()
+    await admin.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type,to_user_ids) VALUES ($1,$2,$3,'after','text',$4)",
+      [message, chat, peer, [archived]])
+    expect((await admin.query('SELECT 1 FROM chat.message_agent_wakes WHERE message_id=$1 AND agent_user_id=$2', [message, archived])).rowCount).toBe(0)
+  })
+})
+
 describe('removing an identity and its direct chats stay serialized', () => {
   // archive_user takes the direct chats' rows and the lines of every chat the identity is in before it removes it;
   // a message in one of those chats holds that row from sequence assignment on.
