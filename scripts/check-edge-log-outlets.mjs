@@ -19,7 +19,7 @@ export function unsafeLogReferences(source, filename = 'function.ts') {
     const id = ts.isIdentifier(node) ? node.text : undefined
     const computed = ts.isElementAccessExpression(node) && node.argumentExpression ? literal(node.argumentExpression) : undefined
     const module = (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier ? literal(node.moduleSpecifier) : undefined
-    const member = ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node ? node.parent.name.text : undefined
+    const member = node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node ? node.parent.name.text : undefined
     if (['console', 'stdout', 'stderr', 'eval', 'Function'].includes(id)
       || (id === 'Deno' && !['env', 'serve'].includes(member) && !ts.isTypeOfExpression(node.parent))
       || (['globalThis', 'self', 'window'].includes(id) && !localNames.has(id) && !(id === 'globalThis' && member === 'EdgeRuntime'))

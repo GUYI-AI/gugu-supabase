@@ -4,6 +4,7 @@ const fx = vi.hoisted(() => ({
   handlers: [] as ((req: Request) => Promise<Response>)[], rpc: vi.fn(), getUser: vi.fn(),
   generateLink: vi.fn(), clientFailure: false,
 }))
+vi.mock('npm:ali-oss@6.23.0', () => ({ default: class FixtureOss {} }))
 vi.mock('npm:@supabase/supabase-js@2.110.9', () => ({ createClient: () => {
   if (fx.clientFailure) throw new Error('synthetic-edge-marker@example.invalid')
   return { rpc: fx.rpc, auth: { admin: { getUserById: fx.getUser, generateLink: fx.generateLink } } }
