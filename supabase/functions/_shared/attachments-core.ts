@@ -333,11 +333,39 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
     // 一次发出的几个文件(gugu#2581):同一个 send_group_id + 这次一共几个;同上,不给就不带这两个键。
     ...(sendGroupId != null ? { p_send_group_id: sendGroupId, p_send_group_size: int(body, 'send_group_size') } : {}),
   }
-  await registerStaged(deps, userId, stagingKey, str(body, 'content_type', false), str(body, 'file_name')!)
+  // Declared (sha256 + size): the message goes now and its bytes follow (finish); otherwise the bytes are up already.
+  const declared = str(body, 'sha256', false)
+  if (declared) {
+    // An image's width and height ride along, so the place its readers draw while the bytes come is already its size.
+    const width = int(body, 'width'), height = int(body, 'height')
+    await call(deps.userRpc, 'attachment_declare', { p_staging_key: stagingKey, p_sha256: declared, p_size_bytes: int(body, 'size_bytes'), p_content_type: str(body, 'content_type', false),
+      ...(width != null && height != null ? { p_width: width, p_height: height } : {}) })
+  }
+  else await registerStaged(deps, userId, stagingKey, str(body, 'content_type', false), str(body, 'file_name')!)
   const rows = (await writeFile(deps, 'attachment_commit', commitArgs)) as unknown[]
   const message = rows[0] as { id?: string } | undefined
   if (message?.id) await keepAs(deps, keep, { message_id: message.id }, commitArgs.p_sender_user_id)
   return message ?? null
+}
+
+/**
+ * A declared attachment's bytes are up (under its own staging key, or `upload_key` when the sender resumed with a new
+ * upload): hashed, checked against the declaration, and every reference moves to them. Answers {status: 'ready'}; bytes
+ * that are not the declared file are refused (upload_mismatch) and the attachment reads failed.
+ */
+export async function handleFinish(deps: AttachmentsDeps, userId: string, body: Record<string, unknown>) {
+  const pendingKey = stagingOf(body, userId)
+  const uploadKey = body.upload_key == null ? pendingKey : stagingOf({ staging_key: body.upload_key }, userId)
+  const keep = keepOf(body)
+  await registerStaged(deps, userId, uploadKey, str(body, 'content_type', false), str(body, 'file_name', false) ?? '', { pendingKey })
+  const messageId = str(body, 'message_id', false)
+  if (messageId) await keepAs(deps, keep, { message_id: messageId }, str(body, 'as', false) ?? userId)
+  return { status: 'ready' }
+}
+
+/** The caller's declared attachments still waiting for their bytes: a restarted sender resumes each it still holds. */
+export async function handlePending(deps: AttachmentsDeps) {
+  return { uploads: await call(deps.userRpc, 'attachment_pending_mine', {}) }
 }
 
 /**
@@ -393,7 +421,7 @@ function stagingOf(body: Record<string, unknown>, userId: string): string {
 }
 
 /** 暂存的字节:算哈希、存进 OSS 的最终位置、登记成 blob(提交和放进文件夹共用)。暂存已经没了 ⇒ 交给库认上一次的登记。 */
-async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey: string, declaredType: string | null, fileName: string) {
+async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey: string, declaredType: string | null, fileName: string, settle?: { pendingKey: string }) {
   const permit=await call(deps.serviceRpc,'file_managed_upload_for',{p_key:stagingKey,p_user:userId}) as { max_bytes:number }
   const store=objectStorage(deps)
   let read: InspectedObject | null = null
@@ -406,6 +434,8 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
     // 暂存对象没了:要么没传上来,要么上一次已经登记过、删了暂存(重试)—— 交给库认那次登记。
     if (!(error instanceof ObjectStorageError && error.status === 404)) throw error
   }
+  // A declared attachment settles only on bytes hashed here: no staged object, nothing to settle it with.
+  if (!read && settle) throw new Refusal(409, 'upload_missing', 'the upload is not there; upload the file again')
   if (read) {
     const { bytes, revision, sizeBytes } = read
     if (sizeBytes === 0) throw new Refusal(400, 'invalid', 'an attachment has at least one byte')
@@ -431,17 +461,26 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
     let created = false
     for (let attempt = 1; ; attempt++) {
       await copy()
-      const { data, error } = await deps.serviceRpc('file_blob_register', {
-        p_uploader: userId,
-        p_staging_key: stagingKey,
-        p_sha256: sha,
-        p_size_bytes: sizeBytes,
-        p_content_type: type.contentType,
-        p_width: type.width,
-        p_height: type.height,
-      })
+      const { data, error } = settle
+        ? await deps.serviceRpc('file_blob_settle', {
+          p_uploader: userId, p_pending_key: settle.pendingKey, p_upload_key: stagingKey, p_sha256: sha, p_size_bytes: sizeBytes,
+          p_content_type: type.contentType, p_width: type.width, p_height: type.height,
+          p_document: document.kind === 'document' ? { text: document.text, content_type: document.contentType } : null,
+        })
+        : await deps.serviceRpc('file_blob_register', {
+          p_uploader: userId,
+          p_staging_key: stagingKey,
+          p_sha256: sha,
+          p_size_bytes: sizeBytes,
+          p_content_type: type.contentType,
+          p_width: type.width,
+          p_height: type.height,
+        })
+      if (!error && settle && (data as { status?: string } | null)?.status === 'failed') {
+        throw new Refusal(409, 'upload_mismatch', 'the uploaded bytes are not the file this message declared')
+      }
       if (!error) {
-        created = ((data as { created?: boolean }[] | null)?.[0]?.created) === true
+        created = settle ? (data as { created?: boolean }).created === true : ((data as { created?: boolean }[] | null)?.[0]?.created) === true
         break
       }
       if (error.hint !== 'file_blob_deleting' || attempt >= 5) throw refusalFromDb(error)
@@ -579,7 +618,10 @@ export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-acce
     claimedCount = claimed.length
     for (const job of claimed) {
       try {
-        if (job.bucket_id === 'oss' || job.bucket_id === 'temporary') {
+        // A declaration whose bytes never came (pending): its staging object, if any, is the provider's to expire.
+        if (job.bucket_id === 'pending') {
+          // nothing stored under its name
+        } else if (job.bucket_id === 'oss' || job.bucket_id === 'temporary') {
           await objectStorage(deps).remove(job.object_name)
           removed++
           // 清边缘缓存只是清理(见 refreshCdn):失败了记一行,不挡回收。

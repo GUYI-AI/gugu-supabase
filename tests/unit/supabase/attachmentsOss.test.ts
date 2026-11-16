@@ -19,6 +19,8 @@ import { hasThumbnail, objectHeaders, sniff } from '../../../supabase/functions/
 import {
   type AttachmentsDeps,
   handleCommit,
+  handleFinish,
+  handlePending,
   handleSessionCommit,
   handleSessionUrls,
   handleForward,
@@ -184,6 +186,8 @@ function fakes(opts: {
   afterGet?: (bucket: Bucket) => void
   /** 登记成功之后。 */
   afterRegister?: (bucket: Bucket) => void
+  /** file_blob_settle's answer for a declared attachment's bytes ('ready' unless told). */
+  settle?: 'ready' | 'failed'
   /** 按引用发的是文本文件:它此刻的正文,和库里最新一版已经带着字节的正文(null = 没有带字节的一版)。 */
   document?: { text: string; snapshotted: string | null }
 } = {}) {
@@ -276,6 +280,7 @@ function fakes(opts: {
       }
       rpcs.push({ as: 'user', fn, args })
       if (fn === 'attachment_commit') return { data: [{ id: args.p_message_id, file_version: 1 }], error: null }
+      if (fn === 'attachment_declare') return { data: 'pending-blob', error: null }
       if (fn === 'send_friend_file_as_owner') return { data: { chat_id: 'dm-1', message_id: 'm-o', sender_user_id: USER, sent_by_agent: true }, error: null }
       if (fn === 'attachment_forward') {
         return { data: [{ id: args.p_message_id, forwarded_from_message_id: args.p_source_message_id }], error: null }
@@ -316,6 +321,7 @@ function fakes(opts: {
         opts.afterRegister?.(bucket)
         return { data: [{ blob_id: 'b1', created: opts.registerCreated ?? true }], error: null }
       }
+      if (fn === 'file_blob_settle') return { data: opts.settle === 'failed' ? { status: 'failed' } : { status: 'ready', blob_id: 'b1', created: true }, error: null }
       if (fn === 'file_blob_gc_claim') return { data: opts.claimed ?? [], error: null }
       if (fn === 'file_blob_gc_finish' || fn === 'file_blob_gc_fail') return { data: null, error: null }
       return { data: null, error: { message: `no fake for ${fn}` } }
@@ -545,6 +551,51 @@ describe('提交', () => {
     expect(refusal).toMatchObject({ status: 400, code: 'recipient_not_member', message: 'recipient_not_member', details: 'a,b' })
     // Other refusals never carry the database's details through.
     expect(refusalFromDb({ message: 'x', hint: 'attachment_source_gone', details: 'internal' }).details).toBeUndefined()
+  })
+})
+
+// Owner 11-15: a message is its text and its files' index. A declared commit sends the message before any byte is read;
+// finish hashes the bytes later and settles the declaration (or fails it); the old upload-first commit is unchanged.
+describe('bytes after the message', () => {
+  const declared = { sha256: 'ab'.repeat(32), size_bytes: 64, content_type: 'image/png' }
+  it('a declared commit sends the message without reading, copying or registering any byte', async () => {
+    const f = fakes({ object: null })
+    await expect(handleCommit(f.deps, USER, commitBody({ ...declared, width: 800, height: 600 }))).resolves.toEqual({ id: 'm1', file_version: 1 })
+    expect(f.calls, 'no object read or written').toEqual([])
+    expect(f.rpcs.map(r => `${r.as}:${r.fn}`)).toEqual(['user:attachment_declare', 'user:attachment_commit'])
+    expect(f.rpcs[0]!.args).toEqual({ p_staging_key: STAGING, p_sha256: 'ab'.repeat(32), p_size_bytes: 64, p_content_type: 'image/png', p_width: 800, p_height: 600 })
+    const file = fakes({ object: null })
+    await handleCommit(file.deps, USER, commitBody({ ...declared, content_type: 'application/pdf' }))
+    expect(file.rpcs[0]!.args, 'not an image: no size to declare').not.toHaveProperty('p_width')
+  })
+  it('finish hashes the bytes this function read and settles the declaration with them; a resumed upload names its own key', async () => {
+    const bytes = pngBytes(), f = fakes({ object: bytes })
+    await expect(handleFinish(f.deps, USER, { staging_key: STAGING, file_name: 'shot.png', message_id: 'm1' })).resolves.toEqual({ status: 'ready' })
+    const settle = f.rpcs.find(r => r.fn === 'file_blob_settle')!
+    expect(settle.as).toBe('service')
+    expect(settle.args).toMatchObject({ p_uploader: USER, p_pending_key: STAGING, p_upload_key: STAGING, p_sha256: createHash('sha256').update(bytes).digest('hex'), p_size_bytes: 64, p_content_type: 'image/png', p_width: 800, p_height: 600 })
+    expect(f.rpcs.some(r => r.fn === 'file_blob_register'), 'a declared attachment settles, it is never registered apart').toBe(false)
+    const resumed = fakes({ object: bytes }), again = `staging/${USER}/44444444-4444-4444-8444-444444444444`
+    await handleFinish(resumed.deps, USER, { staging_key: STAGING, upload_key: again, file_name: 'shot.png', message_id: 'm1' })
+    expect(resumed.rpcs.find(r => r.fn === 'file_blob_settle')!.args).toMatchObject({ p_pending_key: STAGING, p_upload_key: again })
+  })
+  it('bytes that are not the declared file: 409 upload_mismatch; no upload there: 409 upload_missing; another\'s key: 400 before reading', async () => {
+    const wrong = fakes({ object: pngBytes(), settle: 'failed' })
+    await expect(handleFinish(wrong.deps, USER, { staging_key: STAGING, file_name: 'shot.png' })).rejects.toMatchObject({ status: 409, code: 'upload_mismatch' })
+    const missing = fakes({ object: null })
+    await expect(handleFinish(missing.deps, USER, { staging_key: STAGING, file_name: 'shot.png' })).rejects.toMatchObject({ status: 409, code: 'upload_missing' })
+    expect(missing.rpcs.some(r => r.fn === 'file_blob_settle')).toBe(false)
+    const other = fakes({ object: pngBytes() })
+    await expect(handleFinish(other.deps, '33333333-3333-4333-8333-333333333333', { staging_key: STAGING, file_name: 'shot.png' })).rejects.toMatchObject({ status: 400 })
+    expect(other.calls).toEqual([])
+  })
+  it('pending lists the caller\'s declarations still waiting for bytes, as the caller (a restarted sender resumes them)', async () => {
+    const f = fakes({ object: null })
+    const rows = [{ staging_key: STAGING, message_id: 'm1', chat_id: 'c1', as: USER, sha256: 'ab'.repeat(32), size_bytes: 64, content_type: 'image/png' }]
+    const base = f.deps.userRpc
+    f.deps.userRpc = async (fn, args) => fn === 'attachment_pending_mine' ? { data: rows, error: null } : base(fn, args)
+    await expect(handlePending(f.deps)).resolves.toEqual({ uploads: rows })
+    expect(f.calls, 'nothing read or written').toEqual([])
   })
 })
 

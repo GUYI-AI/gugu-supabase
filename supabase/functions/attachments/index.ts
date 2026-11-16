@@ -4,7 +4,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.110.9'
 import {
   type AttachmentsDeps,
-  handleCommit,
+  handleCommit, handleFinish, handlePending,
   handleSessionCommit,
   handleSessionUrls,
   handleSessionRevoke,
@@ -198,6 +198,10 @@ Deno.serve(async (request) => {
         return json(await handleSessionUrls(deps, who.user.id, body))
       case 'commit':
         return json({ message: await handleCommit(deps, who.user.id, body) })
+      case 'finish':
+        return json(await handleFinish(deps, who.user.id, body))
+      case 'pending':
+        return json(await handlePending(deps))
       case 'place':
         return json({ item: await handlePlace(deps, who.user.id, body) })
       case 'forward':
