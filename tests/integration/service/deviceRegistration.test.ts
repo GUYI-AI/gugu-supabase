@@ -219,6 +219,10 @@ describe('real independent-connection registration races', () => {
       if (outcome.error) throw outcome.error
       expect(outcome.result).toEqual({ device_id: input.device_id, created: false })
       await b.query('COMMIT')
+      // The observer starts as another fixture owner: retain that RLS denial,
+      // then read the committed result as the owner of these two connections.
+      expect((await db.query('SELECT device_id FROM identity.gugu_devices WHERE user_id=$1', [id])).rows).toEqual([])
+      await asUser(db, id)
       expect((await db.query('SELECT device_id FROM identity.gugu_devices WHERE user_id=$1', [id])).rows)
         .toEqual([{ device_id: input.device_id }])
     } finally {
