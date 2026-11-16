@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { createAccountDeletionHandler, sha256, type DeletionDependencies, type Workflow } from '../../../supabase/functions/_shared/account-deletion-core'
+import { createAccountDeletionHandler, sha256, type DeletionDependencies, type FlowArgs, type Workflow } from '../../../supabase/functions/_shared/account-deletion-core'
 import { accountDeletionDependencies } from '../../../supabase/functions/_shared/account-deletion-auth'
 
 const user = { id: randomUUID(), email: 'person@fixture.invalid', sessionId: randomUUID() }
@@ -15,7 +15,7 @@ function fixture() {
     verifyCode: vi.fn(async () => ({ id: user.id, email: user.email })), hardDelete: vi.fn(async () => 'absent' as const),
     flow: vi.fn(async args => {
       if (args.p_action === 'attempt') return { ok: true, lease_token: lease, request: workflow('verifying') }
-      if (args.p_action === 'verified' || args.p_action === 'retry') return { ok: true, request: workflow('processing'), user_id: user.id, lease_token: lease }
+      if (args.p_action === 'verified' || args.p_action === 'retry' || args.p_action === 'execute') return { ok: true, request: workflow('processing'), user_id: user.id, lease_token: lease }
       if (args.p_action === 'finish') return { ok: true, request: workflow(args.p_error_code === null ? 'deleted' : args.p_error_code === 'outcome_unknown' ? 'processing' : 'retry_wait') }
       if (args.p_action === 'begin' || args.p_action === 'sent') return { ok: true, request: workflow('challenge') }
       return { ok: true, request: null }
@@ -69,6 +69,30 @@ describe('self deletion HTTP boundary', () => {
     expect((await f.call('retry', { request_id: requestId, receipt_token: receipt })).status).toBe(200)
     expect(f.deps.verifyCode).not.toHaveBeenCalled(); expect(f.deps.hardDelete).toHaveBeenCalledOnce()
   })
+  it.each(['state_conflict', 'authorization_expired'])('never dispatches Auth deletion after execution recheck rejects %s', async error => {
+    const f = fixture(), original = f.deps.flow
+    f.deps.flow = vi.fn(async (args: FlowArgs) => args.p_action === 'execute'
+      ? { ok: false, error, status: error === 'state_conflict' ? 409 : 410 }
+      : original(args))
+    expect((await f.call('confirm', confirm)).status).toBe(error === 'state_conflict' ? 409 : 410)
+    expect(f.deps.hardDelete).not.toHaveBeenCalled()
+  })
+  it('returns an already committed absence from the execution recheck without another Auth delete', async () => {
+    const f = fixture(), original = f.deps.flow
+    f.deps.flow = vi.fn(async (args: FlowArgs) => args.p_action === 'execute'
+      ? { ok: true, request: workflow('deleted') } : original(args))
+    const response = await f.call('confirm', confirm)
+    expect(response.status).toBe(200)
+    expect((await response.json()).request.state).toBe('deleted')
+    expect(f.deps.hardDelete).not.toHaveBeenCalled()
+  })
+  it('refuses a mismatched execution identity instead of deleting the earlier caller', async () => {
+    const f = fixture(), original = f.deps.flow
+    f.deps.flow = vi.fn(async (args: FlowArgs) => args.p_action === 'execute'
+      ? { ok: true, request: workflow('processing'), user_id: randomUUID(), lease_token: lease } : original(args))
+    expect((await f.call('confirm', confirm)).status).toBe(503)
+    expect(f.deps.hardDelete).not.toHaveBeenCalled()
+  })
   it('allows only the receipt capability to read the post-deletion result', async () => {
     const f = fixture()
     expect((await f.call('result', { request_id: requestId, receipt_token: receipt }, null)).status).toBe(200)
@@ -96,7 +120,7 @@ describe('self deletion HTTP boundary', () => {
     const f = fixture()
     expect((await f.call('confirm', { ...confirm, acknowledge_forfeit: false })).status).toBe(400)
     expect(f.deps.verifyCode).not.toHaveBeenCalled()
-    for (const route of ['cancel', 'process-due', 'schedule']) expect((await f.call(route)).status).toBe(404)
+    for (const route of ['cancel', 'process-due', 'schedule', 'execute']) expect((await f.call(route)).status).toBe(404)
   })
 
 })

@@ -31,6 +31,15 @@ The temporary verification session is immediately signed out locally and never
 returned. A challenge expires five minutes after sending begins. Limits are one
 send/minute, three/15min/user, five code attempts/request and ten/15min/user.
 Changed emails, revoked sessions, stale consent and reused proofs fail closed.
+An expired execution lease is not a failed deletion. A processing request remains
+unconfirmed and blocks a new challenge or retry until its outcome is reconciled;
+its result does not advertise `can_retry`. Only a definite `retry_wait` result
+retains the original bounded retry authorization. Read the original capability
+after a dispatch-recheck error: an HTTP error alone is not a cancellable workflow
+terminal. Committed Auth absence takes precedence over an older failed/expired
+classification. An orphaned processing operation whose account still exists
+requires an authoritative recovery decision; this release does not invent a
+timeout-based cancellation, background retry or recovery worker.
 Reauthentication nonce is not used because its installed verification contract is
 part of password updates. No password is changed and no custom OTP is generated.
 
@@ -126,6 +135,10 @@ above describes the existing deletion chain reused by Auth.
    after the erasure-performance and financial-owner/permission prerequisites.
    The official deployment guard does not support an unmerged branch here. Only
    CD writes successful staging source pins; this validation does not edit pins.
+   Install the outcome-reconciliation migration before the updated Edge handler:
+   its internal `execute` recheck fails closed against an older workflow. An old
+   handler can still finish an existing request, but must not be treated as proof
+   that the new pre-dispatch recheck is deployed.
 2. Installation leaves `test_only=true,test_user_id=NULL`: every ordinary user is
    closed. An authorized synthetic-account operator creates one new confirmed
    fixture through Auth Admin, with server-only app metadata
