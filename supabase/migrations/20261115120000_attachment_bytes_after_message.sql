@@ -146,14 +146,17 @@ GRANT EXECUTE ON FUNCTION chat.attachment_declare(text,text,bigint,text,integer,
 CREATE FUNCTION chat.attachment_pending_mine() RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
     SELECT COALESCE(jsonb_agg(jsonb_build_object('staging_key',u.staging_key,'message_id',m.id,'chat_id',m.chat_id,
-        'as',m.sender_user_id,'sha256',b.declared_sha256,'size_bytes',b.size_bytes,'content_type',b.content_type)
+        'as',m.sender_user_id,'sha256',b.declared_sha256,'size_bytes',b.size_bytes,'content_type',b.content_type,'file_name',m.file_name)
         ORDER BY b.created_at),'[]'::jsonb)
       FROM chat.file_blob_uploads u
       JOIN chat.file_blobs b ON b.id=u.blob_id AND b.bucket_id='pending' AND b.declared_failed_at IS NULL
       CROSS JOIN LATERAL (
-          SELECT ms.id,ms.chat_id,ms.sender_user_id FROM chat.messages ms WHERE ms.file_blob_id=b.id AND ms.deleted_at IS NULL AND ms.retracted_at IS NULL
+          -- The file's name, which finish classifies it by (a text file is a document): the folder file's, else the message's card.
+          SELECT ms.id,ms.chat_id,ms.sender_user_id,chat.attachment_envelope_name(ms.content,b.size_bytes,b.content_type) AS file_name
+            FROM chat.messages ms WHERE ms.file_blob_id=b.id AND ms.deleted_at IS NULL AND ms.retracted_at IS NULL
           UNION ALL
-          SELECT ms.id,ms.chat_id,ms.sender_user_id FROM chat.workspace_item_versions w
+          SELECT ms.id,ms.chat_id,ms.sender_user_id,i.filename FROM chat.workspace_item_versions w
+            JOIN chat.workspace_items i ON i.id=w.item_id
             JOIN chat.messages ms ON ms.file_item_id=w.item_id AND ms.file_version=w.n
            WHERE w.blob_id=b.id AND ms.deleted_at IS NULL AND ms.retracted_at IS NULL
           LIMIT 1) m

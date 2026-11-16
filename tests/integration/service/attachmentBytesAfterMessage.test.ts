@@ -123,11 +123,15 @@ describe('the message is there before its bytes', ()=>{
     expect(await resolve(send.message)).toMatchObject({status:'ready',sha256:send.digest})
   })
   it('a restarted sender finds its own declarations still waiting for bytes, and only those', async()=>{
-    const send=await declaredSend(), refused=await declaredSend()
+    const send=await declaredSend(), refused=await declaredSend(), whisper=await declaredSend(sha(),60,true)
     expect(await settle(refused.key,sha())).toMatchObject({status:'failed'})
     await user()
     const mine=(await db.query('SELECT chat.attachment_pending_mine() AS r')).rows[0].r
-    expect(mine).toEqual([expect.objectContaining({staging_key:send.key,message_id:send.message,chat_id:group,as:sender,sha256:send.digest,size_bytes:60})])
+    // Its name too: finish classifies the bytes by it (a text file is a document), and a restart has nothing else to go by.
+    expect(mine).toEqual([
+      expect.objectContaining({staging_key:send.key,message_id:send.message,chat_id:group,as:sender,sha256:send.digest,size_bytes:60,file_name:'photo.png'}),
+      expect.objectContaining({staging_key:whisper.key,message_id:whisper.message,file_name:'photo.png'})])
+    expect(await settle(whisper.key,whisper.digest)).toMatchObject({status:'ready'})
     await user(receiver)
     expect((await db.query('SELECT chat.attachment_pending_mine() AS r')).rows[0].r).toEqual([])
     expect(await settle(send.key,send.digest)).toMatchObject({status:'ready'})
