@@ -3,10 +3,12 @@ import { randomUUID, createHash } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 let db: pg.Client
+let database: string
 beforeAll(async () => {
   const url = new URL(process.env.GUGU_INTEGRATION_DATABASE_URL ?? '')
   if (!['localhost','127.0.0.1','[::1]'].includes(url.hostname)) throw Error('Disposable loopback required')
-  db = new pg.Client({ connectionString: url.href }); await db.connect()
+  database = url.href
+  db = new pg.Client({ connectionString: database }); await db.connect()
 })
 beforeEach(async () => { await db.query('BEGIN') })
 afterEach(async () => { await db.query('ROLLBACK') })
@@ -16,13 +18,13 @@ async function rejected(run: () => Promise<unknown>) {
   try { await run() } catch (error) { await db.query('ROLLBACK TO SAVEPOINT denied'); return error as pg.DatabaseError }
   throw Error('Expected refusal')
 }
-async function fixture() {
+async function fixture(client = db) {
   const user=randomUUID(), sid=randomUUID(), op=randomUUID(), native=randomUUID(), machine=randomUUID(), device='phone-'+machine+'-'+user
-  await db.query("INSERT INTO auth.users(id,aud,role,email,email_confirmed_at,created_at) VALUES($1,'authenticated','authenticated',$2,now(),now())",[user,user+'@closure.invalid'])
-  await db.query('INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())',[sid,user])
-  await db.query("SELECT set_config('request.jwt.claims',$1,true)",[JSON.stringify({sub:user,session_id:sid,role:'authenticated'})])
-  await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,machine_id,tier,label,hostname,platform,auth_session_id,capabilities) VALUES($1,$2,$3,'fixture','phone','phone','android',$4,'{\"host_kind\":\"phone\",\"runtimes\":[\"pi\"],\"actions\":{\"actions\":[]}}')",[device,user,machine,sid])
-  await db.query("INSERT INTO account_deletion_private.operations(id,operation_digest,receipt_digest,user_id,session_id,email_digest,consent_version,state,revision,challenge_generation) VALUES($1,$2,$3,$4,$5,$6,'immediate-forfeit-v1','open',0,1)",[op,op.replaceAll('-','').repeat(2),'a'.repeat(64),user,sid,createHash('sha256').update(user+'@closure.invalid').digest('hex')])
+  await client.query("INSERT INTO auth.users(id,aud,role,email,email_confirmed_at,created_at) VALUES($1,'authenticated','authenticated',$2,now(),now())",[user,user+'@closure.invalid'])
+  await client.query('INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())',[sid,user])
+  await client.query("SELECT set_config('request.jwt.claims',$1,true)",[JSON.stringify({sub:user,session_id:sid,role:'authenticated'})])
+  await client.query("INSERT INTO identity.gugu_devices(device_id,user_id,machine_id,tier,label,hostname,platform,auth_session_id,capabilities) VALUES($1,$2,$3,'fixture','phone','phone','android',$4,'{\"host_kind\":\"phone\",\"runtimes\":[\"pi\"],\"actions\":{\"actions\":[]}}')",[device,user,machine,sid])
+  await client.query("INSERT INTO account_deletion_private.operations(id,operation_digest,receipt_digest,user_id,session_id,email_digest,consent_version,state,revision,challenge_generation) VALUES($1,$2,$3,$4,$5,$6,'immediate-forfeit-v1','open',0,1)",[op,op.replaceAll('-','').repeat(2),'a'.repeat(64),user,sid,createHash('sha256').update(user+'@closure.invalid').digest('hex')])
   return { user,sid,op,native,machine,device }
 }
 const prepare=(f: Awaited<ReturnType<typeof fixture>>) => db.query('SELECT account_deletion_private.device_preparation_prepare($1,$2,$3) r',[f.op,f.device,f.native]).then(r=>r.rows[0].r)
@@ -90,5 +92,100 @@ describe('private reversible device preparation',()=>{
     expect((await rejected(()=>read(f,prepared.server_generation))).message).toContain('UNAVAILABLE')
     expect((await rejected(()=>prepare(f))).message).toContain('UNAVAILABLE')
     expect((await rejected(()=>db.query("UPDATE identity.gugu_devices SET status='online' WHERE device_id=$1",[f.device]))).code).toBe('42501')
+  })
+})
+
+// Two real contenders and the existing read-only observer. Every account and
+// switch mutation is fixture-owned and cleaned in finally; no fake schema.
+async function committedFixture(a: pg.Client) {
+  await a.query('BEGIN')
+  const previous=(await a.query('SELECT enabled FROM account_deletion_private.device_preparation_access')).rows[0].enabled as boolean
+  const f=await fixture(a)
+  await a.query('UPDATE account_deletion_private.device_preparation_access SET enabled=true')
+  await a.query('COMMIT')
+  return {...f,previous}
+}
+async function disposeCommitted(a: pg.Client,f: Awaited<ReturnType<typeof committedFixture>>) {
+  await a.query('BEGIN')
+  await a.query('DELETE FROM auth.users WHERE id=$1',[f.user])
+  await a.query('DELETE FROM account_deletion_private.operations WHERE id=$1',[f.op])
+  await a.query('UPDATE account_deletion_private.device_preparation_access SET enabled=$1',[f.previous])
+  await a.query('COMMIT')
+}
+async function finishConnections(a: pg.Client,b: pg.Client,f: Awaited<ReturnType<typeof committedFixture>> | undefined) {
+  await Promise.allSettled([a.query('ROLLBACK'),b.query('ROLLBACK')])
+  try { if(f) await disposeCommitted(a,f) }
+  finally { await Promise.allSettled([a.end(),b.end()]) }
+}
+async function claims(client: pg.Client,f: Awaited<ReturnType<typeof fixture>>) {
+  await client.query("SELECT set_config('request.jwt.claims',$1,true)",[JSON.stringify({sub:f.user,session_id:f.sid,role:'authenticated'})])
+}
+const prepareOn=(client: pg.Client,f: Awaited<ReturnType<typeof fixture>>) => client.query('SELECT account_deletion_private.device_preparation_prepare($1,$2,$3) r',[f.op,f.device,f.native])
+describe('device preparation independent-connection fences',()=>{
+  it('waits for an admitted heartbeat then removes its ephemeral presence before preparing',async()=>{
+    const a=new pg.Client({connectionString:database}),b=new pg.Client({connectionString:database})
+    await a.connect(); await b.connect()
+    let f: Awaited<ReturnType<typeof committedFixture>> | undefined
+    let pending: Promise<{value?: pg.QueryResult;error?: unknown}> | undefined
+    try {
+      f=await committedFixture(a)
+      await a.query('BEGIN'); await claims(a,f)
+      await a.query('SELECT 1 FROM identity.gugu_devices WHERE device_id=$1 FOR SHARE',[f.device])
+      await a.query('SELECT identity.runtime_instance_heartbeat($1,$2)',[randomUUID(),f.device])
+      const apid=(await a.query('SELECT pg_backend_pid() pid')).rows[0].pid
+      await b.query('BEGIN'); await b.query("SET LOCAL statement_timeout='5s'")
+      const bpid=(await b.query('SELECT pg_backend_pid() pid')).rows[0].pid
+      pending=prepareOn(b,f).then(value=>({value}),error=>({error}))
+      let blocked=false
+      for(let n=0;n<100&&!blocked;n++) {
+        blocked=(await db.query('SELECT $1::int=ANY(pg_blocking_pids($2::int)) blocked',[apid,bpid])).rows[0].blocked
+        if(!blocked) await new Promise(resolve=>setTimeout(resolve,10))
+      }
+      expect(blocked).toBe(true)
+      await a.query('COMMIT')
+      const completed=await pending; if(completed.error) throw completed.error
+      expect(completed.value?.rows[0].r.prepared).toBe(true)
+      await b.query('COMMIT')
+      expect((await db.query('SELECT count(*)::int n FROM identity.runtime_instances WHERE device_id=$1',[f.device])).rows[0].n).toBe(0)
+      expect((await db.query('SELECT status FROM identity.gugu_devices WHERE device_id=$1',[f.device])).rows[0].status).toBe('offline')
+    } finally {
+      await finishConnections(a,b,f); await pending
+    }
+  })
+  it.each(['device','runtime'])('rejects an old RR snapshot attempting a late %s publication',async target=>{
+    const a=new pg.Client({connectionString:database}),b=new pg.Client({connectionString:database})
+    await a.connect(); await b.connect()
+    let f: Awaited<ReturnType<typeof committedFixture>> | undefined
+    try {
+      f=await committedFixture(a)
+      await a.query('BEGIN ISOLATION LEVEL REPEATABLE READ'); await claims(a,f)
+      await a.query('SELECT status FROM identity.gugu_devices WHERE device_id=$1',[f.device])
+      await b.query('BEGIN'); expect((await prepareOn(b,f)).rows[0].r.prepared).toBe(true); await b.query('COMMIT')
+      const late=target==='device'
+        ? a.query("UPDATE identity.gugu_devices SET status='online' WHERE device_id=$1",[f.device])
+        : a.query('SELECT identity.runtime_instance_heartbeat($1,$2)',[randomUUID(),f.device])
+      await expect(late).rejects.toMatchObject({code:'40001'})
+      await a.query('ROLLBACK')
+      expect((await db.query('SELECT status FROM identity.gugu_devices WHERE device_id=$1',[f.device])).rows[0].status).toBe('offline')
+      expect((await db.query('SELECT count(*)::int n FROM identity.runtime_instances WHERE device_id=$1',[f.device])).rows[0].n).toBe(0)
+    } finally {
+      await finishConnections(a,b,f)
+    }
+  })
+  it('refuses runtime admission without waiting while preparation holds the device',async()=>{
+    const a=new pg.Client({connectionString:database}),b=new pg.Client({connectionString:database})
+    await a.connect(); await b.connect()
+    let f: Awaited<ReturnType<typeof committedFixture>> | undefined
+    try {
+      f=await committedFixture(a)
+      await b.query('BEGIN'); await prepareOn(b,f)
+      await a.query('BEGIN'); await claims(a,f)
+      await a.query("SET LOCAL statement_timeout='2s'")
+      await expect(a.query('SELECT identity.runtime_instance_heartbeat($1,$2)',[randomUUID(),f.device])).rejects.toMatchObject({code:'55P03'})
+      await a.query('ROLLBACK'); await b.query('COMMIT')
+      expect((await db.query('SELECT count(*)::int n FROM identity.runtime_instances WHERE device_id=$1',[f.device])).rows[0].n).toBe(0)
+    } finally {
+      await finishConnections(a,b,f)
+    }
   })
 })
