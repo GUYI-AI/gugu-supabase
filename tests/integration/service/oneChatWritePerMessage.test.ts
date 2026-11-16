@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 // One published chats change per message: a message in an n-member group writes message_created + chat_changed for
 // each member (2n journal rows), not message_created + 2 x chat_changed (3n). Seq allocation keeps its row lock, so
@@ -57,7 +58,7 @@ describe('one published chats change per message', () => {
   }, 120_000)
   afterAll(() => dropGroup(group, members))
   beforeEach(async () => {
-    await db.query('BEGIN')
+    await db.query(BEGIN_READING_REVISIONS)
     await db.query("DELETE FROM chat.account_revisions WHERE resource_key->>'chat_id'=$1", [group])
   })
   afterEach(async () => { await db.query('ROLLBACK') })

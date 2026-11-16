@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module'
 import { afterAll, beforeAll, it } from 'vitest'
 import { budgetCases } from './chatProjectionBudgetCases.mjs'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 const { Client } = createRequire(import.meta.url)('pg')
 let db: { connect(): Promise<void>; end(): Promise<void>; query(sql: string, args?: unknown[]): Promise<unknown> }
@@ -12,7 +13,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await db?.end() })
 for (const [name, run] of budgetCases) it(name, async () => {
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   try { await db.query("SET LOCAL track_functions='all'"); await run(db) }
   finally { await db.query('ROLLBACK') }
 })
