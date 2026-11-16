@@ -12,6 +12,7 @@
 //   POST gc       → 只认 service_role(pg_cron + pg_net 每 10 分钟叫一次):领一批该回收的,删对象、清 CDN、报完成 / 失败。
 
 import { ossObjectStorage } from './attachment-object-storage.ts'
+import { logAttachment, type AttachmentLogEvent, type AttachmentLogFields } from './attachments-log.ts'
 import { type AttachmentObjectStorage, type MultipartStorage, ObjectStorageError, type InspectedObject } from './object-storage.ts'
 import type { Inspector } from './file-inspection.ts'
 import { hasThumbnail, objectHeaders, sniff } from './blob-sniff.ts'
@@ -56,7 +57,7 @@ export interface AttachmentsDeps {
   storageRemove(bucket: string, object: string): Promise<void>
   now(): Date
   uuid(): string
-  log(stage: string, extra?: Record<string, unknown>): void
+  log(stage: AttachmentLogEvent, fields?: AttachmentLogFields): void
   /** 撞上正在回收的 blob 时,重试之间等多久(测试里给 0)。 */
   retryDelayMs?: number
   /** Drain/finish an inspected incoming replacement, using the original caller's authorization. */
@@ -151,7 +152,7 @@ async function writeFile(deps: AttachmentsDeps, fn: string, args: Record<string,
   const body = { key: args.p_staging_key as string, expected: args.p_expected_version as number, finish: false }
   await deps.documentReplacement!(item!, actor, body)
   try { return await call(deps.userRpc, fn, args) }
-  finally { await deps.documentReplacement!(item!, actor, { ...body, finish: true }).catch(() => deps.log('replacement_finish_failed', { item })) }
+  finally { await deps.documentReplacement!(item!, actor, { ...body, finish: true }).catch(() => deps.log('replacement_finish_failed')) }
 }
 
 const str = (body: Record<string, unknown>, key: string, required = true): string | null => {
@@ -599,7 +600,7 @@ async function abandonExpiredParts(deps: AttachmentsDeps) {
       await parts.abandon(row.staging_key, row.upload_id)
       await call(deps.serviceRpc, 'file_managed_upload_parts_clear', { p_key: row.staging_key, p_user: row.account_id, p_upload_id: row.upload_id })
     } catch (error) {
-      deps.log('gc_abandon_failed', { key: row.staging_key, error: String(error) })
+      deps.log('gc_abandon_failed')
     }
   }
 }
@@ -626,7 +627,7 @@ export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-acce
           removed++
           // 清边缘缓存只是清理(见 refreshCdn):失败了记一行,不挡回收。
           if (job.bucket_id === 'oss') await objectStorage(deps).invalidate(job.object_name, hasThumbnail(job.content_type))
-            .catch((error) => deps.log('cdn_refresh_failed', { blob: job.blob_id, error: String(error) }))
+            .catch(() => deps.log('cdn_refresh_failed'))
         } else {
           await deps.storageRemove(job.bucket_id, job.object_name)
           removed++
@@ -635,23 +636,22 @@ export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-acce
         result.deleted++
       } catch (error) {
         result.failed++
-        deps.log('gc_failed', { blob: job.blob_id, error: String(error) })
-        await call(deps.serviceRpc, 'file_blob_gc_fail', { p_blob_id: job.blob_id, p_claim_token: job.claim_token, p_error: String(error).slice(0, 500) })
-          .catch((e) => deps.log('gc_fail_report_failed', { blob: job.blob_id, error: String(e) }))
+        deps.log('gc_failed')
+        // This diagnostic is persisted by the RPC: keep its reason as constrained as stdout.
+        await call(deps.serviceRpc, 'file_blob_gc_fail', { p_blob_id: job.blob_id, p_claim_token: job.claim_token, p_error: 'gc_operation_failed' })
+          .catch(() => deps.log('gc_fail_report_failed'))
       }
     }
     completed = true
     return result
   } finally {
     try {
-      const at = deps.now().toISOString()
       // Removal may succeed even when its database confirmation fails. Keep both counts without changing the API result.
-      deps.log('gc_result', { entry, at, day: at.slice(0, 10), claimed: claimedCount, deleted: removed,
+      deps.log('gc_result', { entry, claimed: claimedCount, deleted: removed,
         finished: result.deleted, failed: result.failed, outcome: completed ? 'completed' : 'error' })
     } catch (error) {
       try {
-        console.error(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry,
-          error_type: typeof error, message: 'GC summary logging failed' }))
+        logAttachment('gc_result_log_failed', { entry })
       } catch { /* Even unavailable stderr must not replace the GC result or original exception. */ }
     }
   }

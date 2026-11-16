@@ -2,6 +2,7 @@
 // variable is set (see ../_shared/attachment-storage-config.ts). With OSS, the file service hashes staged bytes
 // (GUGU_FILES_INSPECT_URL / GUGU_FILES_INSPECT_SECRET). User/RLS and GC authorization are enforced below.
 import { createClient } from 'npm:@supabase/supabase-js@2.110.9'
+import { logAttachment } from '../_shared/attachments-log.ts'
 import {
   type AttachmentsDeps,
   handleCommit, handleFinish, handlePending,
@@ -40,9 +41,7 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...CORS, 'content-type': 'application/json', 'cache-control': 'no-store' } })
 }
 
-function log(stage: string, extra: Record<string, unknown> = {}): void {
-  console.log(JSON.stringify({ fn: 'attachments', stage, ...extra }))
-}
+const log = logAttachment
 
 const REQUIRED = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY']
 
@@ -135,7 +134,7 @@ Deno.serve(async (request) => {
   if (request.method !== 'POST') return json({ error: 'invalid', message: 'POST only' }, 405)
   const missing = REQUIRED.filter((key) => !env(key))
   if (missing.length) {
-    log('not_configured', { missing })
+    log('not_configured', { count: missing.length })
     return json({ error: 'not_configured', message: `attachments storage is not configured: ${missing.join(', ')}` }, 503)
   }
   let storage: AttachmentStorageConfig
@@ -143,7 +142,7 @@ Deno.serve(async (request) => {
     storage = attachmentStorageConfig(env)
   } catch (error) {
     if (!(error instanceof StorageConfigError)) throw error
-    log('not_configured', { missing: error.missing })
+    log('not_configured', { count: error.missing.length })
     return json({ error: 'not_configured', message: error.message }, 503)
   }
   const route = new URL(request.url).pathname.split('/').filter(Boolean).at(-1) ?? ''
@@ -217,7 +216,7 @@ Deno.serve(async (request) => {
     if (error instanceof Refusal) {
       return json({ error: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) }, error.status)
     }
-    log('failed', { route, error_type:error instanceof Error?error.name:'unknown' })
+    log('failed')
     return json({ error: 'failed', message: 'attachments failed; try again' }, 500)
   }
 })
