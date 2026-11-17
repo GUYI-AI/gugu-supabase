@@ -100,6 +100,37 @@ describe('the message is there before its bytes', ()=>{
     expect((await db.query("SELECT count(*)::int AS n FROM chat.file_transfer_storage WHERE blob_id=$1",[settled.blob_id])).rows[0].n, 'in the ledger once settled').toBe(1)
     expect(await settle(send.key,send.digest), 'finishing again answers the same').toMatchObject({status:'ready',blob_id:settled.blob_id})
   })
+  it.each([false,true])('a lost finish response after settling (quota registered: %s) can finish under fresh upload permits', async(registered)=>{
+    const send=await declaredSend()
+    await service()
+    // Each RPC is a transaction in the Edge function. A 503 can hide a successful settle, or even the whole finish.
+    const first=(await db.query('SELECT chat.file_blob_settle($1,$2,$2,$3,60,$4) AS r',
+      [sender,send.key,send.digest,'image/png'])).rows[0].r
+    if (registered) await db.query('SELECT chat.file_managed_upload_registered($1,$2)',[send.key,sender])
+    const revisions=(await db.query("SELECT count(*)::int AS n FROM chat.account_revisions WHERE event='message_file_changed' AND resource_key->>'entity_id'=$1",[send.message])).rows[0].n
+    // The client has no successful answer and resumes from its local copy, with a new key on every attempt.
+    for (let attempt=0;attempt<3;attempt++) {
+      const uploadKey=await permit()
+      expect(await settle(send.key,send.digest,60,uploadKey)).toMatchObject({status:'ready',blob_id:first.blob_id,created:false})
+      await service()
+      expect((await db.query('SELECT u.blob_id,r.actual_bytes,b.blob_id AS receipt_blob FROM chat.file_transfer_uploads u JOIN chat.file_transfer_reservations r ON r.id=u.reservation_id JOIN chat.file_blob_uploads b USING(staging_key) WHERE u.staging_key=$1',[uploadKey])).rows[0])
+        .toEqual({blob_id:first.blob_id,receipt_blob:first.blob_id,actual_bytes:'60'})
+      expect(await settle(send.key,send.digest,60,uploadKey), 'the resumed finish itself is repeatable').toMatchObject({status:'ready',blob_id:first.blob_id})
+    }
+    expect(await resolve(send.message)).toMatchObject({status:'ready',sha256:send.digest})
+    await service()
+    expect((await db.query('SELECT count(*)::int AS n FROM chat.file_transfer_storage WHERE blob_id=$1',[first.blob_id])).rows[0].n).toBe(1)
+    expect((await db.query("SELECT count(*)::int AS n FROM chat.account_revisions WHERE event='message_file_changed' AND resource_key->>'entity_id'=$1",[send.message])).rows[0].n).toBe(revisions)
+  })
+  it('a settled retry refuses different bytes and a key already registered for another file', async()=>{
+    const first=await declaredSend(), other=await declaredSend()
+    await settle(first.key,first.digest); await settle(other.key,other.digest)
+    await service()
+    for (const [key,digest,size] of [[first.key,sha(),60],[first.key,first.digest,61],[other.key,first.digest,60]]) {
+      expect((await reject('SELECT chat.file_blob_settle($1,$2,$3,$4,$5,$6)',[sender,first.key,key,digest,size,'image/png'])).hint).toBe('file_transfer_conflict')
+    }
+    expect(await resolve(other.message)).toMatchObject({status:'ready',sha256:other.digest})
+  })
   it('a whisper takes the same path: pending for its recipient, settled the same way', async()=>{
     const send=await declaredSend(sha(),60,true)
     expect(send.sent).toMatchObject({is_whisper:true})
