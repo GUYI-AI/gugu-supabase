@@ -31,10 +31,10 @@ async function permit(bytes=60) {
   return (await db.query('SELECT chat.file_managed_upload_as($1,$2,$3,$4) AS r',[randomUUID(),group,sender,bytes])).rows[0].r.staging_key as string
 }
 /** The new client's send: an upload permit, its declaration and the message, before any byte. */
-async function declaredSend(digest=sha(), bytes=60, whisper=false) {
+async function declaredSend(digest=sha(), bytes=60, whisper=false, keep:string|null=null) {
   const key=await permit(bytes), message=randomUUID()
   await user()
-  const blob=(await db.query('SELECT chat.attachment_declare($1,$2,$3,$4,$5,$6) AS id',[key,digest,bytes,'image/png',800,600])).rows[0].id as string
+  const blob=(await db.query('SELECT chat.attachment_declare($1,$2,$3,$4,$5,$6,$7) AS id',[key,digest,bytes,'image/png',800,600,keep])).rows[0].id as string
   const sent=(await db.query('SELECT * FROM chat.attachment_commit(p_staging_key=>$1,p_message_id=>$2,p_chat_id=>$3,p_sender_user_id=>$4,p_file_name=>$5,p_to_user_ids=>$6,p_is_whisper=>$7)',
     [key,message,group,sender,'photo.png',whisper?[receiver]:[],whisper])).rows[0]
   return {key,message,blob,digest,bytes,sent}
@@ -72,7 +72,56 @@ beforeEach(async()=>{
 })
 afterEach(async()=>{await db.query('ROLLBACK')})
 
+async function retention(message:string, expectedKeep:string|null) {
+  await service()
+  return (await db.query(`SELECT r.expires_at IS NOT DISTINCT FROM CASE $2::text WHEN 'permanent' THEN NULL
+      WHEN 'temporary' THEN now()+chat.file_temporary_interval(chat.file_transfer_group($3),$4)
+      ELSE NULL END AS matches
+    FROM chat.messages m JOIN chat.file_transfer_storage s ON s.blob_id=COALESCE(m.file_blob_id,chat.workspace_version_blob(m.file_item_id,m.file_version))
+    JOIN chat.file_transfer_storage_refs r ON r.storage_id=s.id
+    WHERE m.id=$1 AND r.chat_id=chat.file_transfer_group($3) AND r.account_id=chat.file_transfer_account($4)`,
+    [message,expectedKeep,group,sender])).rows[0]?.matches
+}
+
 describe('the message is there before its bytes', ()=>{
+  it.each(['temporary','permanent'])('one settle RPC applies %s and accounts for the upload without a later registration', async keep=>{
+    const send=await declaredSend(sha(),60,false,keep)
+    await service()
+    const settled=(await db.query('SELECT chat.file_blob_settle($1,$2,$2,$3,60,$4) AS r',
+      [sender,send.key,send.digest,'image/png'])).rows[0].r
+    expect(settled.status).toBe('ready')
+    expect(await retention(send.message,keep)).toBe(true)
+    expect((await db.query(`SELECT u.blob_id,r.actual_bytes FROM chat.file_transfer_uploads u
+      JOIN chat.file_transfer_reservations r ON r.id=u.reservation_id WHERE u.staging_key=$1`,[send.key])).rows[0])
+      .toEqual({blob_id:settled.blob_id,actual_bytes:'60'})
+  })
+  it('project-image defaults do not replace a declared permanent keep on a repeated registration', async()=>{
+    await service()
+    await db.query('INSERT INTO chat.project_groups(chat_id) VALUES($1)',[group])
+    const send=await declaredSend(sha(),60,false,'permanent')
+    await settle(send.key,send.digest)
+    expect(await retention(send.message,'permanent')).toBe(true)
+  })
+
+  it.each(['temporary','permanent',null])('a declared keep (%s) is applied when its storage reference is registered', async(keep)=>{
+    const send=await declaredSend(sha(),60,false,keep)
+    expect(send.sent).toMatchObject({id:send.message})
+    await settle(send.key,send.digest)
+    expect(await retention(send.message,keep)).toBe(true)
+  })
+  it('a declaration cannot change its keep, including null, and refuses an invalid keep', async()=>{
+    const send=await declaredSend(sha(),60,false,'temporary')
+    await user()
+    for (const keep of ['permanent',null]) {
+      expect((await reject('SELECT chat.attachment_declare($1,$2,60,$3,NULL,NULL,$4)',
+        [send.key,send.digest,'image/png',keep])).hint).toBe('file_transfer_conflict')
+    }
+    expect((await reject('SELECT chat.attachment_declare($1,$2,60,$3,NULL,NULL,$4)',
+      [send.key,send.digest,'image/png','forever'])).hint).toBe('file_transfer_invalid')
+    expect((await db.query('SELECT chat.attachment_declare($1,$2,60,$3,NULL,NULL,$4) AS id',
+      [send.key,send.digest,'image/png','temporary'])).rows[0].id).toBe(send.blob)
+  })
+
   it('the receiver has the message with its attachment pending (name, size, type); nothing signs it yet', async()=>{
     const send=await declaredSend()
     expect(send.sent).toMatchObject({id:send.message,chat_id:group,content_type:'attachment'})
@@ -101,7 +150,7 @@ describe('the message is there before its bytes', ()=>{
     expect(await settle(send.key,send.digest), 'finishing again answers the same').toMatchObject({status:'ready',blob_id:settled.blob_id})
   })
   it.each([false,true])('a lost finish response after settling (quota registered: %s) can finish under fresh upload permits', async(registered)=>{
-    const send=await declaredSend()
+    const send=await declaredSend(sha(),60,false,'temporary')
     await service()
     // Each RPC is a transaction in the Edge function. A 503 can hide a successful settle, or even the whole finish.
     const first=(await db.query('SELECT chat.file_blob_settle($1,$2,$2,$3,60,$4) AS r',
@@ -113,8 +162,9 @@ describe('the message is there before its bytes', ()=>{
       const uploadKey=await permit()
       expect(await settle(send.key,send.digest,60,uploadKey)).toMatchObject({status:'ready',blob_id:first.blob_id,created:false})
       await service()
-      expect((await db.query('SELECT u.blob_id,r.actual_bytes,b.blob_id AS receipt_blob FROM chat.file_transfer_uploads u JOIN chat.file_transfer_reservations r ON r.id=u.reservation_id JOIN chat.file_blob_uploads b USING(staging_key) WHERE u.staging_key=$1',[uploadKey])).rows[0])
-        .toEqual({blob_id:first.blob_id,receipt_blob:first.blob_id,actual_bytes:'60'})
+      expect((await db.query('SELECT u.blob_id,r.actual_bytes,b.blob_id AS receipt_blob,b.keep FROM chat.file_transfer_uploads u JOIN chat.file_transfer_reservations r ON r.id=u.reservation_id JOIN chat.file_blob_uploads b USING(staging_key) WHERE u.staging_key=$1',[uploadKey])).rows[0])
+        .toEqual({blob_id:first.blob_id,receipt_blob:first.blob_id,actual_bytes:'60',keep:'temporary'})
+      expect(await retention(send.message,'temporary')).toBe(true)
       expect(await settle(send.key,send.digest,60,uploadKey), 'the resumed finish itself is repeatable').toMatchObject({status:'ready',blob_id:first.blob_id})
     }
     expect(await resolve(send.message)).toMatchObject({status:'ready',sha256:send.digest})
@@ -146,12 +196,13 @@ describe('the message is there before its bytes', ()=>{
     expect((await db.query('SELECT seq,retracted_at FROM chat.messages_view WHERE id=$1',[send.message])).rows[0]).toMatchObject({retracted_at:null})
   })
   it('a sender that went offline settles it later under a new upload; a pending row past its deadline reads failed until then', async()=>{
-    const send=await declaredSend()
+    const send=await declaredSend(sha(),60,false,'temporary')
     await service()
     await db.query("UPDATE chat.file_blobs SET created_at=now()-interval '25 hours' WHERE id=$1",[send.blob])
     expect(await resolve(send.message), 'the receiver is not left waiting forever').toMatchObject(FAILED)
     const again=await permit()
     expect(await settle(send.key,send.digest,60,again)).toMatchObject({status:'ready'})
+    expect(await retention(send.message,'temporary')).toBe(true)
     expect(await resolve(send.message)).toMatchObject({status:'ready',sha256:send.digest})
   })
   it('a restarted sender finds its own declarations still waiting for bytes, and only those', async()=>{
@@ -199,6 +250,8 @@ describe('the message is there before its bytes', ()=>{
     await user()
     const message=randomUUID()
     await db.query('SELECT * FROM chat.attachment_commit($1,$2,$3,$4,$5)',[key,message,group,sender,'old.png'])
+    await db.query('SELECT chat.file_storage_mark_as($1,$2,$3)',[JSON.stringify([{message_id:message}]),'temporary',sender])
+    expect(await retention(message,'temporary')).toBe(true)
     expect(await resolve(message)).toMatchObject({status:'ready',sha256:digest})
   })
   it('every bucket in use stays allowed, with pending added', async()=>{

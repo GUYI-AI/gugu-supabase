@@ -557,6 +557,20 @@ describe('提交', () => {
 // Owner 11-15: a message is its text and its files' index. A declared commit sends the message before any byte is read;
 // finish hashes the bytes later and settles the declaration (or fails it); the old upload-first commit is unchanged.
 describe('bytes after the message', () => {
+  it.each(['temporary','permanent'])('declared keep %s travels with the declaration, with no fallible mark after the message', async keep => {
+    const f = fakes({ object: null })
+    await expect(handleCommit(f.deps, USER, commitBody({ sha256: 'ab'.repeat(32), size_bytes: 64, keep })))
+      .resolves.toEqual({ id: 'm1', file_version: 1 })
+    expect(f.rpcs.map(r => r.fn)).toEqual(['attachment_declare','attachment_commit'])
+    expect(f.rpcs[0]!.args).toMatchObject({ p_keep: keep })
+  })
+  it('finish ignores the released client keep field and does not issue a separate mark', async () => {
+    const f = fakes({ object: pngBytes() })
+    await expect(handleFinish(f.deps, USER, { staging_key: STAGING, file_name: 'shot.png', message_id: 'm1', keep: 'temporary' }))
+      .resolves.toEqual({ status: 'ready' })
+    expect(f.rpcs.some(r => r.fn === 'file_storage_mark_as')).toBe(false)
+  })
+
   const declared = { sha256: 'ab'.repeat(32), size_bytes: 64, content_type: 'image/png' }
   it('a declared commit sends the message without reading, copying or registering any byte', async () => {
     const f = fakes({ object: null })
@@ -574,7 +588,7 @@ describe('bytes after the message', () => {
     const settle = f.rpcs.find(r => r.fn === 'file_blob_settle')!
     expect(settle.as).toBe('service')
     expect(settle.args).toMatchObject({ p_uploader: USER, p_pending_key: STAGING, p_upload_key: STAGING, p_sha256: createHash('sha256').update(bytes).digest('hex'), p_size_bytes: 64, p_content_type: 'image/png', p_width: 800, p_height: 600 })
-    expect(f.rpcs.some(r => r.fn === 'file_blob_register'), 'a declared attachment settles, it is never registered apart').toBe(false)
+    expect(f.rpcs.some(r => ['file_blob_register', 'file_managed_upload_registered'].includes(r.fn)), 'a declared attachment settles and registers in one RPC').toBe(false)
     const resumed = fakes({ object: bytes }), again = `staging/${USER}/44444444-4444-4444-8444-444444444444`
     await handleFinish(resumed.deps, USER, { staging_key: STAGING, upload_key: again, file_name: 'shot.png', message_id: 'm1' })
     expect(resumed.rpcs.find(r => r.fn === 'file_blob_settle')!.args).toMatchObject({ p_pending_key: STAGING, p_upload_key: again })
