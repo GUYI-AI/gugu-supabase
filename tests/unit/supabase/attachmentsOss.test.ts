@@ -557,6 +557,20 @@ describe('提交', () => {
 // Owner 11-15: a message is its text and its files' index. A declared commit sends the message before any byte is read;
 // finish hashes the bytes later and settles the declaration (or fails it); the old upload-first commit is unchanged.
 describe('bytes after the message', () => {
+  it.each(['temporary','permanent'])('declared keep %s travels with the declaration, with no fallible mark after the message', async keep => {
+    const f = fakes({ object: null })
+    await expect(handleCommit(f.deps, USER, commitBody({ sha256: 'ab'.repeat(32), size_bytes: 64, keep })))
+      .resolves.toEqual({ id: 'm1', file_version: 1 })
+    expect(f.rpcs.map(r => r.fn)).toEqual(['attachment_declare','attachment_commit'])
+    expect(f.rpcs[0]!.args).toMatchObject({ p_keep: keep })
+  })
+  it('finish ignores the released client keep field and does not issue a separate mark', async () => {
+    const f = fakes({ object: pngBytes() })
+    await expect(handleFinish(f.deps, USER, { staging_key: STAGING, file_name: 'shot.png', message_id: 'm1', keep: 'temporary' }))
+      .resolves.toEqual({ status: 'ready' })
+    expect(f.rpcs.some(r => r.fn === 'file_storage_mark_as')).toBe(false)
+  })
+
   const declared = { sha256: 'ab'.repeat(32), size_bytes: 64, content_type: 'image/png' }
   it('a declared commit sends the message without reading, copying or registering any byte', async () => {
     const f = fakes({ object: null })

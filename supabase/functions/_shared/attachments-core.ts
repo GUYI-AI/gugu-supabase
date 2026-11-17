@@ -3,9 +3,9 @@
 // 以调用者身份和以 service_role 调库、Supabase 存储),所以单元测试在 Node 里用假的 OSS 和库跑同一份代码。
 //
 //   POST upload   → A quota-scoped immutable staging upload permit with provider-enforced size and lifetime bounds.
-//   POST commit   → With sha256: declare the pending file, then attachment_commit sends its message before the bytes.
+//   POST commit   → With sha256: declare the pending file and its keep, then attachment_commit sends its message before the bytes.
 //                   Without sha256: hash, promote and register staged bytes before attachment_commit.
-//   POST finish   → Hash and promote bytes, settle the declaration, then register this upload's receipt/quota.
+//   POST finish   → Hash and promote bytes, settle the declaration, then register this upload's receipt/quota and its declared keep.
 //                   Staging stays immutable until permit cleanup; each RPC commits independently.
 //   POST forward  → 以调用者的身份 attachment_forward。
 //   POST share    → 群文件夹里的文件按引用发:文本文件先定成带字节的一版(attachment_document_snapshot),再 attachment_share。
@@ -340,12 +340,12 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
     // An image's width and height ride along, so the place its readers draw while the bytes come is already its size.
     const width = int(body, 'width'), height = int(body, 'height')
     await call(deps.userRpc, 'attachment_declare', { p_staging_key: stagingKey, p_sha256: declared, p_size_bytes: int(body, 'size_bytes'), p_content_type: str(body, 'content_type', false),
-      ...(width != null && height != null ? { p_width: width, p_height: height } : {}) })
+      ...(width != null && height != null ? { p_width: width, p_height: height } : {}), ...(keep ? { p_keep: keep } : {}) })
   }
   else await registerStaged(deps, userId, stagingKey, str(body, 'content_type', false), str(body, 'file_name')!)
   const rows = (await writeFile(deps, 'attachment_commit', commitArgs)) as unknown[]
   const message = rows[0] as { id?: string } | undefined
-  if (message?.id) await keepAs(deps, keep, { message_id: message.id }, commitArgs.p_sender_user_id)
+  if (!declared && message?.id) await keepAs(deps, keep, { message_id: message.id }, commitArgs.p_sender_user_id)
   return message ?? null
 }
 
@@ -357,10 +357,8 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
 export async function handleFinish(deps: AttachmentsDeps, userId: string, body: Record<string, unknown>) {
   const pendingKey = stagingOf(body, userId)
   const uploadKey = body.upload_key == null ? pendingKey : stagingOf({ staging_key: body.upload_key }, userId)
-  const keep = keepOf(body)
+  // Released clients still send keep here; the declaration already owns it.
   await registerStaged(deps, userId, uploadKey, str(body, 'content_type', false), str(body, 'file_name', false) ?? '', { pendingKey })
-  const messageId = str(body, 'message_id', false)
-  if (messageId) await keepAs(deps, keep, { message_id: messageId }, str(body, 'as', false) ?? userId)
   return { status: 'ready' }
 }
 
@@ -371,7 +369,7 @@ export async function handlePending(deps: AttachmentsDeps) {
 
 /**
  * How long the copy that just joined a chat stays (the uploader's 「临时 / 保留」): the same mark the person makes later, applied
- * as they upload. Not given: unchanged. A failure is the request's: the commit is idempotent, so the retry marks it again.
+ * after a legacy upload-first commit or folder placement. Declared sends apply it during registration instead.
  */
 async function keepAs(deps: AttachmentsDeps, keep: Keep, ref: { message_id: string } | { item_id: string }, as: string | null) {
   if (keep) await call(deps.userRpc, 'file_storage_mark_as', { p_refs: [ref], p_action: keep, p_as: as })
