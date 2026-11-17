@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitest/config'
 
 // unit:纯函数与脚本判据,不要库。integration:要一个跑过全部迁移的库(GUGU_INTEGRATION_DATABASE_URL),
-// CI 里由 schema-baseline 那个 job 起;本地用 `pnpm dev:db start` 起。
+// CI and local runs use test:db:start, then test:installation and test:integration (see README.md).
 export default defineConfig({
   test: {
     projects: [

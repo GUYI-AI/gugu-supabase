@@ -2,10 +2,11 @@
 // gugu-supabase 20261016104500_file_blobs、20261016105500_message_file_refs)。依赖从外面传进来(OSS 配置、fetch、
 // 以调用者身份和以 service_role 调库、Supabase 存储),所以单元测试在 Node 里用假的 OSS 和库跑同一份代码。
 //
-//   POST upload   → 一张直传 OSS 的 PostObject 表单:key = staging/<调用者>/<uuid>,25 MiB 由 OSS 管。
-//   POST commit   → 读暂存对象(内网)、自己算 sha256 和类型 → 服务端复制到 <aa>/<sha256>(只复制读到的那一份)
-//                   → 登记(service_role)→ 删暂存 → 以调用者的身份 attachment_commit(放进「附件」、发消息,一个事务;
-//                   带 item_id + expected_version 就是那个文件的下一版)。
+//   POST upload   → A quota-scoped immutable staging upload permit with provider-enforced size and lifetime bounds.
+//   POST commit   → With sha256: declare the pending file, then attachment_commit sends its message before the bytes.
+//                   Without sha256: hash, promote and register staged bytes before attachment_commit.
+//   POST finish   → Hash and promote bytes, settle the declaration, then register this upload's receipt/quota.
+//                   Staging stays immutable until permit cleanup; each RPC commits independently.
 //   POST forward  → 以调用者的身份 attachment_forward。
 //   POST share    → 群文件夹里的文件按引用发:文本文件先定成带字节的一版(attachment_document_snapshot),再 attachment_share。
 //   POST urls     → 以调用者的身份 file_urls_as(条目的某一版,或悄悄话附件那条消息),再签:OSS 的走 CDN 鉴权 A(图片另给缩略图链接),老对象走存储的签名链接。
@@ -487,7 +488,7 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
       await new Promise((r) => setTimeout(r, deps.retryDelayMs ?? 1000))
     }
     // 新建的一行:复制和登记之间,回收可能把同一个 sha 的旧 blob 整个收完(连对象一起删了)。这时上传登记已经引用着
-    // 新的一行,回收领不走它 —— 删暂存之前看一眼,对象不在就再复制一次。
+    // 新的一行,回收领不走它 —— 返回之前看一眼,对象不在就再复制一次。
     if (created && !(await objectStorage(deps).exists(finalKey))) await copy()
     await call(deps.serviceRpc,'file_managed_upload_registered',{p_key:stagingKey,p_user:userId,
       p_document:document.kind === 'document' ? {text:document.text,content_type:document.contentType} : null})
