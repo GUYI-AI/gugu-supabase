@@ -588,7 +588,7 @@ describe('bytes after the message', () => {
     const settle = f.rpcs.find(r => r.fn === 'file_blob_settle')!
     expect(settle.as).toBe('service')
     expect(settle.args).toMatchObject({ p_uploader: USER, p_pending_key: STAGING, p_upload_key: STAGING, p_sha256: createHash('sha256').update(bytes).digest('hex'), p_size_bytes: 64, p_content_type: 'image/png', p_width: 800, p_height: 600 })
-    expect(f.rpcs.some(r => r.fn === 'file_blob_register'), 'a declared attachment settles, it is never registered apart').toBe(false)
+    expect(f.rpcs.some(r => ['file_blob_register', 'file_managed_upload_registered'].includes(r.fn)), 'a declared attachment settles and registers in one RPC').toBe(false)
     const resumed = fakes({ object: bytes }), again = `staging/${USER}/44444444-4444-4444-8444-444444444444`
     await handleFinish(resumed.deps, USER, { staging_key: STAGING, upload_key: again, file_name: 'shot.png', message_id: 'm1' })
     expect(resumed.rpcs.find(r => r.fn === 'file_blob_settle')!.args).toMatchObject({ p_pending_key: STAGING, p_upload_key: again })

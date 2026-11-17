@@ -101,6 +101,8 @@ BEGIN
             RAISE EXCEPTION 'upload % is registered for other content',p_upload_key USING HINT='file_transfer_conflict';
         END IF;
     END IF;
+    -- A ready declaration includes its storage reference, retention and upload accounting in this transaction.
+    PERFORM chat.file_managed_upload_registered(p_upload_key,p_uploader,p_document);
     RETURN jsonb_build_object('status','ready','blob_id',l.id,'object_name',l.object_name,'created',created);
 END $$;
 ALTER FUNCTION chat.file_blob_settle(text,text,text,text,bigint,text,integer,integer,jsonb) OWNER TO postgres;

@@ -84,6 +84,25 @@ async function retention(message:string, expectedKeep:string|null) {
 }
 
 describe('the message is there before its bytes', ()=>{
+  it.each(['temporary','permanent'])('one settle RPC applies %s and accounts for the upload without a later registration', async keep=>{
+    const send=await declaredSend(sha(),60,false,keep)
+    await service()
+    const settled=(await db.query('SELECT chat.file_blob_settle($1,$2,$2,$3,60,$4) AS r',
+      [sender,send.key,send.digest,'image/png'])).rows[0].r
+    expect(settled.status).toBe('ready')
+    expect(await retention(send.message,keep)).toBe(true)
+    expect((await db.query(`SELECT u.blob_id,r.actual_bytes FROM chat.file_transfer_uploads u
+      JOIN chat.file_transfer_reservations r ON r.id=u.reservation_id WHERE u.staging_key=$1`,[send.key])).rows[0])
+      .toEqual({blob_id:settled.blob_id,actual_bytes:'60'})
+  })
+  it('project-image defaults do not replace a declared permanent keep on a repeated registration', async()=>{
+    await service()
+    await db.query('INSERT INTO chat.project_groups(chat_id) VALUES($1)',[group])
+    const send=await declaredSend(sha(),60,false,'permanent')
+    await settle(send.key,send.digest)
+    expect(await retention(send.message,'permanent')).toBe(true)
+  })
+
   it.each(['temporary','permanent',null])('a declared keep (%s) is applied when its storage reference is registered', async(keep)=>{
     const send=await declaredSend(sha(),60,false,keep)
     expect(send.sent).toMatchObject({id:send.message})

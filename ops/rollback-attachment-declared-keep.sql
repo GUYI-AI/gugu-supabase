@@ -1,3 +1,4 @@
+-- Roll back the functions deployment before this SQL; older settle does not register declared uploads itself.
 -- Revert declared retention without changing settled copies or their existing retention.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
