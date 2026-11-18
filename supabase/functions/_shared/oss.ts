@@ -3,7 +3,7 @@
 // edge runtime(Deno)和单元测试(Node)里是同一份代码:
 //   · OSS V4 签名(OSS4-HMAC-SHA256,签名不含 Host:同一个签名走内网、外网端点都能用);
 //   · PostObject 表单(V4 policy):key 定死、大小由 OSS 管 —— 客户端直传,字节不经过库机;
-//   · GET / HEAD / CopyObject / DeleteObject;
+//   · 签好的 GET(交给文件服务流式检查)/ HEAD / CopyObject / DeleteObject;
 //   · CDN 鉴权方式 A(auth_key = 时间戳-随机数-uid-md5),只签路径,所以一次签名原图和缩略图(x-oss-process)都能用;
 //   · 阿里云 OpenAPI V3(ACS3-HMAC-SHA256)调 CDN 的 RefreshObjectCaches。
 // 钥匙只从调用方传进来的配置里读,这里不读环境、不打日志。
@@ -181,6 +181,21 @@ function errorOf(status: number, body: string): OssError {
 }
 
 /** 一次签好名的 OSS 请求。internal = 走同地域内网端点(库机读暂存对象,内网流量不收费)。 */
+/** 签好的一条请求(URL + 头):交给别的进程去发也行(文件服务读暂存对象,见 file-inspection.ts),凭据不出这里。 */
+export async function ossSignedRequest(cfg: OssConfig, req: {
+  method: string
+  key: string
+  headers?: Record<string, string>
+  internal?: boolean
+  query?: Record<string, string>
+  /** Headers bound into the signature besides content-type, content-md5 and x-oss-* (V4 AdditionalHeaders). */
+  additional?: string[]
+}): Promise<{ url: string; headers: Record<string, string> }> {
+  const signed = await ossSign(cfg, { method: req.method, key: req.key, headers: req.headers, query: req.query, additional: req.additional })
+  const endpoint = req.internal ? cfg.endpointInternal : cfg.endpointPublic
+  return { url: `https://${cfg.bucket}.${endpoint}/${uriEncode(objectKey(cfg, req.key), true)}${signed.query ? '?' + signed.query : ''}`, headers: signed.headers }
+}
+
 export async function ossRequest(cfg: OssConfig, fetchFn: FetchLike, req: {
   method: string
   key: string
@@ -188,31 +203,10 @@ export async function ossRequest(cfg: OssConfig, fetchFn: FetchLike, req: {
   body?: BodyInit
   internal?: boolean
   query?: Record<string, string>
+  additional?: string[]
 }): Promise<Response> {
-  const signed = await ossSign(cfg, { method: req.method, key: req.key, headers: req.headers, query: req.query })
-  const endpoint = req.internal ? cfg.endpointInternal : cfg.endpointPublic
-  const url = `https://${cfg.bucket}.${endpoint}/${uriEncode(objectKey(cfg, req.key), true)}${signed.query ? '?' + signed.query : ''}`
-  return fetchFn(url, { method: req.method, headers: signed.headers, body: req.body })
-}
-
-/** 读一个对象的全部字节(上限 limit,多一个字节就停、报错)和它的 ETag。附件最大 25 MiB,整份读进内存。 */
-export async function ossGetBytes(cfg: OssConfig, fetchFn: FetchLike, key: string, opts: { internal?: boolean; limit?: number } = {}): Promise<{ bytes: Uint8Array; etag: string }> {
-  const res = await ossRequest(cfg, fetchFn, { method: 'GET', key, internal: opts.internal, headers: { 'Accept-Encoding': 'identity' } })
-  if (res.status !== 200) throw errorOf(res.status, await res.text())
-  const limit = opts.limit ?? MAX_ATTACHMENT_BYTES
-  const declared = Number(res.headers.get('content-length') ?? 'NaN')
-  if (Number.isFinite(declared) && declared > limit) {
-    await res.body?.cancel()
-    throw new OssError(413, 'EntityTooLarge', `object ${key} is ${declared} bytes, over ${limit}`)
-  }
-  const etag = res.headers.get('etag')
-  if (!etag) {
-    await res.body?.cancel()
-    throw new OssError(502, null, `OSS GET ${key} answered without an ETag`)
-  }
-  const bytes = new Uint8Array(await res.arrayBuffer())
-  if (bytes.length > limit) throw new OssError(413, 'EntityTooLarge', `object ${key} is ${bytes.length} bytes, over ${limit}`)
-  return { bytes, etag }
+  const { url, headers } = await ossSignedRequest(cfg, req)
+  return fetchFn(url, { method: req.method, headers, body: req.body })
 }
 
 /** 对象在不在(200 / 404);别的状态报错。 */

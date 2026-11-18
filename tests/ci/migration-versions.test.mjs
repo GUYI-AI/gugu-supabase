@@ -175,7 +175,7 @@ test('the API gate uses only the base checkout, with candidate tests in another 
 })
 test('the real source probe distinguishes bootstrap, stale events and incomplete trusted files', () => {
   const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
-  const section = workflow.split('      - name: Locate the migration check in the trusted source\n')[1].split('  migration-versions:')[0]
+  const section = workflow.split('      - name: Locate the migration check in the trusted source\n')[1].split(/\n(?=      - )/)[0]
   const command = section.split('        run: |\n')[1]
   for (const mode of ['bootstrap', 'stale-event', 'enforced', 'partial', 'missing-ref']) {
     const temp = mkdtempSync(path.join(os.tmpdir(), 'migration-source-'))

@@ -40,7 +40,6 @@ export async function handleDocumentImport(deps: AttachmentsDeps, body: Record<s
     try {
       if (row.bucket_id === 'oss') {
         const store = objectStorage(deps)
-        if (!store.inspect) throw new Refusal(503, 'not_configured', 'Object inspection is not configured')
         read = await store.inspect(row.object_name, deps.textFiles.maxBytes, deps.textFiles.maxBytes + 1)
       } else {
         const signed = await deps.storageSignedUrl(row.bucket_id, row.object_name, 60)
@@ -59,6 +58,7 @@ export async function handleDocumentImport(deps: AttachmentsDeps, body: Record<s
       // Signing an object that is gone, or the network failing on its bytes, is a read failure too; a configuration
       // refusal is not, and stops the batch.
       const refusal = error instanceof Refusal ? error
+        : error instanceof ObjectStorageError && error.status === 503 ? new Refusal(503, 'not_configured', error.message)
         : new Refusal(502, 'source_unavailable', `Stored bytes could not be read: ${error instanceof Error ? error.message : String(error)}`)
       if (!SKIPPED_READS.has(refusal.code)) throw refusal
       skipped.push({ id: row.id, code: refusal.code, message: `item ${row.id}: ${refusal.message}` })

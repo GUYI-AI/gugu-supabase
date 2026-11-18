@@ -1,12 +1,15 @@
 import { teamAuth } from './team-accounts-auth.ts';
 import { TeamRefusal } from './team-accounts-contract.ts';
 import type { TeamAccountsDependencies } from './team-accounts-core.ts';
-interface Settings { url: string; anonKey: string; serviceKey: string; siteOrigin?: string; fetch?: typeof fetch }
+import { trustedForwardedClientIp, type TrustedForwardedIpConfiguration } from './team-client-ip.ts';
+import type { InvitationMailer } from './team-mail-flow.ts';
+interface Settings { url: string; anonKey: string; serviceKey: string; siteOrigin?: string; fetch?: typeof fetch;
+  clientIpConfiguration?: TrustedForwardedIpConfiguration | null; invitationMailer?: InvitationMailer }
 const REFUSALS: Record<string, number> = {
   unauthenticated: 401, verification_required: 401, verification_expired: 401, invalid_code: 401, original_member_required: 403,
   forbidden: 403, membership_disabled: 403, region_mismatch: 403, team_identity_required: 403,
   not_found: 404, invitation_invalid: 404, version_conflict: 409, idempotency_conflict: 409,
-  invitation_used: 409, invalid_recipient: 409, revocation_pending: 409, rate_limited: 429, invalid_request: 400, dependency_unavailable: 503,
+  invitation_used: 409, invalid_recipient: 409, revocation_pending: 409, rate_limited: 429, invitation_limit_reached: 429, invalid_request: 400, dependency_unavailable: 503,
 };
 export function teamAccountsDependencies(settings: Settings): TeamAccountsDependencies {
   const request = settings.fetch ?? fetch, root = settings.url.replace(/\/+$/, '');
@@ -23,9 +26,10 @@ export function teamAccountsDependencies(settings: Settings): TeamAccountsDepend
     return { ok: response.ok, data: await response.json().catch(() => null) };
   }
   return {
-    auth: teamAuth(settings), siteOrigin,
+    auth: teamAuth(settings), siteOrigin, invitationMailer: settings.invitationMailer,
+    clientIp: request => trustedForwardedClientIp(request, settings.clientIpConfiguration ?? null),
     async rpc(name, args) {
-      if (!['team_email_workflow', 'team_account_read', 'team_account_provision', 'team_account_google', 'team_member_workflow'].includes(name)) throw new TeamRefusal('invalid_request', 400);
+      if (!['team_email_workflow', 'team_account_read', 'team_account_provision', 'team_account_google', 'team_member_workflow', 'team_mail_delivery'].includes(name)) throw new TeamRefusal('invalid_request', 400);
       const response = await call('/rest/v1/rpc/' + name, args);
       if (!response.ok) {
         const hint = typeof response.data?.hint === 'string' ? response.data.hint : '';

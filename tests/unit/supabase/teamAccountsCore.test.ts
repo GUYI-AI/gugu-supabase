@@ -1,17 +1,44 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createTeamAccountsHandler, type TeamAccountsDependencies } from '../../../supabase/functions/_shared/team-accounts-core'
+import { TeamRefusal } from '../../../supabase/functions/_shared/team-accounts-contract'
 const challengeId = '3c939680-61f2-430a-b8e8-b4569cf8a212'
 function fixture() {
   const rpc = vi.fn(), auth = { currentCaller: vi.fn().mockResolvedValue(null), sendEmailCode: vi.fn(), verifyEmailCode: vi.fn(),
     setBan: vi.fn().mockResolvedValue(undefined), revokeSessions: vi.fn().mockResolvedValue(undefined),
-    issueSession: vi.fn(), logout: vi.fn(), createPrincipal: vi.fn() }
-  const deps = { auth, rpc, revokeModel: vi.fn() } as unknown as TeamAccountsDependencies
+    issueSession: vi.fn(), logout: vi.fn(), createPrincipal: vi.fn(), ensureAnchor: vi.fn().mockResolvedValue(true), invitationToken: vi.fn().mockResolvedValue('a'.repeat(64)) }
+  const deps = { auth, rpc, revokeModel: vi.fn(), siteOrigin: 'https://site.example.invalid' } as unknown as TeamAccountsDependencies
   return { handle: createTeamAccountsHandler(deps), rpc, auth }
 }
 const post = (body: unknown) => new Request('https://backend.example.invalid/functions/v1/team-accounts', {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
 })
 describe('team member HTTP authorization boundary', () => {
+  it('distinguishes an uncreated invitation from an uncertain database acknowledgment', async () => {
+    for (const uncertain of [false, true]) {
+      const f = fixture(); f.auth.currentCaller.mockResolvedValue({ id: challengeId, sessionId: challengeId, accountKind: 'team_member' })
+      f.rpc.mockRejectedValue(new TeamRefusal(uncertain ? 'dependency_unavailable' : 'invitation_limit_reached', uncertain ? 503 : 429))
+      const req = post({ action: 'invite', email: 'recipient@example.invalid', role: 'member', idempotency_key: 'original-invitation-key' })
+      req.headers.set('authorization', 'Bearer fixture-user')
+      const response = await f.handle(req), value = await response.json()
+      expect(response.status).toBe(uncertain ? 503 : 429)
+      expect(value.data).toMatchObject({ operation_id: null, invitation_created: uncertain ? null : false,
+        delivery: { state: uncertain ? 'unknown' : 'pending' } })
+      expect(f.auth.ensureAnchor).not.toHaveBeenCalled()
+    }
+  })
+  it('keeps the original operation receipt after creation even when token binding fails', async () => {
+    const f = fixture(); f.auth.currentCaller.mockResolvedValue({ id: challengeId, sessionId: challengeId, accountKind: 'team_member' })
+    f.rpc.mockImplementation(async (_name, args) => {
+      if (args.p_action === 'bind_invitation') throw new TeamRefusal('dependency_unavailable', 503)
+      return { invitation_id: challengeId, operation_id: challengeId, seed: challengeId, region: 'cn' }
+    })
+    const req = post({ action: 'invite', email: 'recipient@example.invalid', role: 'member', idempotency_key: 'original-invitation-key' })
+    req.headers.set('authorization', 'Bearer fixture-user')
+    const response = await f.handle(req), value = await response.json()
+    expect(response.status).toBe(503)
+    expect(value.data).toMatchObject({ operation_id: challengeId, invitation_id: challengeId, invitation_created: true, delivery: { state: 'pending' } })
+    expect(value.data).not.toHaveProperty('invitation_url'); expect(f.auth.ensureAnchor).not.toHaveBeenCalled()
+  })
   it('does not reach a server RPC for an anonymous directory read', async () => {
     const f = fixture(), response = await f.handle(new Request('https://backend.example.invalid/functions/v1/team-accounts?action=directory'))
     expect(response.status).toBe(401); expect(f.rpc).not.toHaveBeenCalled()
@@ -24,7 +51,9 @@ describe('team member HTTP authorization boundary', () => {
     }
   })
   it('returns only safe challenge fields instead of forwarding the server email and lease', async () => {
-    const f = fixture(); f.rpc.mockResolvedValue({ challenge_id: challengeId, expires_at: '2026-11-15T02:00:00Z', email: 'private@example.invalid', lease_token: 'private-lease' })
+    const f = fixture(); f.rpc.mockImplementation(async (name, args) => name === 'team_mail_delivery'
+      ? { delivery_id: challengeId, state: args.p_action === 'claim' ? 'sending' : 'accepted', claimed: args.p_action === 'claim', lease_token: 'private-mail-lease' }
+      : { challenge_id: challengeId, expires_at: '2026-11-15T02:00:00Z', email: 'private@example.invalid', lease_token: 'private-lease' })
     f.auth.sendEmailCode.mockResolvedValue(true)
     const response = await f.handle(post({ action: 'email_challenge', email: 'private@example.invalid', purpose: 'create' }))
     expect(response.status).toBe(200)
@@ -32,7 +61,9 @@ describe('team member HTTP authorization boundary', () => {
     expect(JSON.stringify(value)).not.toContain('private@example.invalid'); expect(JSON.stringify(value)).not.toContain('private-lease')
   })
   it('records a failed official send without pretending an email was delivered', async () => {
-    const f = fixture(); f.rpc.mockResolvedValue({ challenge_id: challengeId, email: 'private@example.invalid' }); f.auth.sendEmailCode.mockResolvedValue(false)
+    const f = fixture(); f.rpc.mockImplementation(async name => name === 'team_mail_delivery'
+      ? { delivery_id: challengeId, state: 'sending', claimed: true, lease_token: 'private-mail-lease' }
+      : { challenge_id: challengeId, email: 'private@example.invalid' }); f.auth.sendEmailCode.mockResolvedValue(false)
     const response = await f.handle(post({ action: 'email_challenge', email: 'private@example.invalid', purpose: 'create' }))
     expect(response.status).toBe(503)
     expect(f.rpc).toHaveBeenLastCalledWith('team_email_workflow', { p_action: 'sent', p_input: { challenge_id: challengeId, sent: false } })
