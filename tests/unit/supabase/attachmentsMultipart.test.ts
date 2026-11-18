@@ -85,7 +85,9 @@ function fakes(opts: { prefix?: string; size?: number; expired?: boolean; blob?:
       return { data: null, error: null }
     }
     if (fn === 'file_managed_upload_parts_claim') return { data: opts.expired && row.upload_id ? [{ staging_key: KEY, account_id: USER, upload_id: row.upload_id }] : [], error: null }
-    if (fn === 'file_blob_gc_claim') return { data: [], error: null }
+    if (fn === 'file_blob_gc_run_begin') return { data: { acquired: true, token: '11111111-1111-4111-8111-111111111111', batch_limit: 50, concurrency: 1 }, error: null }
+    if (fn === 'file_blob_gc_run_renew' || fn === 'file_blob_gc_run_end') return { data: true, error: null }
+    if (fn === 'file_blob_gc_run_claim') return { data: [], error: null }
     return { data: null, error: null }
   }
   const userRpc = async (fn: string, args: Record<string, unknown>) => {
@@ -300,7 +302,7 @@ describe('verified staging cleanup', () => {
       receipts.push(args)
       return { data: null, error: null }
     }
-    const result = await sweepManagedUploads(f.deps, { kind: 'oss', oss, cdn: CDN }, '', false, [ID])
+    const result = await sweepManagedUploads(f.deps, { kind: 'oss', oss, cdn: CDN }, '', { ids: [ID] }, { remaining: 5, guard: async () => {} })
     const held = state === 'untracked' || state === 'bucket missing'
     expect(result.failed).toEqual(held ? [ID] : [])
     expect(receipts).toEqual(held ? [] : [{p_key:KEY,p_evidence:'sweep:'+ID+':test-window'}])

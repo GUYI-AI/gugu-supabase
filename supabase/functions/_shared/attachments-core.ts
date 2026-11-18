@@ -597,11 +597,15 @@ interface Claimed {
 }
 
 /** Multipart uploads whose permit expired are abandoned in the store, then forgotten; a failure is tried again in a later round. */
-async function abandonExpiredParts(deps: AttachmentsDeps) {
+async function abandonExpiredParts(deps: AttachmentsDeps, remaining: number, guard: () => Promise<void>) {
+  if (remaining === 0) return 0
   const parts = objectStorage(deps).parts
-  if (!parts) return
-  const stale = ((await call(deps.serviceRpc, 'file_managed_upload_parts_claim', { p_limit: 50 })) ?? []) as Array<{ staging_key: string; account_id: string; upload_id: string }>
+  if (!parts) return 0
+  await guard()
+  const stale = ((await call(deps.serviceRpc, 'file_managed_upload_parts_claim', { p_limit: remaining })) ?? []) as Array<{ staging_key: string; account_id: string; upload_id: string }>
+  if (!Array.isArray(stale) || stale.length > remaining) throw new Refusal(503, 'not_configured', 'Multipart GC claim exceeds its bound')
   for (const row of stale) {
+    await guard()
     try {
       await parts.abandon(row.staging_key, row.upload_id)
       await call(deps.serviceRpc, 'file_managed_upload_parts_clear', { p_key: row.staging_key, p_user: row.account_id, p_upload_id: row.upload_id })
@@ -609,21 +613,45 @@ async function abandonExpiredParts(deps: AttachmentsDeps) {
       deps.log('gc_abandon_failed', { key: row.staging_key, error: String(error) })
     }
   }
+  return stale.length
 }
 
-export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-accept' = 'kick') {
+export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-accept' | 'staging' = 'kick',
+  sweepStaging?: (remaining: number, guard: () => Promise<void>) => Promise<void>) {
   const result = { claimed: 0, deleted: 0, failed: 0 }
   let claimedCount: number | null = null
   let removed = 0
   let completed = false
+  let token: string | null = null
   try {
+    const run = await call(deps.serviceRpc, 'file_blob_gc_run_begin', {}) as
+      { acquired: boolean; token?: string; batch_limit: number; concurrency: number }
+    if (!run || typeof run.acquired !== 'boolean' || ![5, 50].includes(run.batch_limit) || run.concurrency !== 1) {
+      throw new Refusal(503, 'not_configured', 'Attachment GC control is unavailable')
+    }
+    if (!run.acquired) { claimedCount = 0; completed = true; return result }
+    if (typeof run.token !== 'string' || !UUID.test(run.token)) throw new Refusal(503, 'not_configured', 'Invalid GC consumer receipt')
+    token = run.token
+    const guard = async () => {
+      if (await call(deps.serviceRpc, 'file_blob_gc_run_renew', { p_token: token }) !== true) {
+        throw new Refusal(503, 'not_configured', 'Attachment GC consumer is no longer permitted')
+      }
+    }
+    if (entry === 'staging') {
+      claimedCount = 0
+      if (!sweepStaging) throw new Error('Missing staging collector')
+      await sweepStaging(run.batch_limit, guard)
+      completed = true
+      return result
+    }
     await call(deps.serviceRpc, 'file_temporary_expire', { p_limit: 500 })
     await call(deps.serviceRpc, 'file_transfer_expire', { p_limit: 500 })
-    await abandonExpiredParts(deps)
-    const claimed = ((await call(deps.serviceRpc, 'file_blob_gc_claim', { p_limit: 50, p_stale_seconds: 600 })) ?? []) as Claimed[]
+    const claimed = ((await call(deps.serviceRpc, 'file_blob_gc_run_claim', { p_token: token })) ?? []) as Claimed[]
+    if (!Array.isArray(claimed) || claimed.length > run.batch_limit) throw new Refusal(503, 'not_configured', 'Attachment GC claim exceeds its bound')
     result.claimed = claimed.length
     claimedCount = claimed.length
     for (const job of claimed) {
+      await guard()
       try {
         // A declaration whose bytes never came (pending): its staging object, if any, is the provider's to expire.
         if (job.bucket_id === 'pending') {
@@ -647,9 +675,18 @@ export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-acce
           .catch((e) => deps.log('gc_fail_report_failed', { blob: job.blob_id, error: String(e) }))
       }
     }
+    // Staging cleanup shares the same lease and remaining server-side budget.
+    // A disabled or busy collector cannot delete via this second path either.
+    const remaining = run.batch_limit - claimed.length
+    const abandoned = await abandonExpiredParts(deps, remaining, guard)
+    if (sweepStaging && remaining > abandoned) await sweepStaging(remaining - abandoned, guard)
     completed = true
     return result
   } finally {
+    if (token) {
+      try { await call(deps.serviceRpc, 'file_blob_gc_run_end', { p_token: token }) }
+      catch { try { deps.log('gc_release_failed', { entry }) } catch { /* Keep the original outcome. */ } }
+    }
     try {
       const at = deps.now().toISOString()
       // Removal may succeed even when its database confirmation fails. Keep both counts without changing the API result.

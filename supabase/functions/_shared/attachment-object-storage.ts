@@ -39,9 +39,13 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
     },
     exists: (key) => ossExists(oss, fetch, key),
     remove: (key) => ossDelete(oss, fetch, key),
-    removeStaging: async (key, uploadId) => {
+    removeStaging: async (key, uploadId, guard) => {
       await requireUnversioned()
-      if (uploadId) await store.parts!.abandon(key, uploadId)
+      if (uploadId) {
+        await guard()
+        await store.parts!.abandon(key, uploadId)
+      }
+      await guard()
       await store.remove(key)
       if (await store.exists(key)) throw new Error('Staging object still exists')
       // HEAD has no error body. Require the object-level code before treating a 404 as absence.
@@ -236,8 +240,9 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
       await check(response)
       await response.body?.cancel()
     },
-    removeStaging: async (key, uploadId) => {
+    removeStaging: async (key, uploadId, guard) => {
       if (uploadId !== null) throw new Error('Unexpected multipart ID for Supabase Storage')
+      await guard()
       await store.remove(key)
       const url = objectUrl(key)
       const head = await request(url, { method: 'HEAD' })

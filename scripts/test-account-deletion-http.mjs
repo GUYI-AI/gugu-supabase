@@ -102,17 +102,20 @@ try {
   await db.query('INSERT INTO public.deletion_failure_fixture VALUES($1)', [failed.id])
   stage = 'failure_rollback'
   const rejection = await call('confirm', failed.token, fp)
-  assert(rejection.status === 503 && !await gone(failed), 'failure_rollback_readback')
+  assert(rejection.status === 202 && rejection.data.request?.state === 'processing' && !await gone(failed), 'failure_unresolved_readback')
   const reuse = await auth('/verify', 'POST', anon, { type: 'email', email: failed.email, token: fp.code })
   assert(reuse.status !== 200, 'official_otp_replay_rejected')
   assert((await db.query('SELECT count(*)::int n FROM auth.sessions WHERE user_id=$1', [failed.id])).rows[0].n === 1, 'temporary_verification_session_revoked')
   assert((await db.query('SELECT user_id FROM account_deletion_private.requests WHERE id=$1', [fp.request_id])).rows[0].user_id === failed.id, 'workflow_identity_rollback')
   await db.query('DROP TRIGGER zz_deletion_failure_fixture ON auth.users;DROP FUNCTION public.deletion_failure_fixture();DROP TABLE public.deletion_failure_fixture;')
-  const retryBegan = performance.now(), retried = await call('retry', failed.token, fp)
-  assert(retried.status === 200 && await gone(failed), 'retry_readback')
-  evidence.cases.push({ case: 'failure_retry', real_auth_failure: true, rollback_preserved_account: true,
-    official_otp_replay_rejected: true, temporary_session_revoked: true, retry_deleted: true,
-    retry_to_absent_ms: +(performance.now() - retryBegan).toFixed(3) })
+  const retried = await call('retry', failed.token, fp)
+  assert(retried.status === 409 && !await gone(failed), 'uncertain_retry_refused')
+  // Fixture cleanup is explicit and separate from the product's retry protocol.
+  assert((await auth('/admin/users/' + failed.id, 'DELETE', service, { should_soft_delete: false })).status === 200, 'fixture_cleanup')
+  assert((await call('result', null, fp)).data.request?.state === 'deleted', 'late_absence_reconciled')
+  evidence.cases.push({ case: 'failure_unresolved', real_auth_failure: true, rollback_preserved_account: true,
+    official_otp_replay_rejected: true, temporary_session_revoked: true, uncertain_retry_refused: true,
+    separate_fixture_cleanup_reconciled: true })
   evidence.ok = true
 } catch {
   evidence.failed_stage = stage; process.exitCode = 1

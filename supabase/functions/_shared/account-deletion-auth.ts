@@ -58,16 +58,16 @@ export function accountDeletionDependencies(settings: Settings): DeletionDepende
       const before = await exists(id);
       if (before === 'absent') return 'absent';
       if (before === 'unknown') return 'unknown';
-      let definite = false;
       try {
         await call('/auth/v1/admin/users/' + encodeURIComponent(id), 'DELETE', settings.serviceKey,
           settings.serviceKey, { should_soft_delete: false }, 20_000);
-        definite = true;
       } catch { /* an uncertain outcome is reconciled without an overlapping retry */ }
       const after = await exists(id);
       if (after === 'absent') return 'absent';
-      if (!definite || after === 'unknown') return 'unknown';
-      return 'failed';
+      // A completed HTTP response (including a gateway error), and an account
+      // that is still present, do not prove the DELETE transaction terminated.
+      // No current transport response authorizes a second destructive attempt.
+      return 'unknown';
     },
   };
 }

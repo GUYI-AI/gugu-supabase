@@ -93,7 +93,7 @@ END $replay$;
 
 -- The existing cron kick also needs to wake the HTTP collector when only staging is due.
 DO $kick$
-DECLARE definition text; step text:='IF NOT EXISTS (SELECT 1 FROM chat.file_blob_gc g';
+DECLARE definition text; step text:='IF NOT EXISTS(SELECT 1 FROM chat.file_blob_gc WHERE status IN';
 BEGIN
     SELECT pg_get_functiondef('chat.file_blob_gc_kick()'::regprocedure) INTO definition;
     IF strpos(definition,step)=0 THEN RAISE EXCEPTION 'Missing GC kick predecessor'; END IF;
@@ -101,6 +101,6 @@ BEGIN
         SELECT 1 FROM chat.file_transfer_limits l CROSS JOIN LATERAL
             chat.file_managed_upload_closable(l.settings->'upload_closure'->'namespace',1) c
         WHERE l.scope='global' AND l.scope_id='*' AND l.settings->'upload_closure'->'periodic'='true'::jsonb)
-       AND NOT EXISTS (SELECT 1 FROM chat.file_blob_gc g$new$);
+       AND NOT EXISTS(SELECT 1 FROM chat.file_blob_gc WHERE status IN$new$);
 END $kick$;
 NOTIFY pgrst,'reload schema';

@@ -25,6 +25,7 @@ import { type AttachmentStorageConfig, attachmentStorageConfig, StorageConfigErr
 import { handleUsageImport,handleStorageInventory,handleFileResolve } from '../_shared/file-transfer-core.ts'
 import { handleProjectFiles } from '../_shared/project-file-transfer-core.ts'
 import { sweepManagedUploads } from '../_shared/upload-closure.ts'
+import { configureAttachmentGc } from '../_shared/attachment-gc-config.ts'
 import { ossDirectSigner } from '../_shared/oss-direct-url.ts'
 import { fileServiceInspector } from '../_shared/file-inspection.ts'
 import { handleDocumentImport, WORKSPACE_TEXT_MAX_BYTES, workspaceUploadKind } from '../_shared/document-import-core.ts'
@@ -151,6 +152,18 @@ Deno.serve(async (request) => {
   const authorization = request.headers.get('Authorization') ?? ''
   try {
     const deps = depsFor(authorization, storage)
+    if (route === 'gc-configure' || route === 'gc-status') {
+      if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY'))) {
+        return json({ error: 'denied', message: 'GC configuration is restricted to the service' }, 401)
+      }
+      if (route === 'gc-configure') {
+        return json({ gc: await configureAttachmentGc(deps.serviceRpc, env('SUPABASE_URL'),
+          env('SUPABASE_SERVICE_ROLE_KEY'), await request.json()) })
+      }
+      const { data, error } = await deps.serviceRpc('file_blob_gc_control_status', {})
+      if (error) throw new Refusal(500, 'failed', 'Attachment GC status is unavailable')
+      return json({ gc: data })
+    }
     if (route === 'usage-import'||route==='storage-inventory'||route==='document-import') {
       if (!sameSecret(authorization.replace(/^Bearer\s+/i,''),env('SUPABASE_SERVICE_ROLE_KEY'))) {
         return json({error:'denied',message:'Usage ingestion is restricted to the service'},401)
@@ -171,30 +184,38 @@ Deno.serve(async (request) => {
         throw new Refusal(400, 'invalid', 'Expected a GC options object')
       }
       const project = env('GUGU_PUBLIC_SUPABASE_URL') || env('SUPABASE_URL')
-      if (Object.keys(options).length) {
+      let managed: Awaited<ReturnType<typeof sweepManagedUploads>> | undefined
+      // A legacy kick may contain a suggested limit; the database always sets its budget.
+      if (Object.keys(options).some(key => key !== 'limit')) {
         if (options.scope !== 'staging' || !['report', 'apply'].includes(options.mode)) {
           throw new Refusal(400, 'invalid', 'Specify report or apply for staging cleanup')
         }
-        if (options.mode === 'apply' && (!Array.isArray(options.ids) || !options.ids.length
-          || typeof options.run !== 'string' || typeof options.evidence !== 'string')) {
+        if (options.mode === 'report') return json(await sweepManagedUploads(deps, storage, project, options))
+        if (!Array.isArray(options.ids) || !options.ids.length || typeof options.run !== 'string' || typeof options.evidence !== 'string') {
           throw new Refusal(400, 'invalid', 'Apply requires the backed-up IDs, run UUID and proof reference')
         }
-        return json(await sweepManagedUploads(deps, storage, project, options.mode === 'report', options.ids, options.limit, options.run, options.evidence))
+        await handleGc(deps, 'staging', async (remaining, guard) => {
+          managed = await sweepManagedUploads(deps, storage, project, options, { remaining, guard })
+        })
+        if (!managed) throw new Refusal(409, 'gc_unavailable', 'Attachment GC is disabled or already running')
+        return json(managed)
       }
-      const result = await handleGc(deps, 'kick')
-      const managed = await sweepManagedUploads(deps, storage, project, false)
-      // The legacy staging query below reads the Supabase Storage catalog.
-      if (storage.kind === 'oss') return json({ ...result, managed, staging_deleted: 0 })
-      const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })
-      const bucket = storage.bucket
-      const { data: expired, error: expiredError } = await service.rpc('attachment_expired_staging', { p_bucket: bucket })
-      if (expiredError) throw new Error('Could not list expired staging uploads')
-      const names = ((expired ?? []) as Array<{ name: string }>).map((row) => row.name)
-      if (names.length) {
-        const { error } = await service.storage.from(bucket).remove(names)
-        if (error) throw new Error('Could not remove expired staging uploads')
-      }
-      return json({ ...result, managed, staging_deleted: names.length })
+      let stagingDeleted = 0
+      const result = await handleGc(deps, 'kick', async (remaining, guard) => {
+        managed = await sweepManagedUploads(deps, storage, project, {}, { remaining, guard })
+        const legacyLimit = remaining - managed.selected
+        if (storage.kind === 'oss' || legacyLimit === 0) return
+        const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })
+        const { data: expired, error } = await service.rpc('attachment_expired_staging', { p_bucket: storage.bucket })
+        if (error) throw new Error('Could not list expired staging uploads')
+        for (const row of ((expired ?? []) as Array<{ name: string }>).slice(0, legacyLimit)) {
+          await guard()
+          const { error } = await service.storage.from(storage.bucket).remove([row.name])
+          if (error) throw new Error('Could not remove expired staging uploads')
+          stagingDeleted++
+        }
+      })
+      return json({ ...result, ...(managed && { managed }), staging_deleted: stagingDeleted })
     }
     // PostgREST checks the JWT's signature and expiry; the RPC checks that its session still exists and the account is
     // neither banned nor deleted. That is what Auth's getUser answered, without a second server round trip per call.

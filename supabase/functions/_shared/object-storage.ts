@@ -47,7 +47,7 @@ export interface AttachmentObjectStorage {
   exists(key: string): Promise<boolean>
   remove(key: string): Promise<void>
   /** After provider finality, abort the recorded upload, remove staging and verify origin absence. */
-  removeStaging?(key: string, uploadId: string | null): Promise<void>
+  removeStaging?(key: string, uploadId: string | null, guard: () => Promise<void>): Promise<void>
   sign(key: string, image: boolean, now: Date, permit?: DownloadPermit): Promise<{ url: string; thumbUrl: string | null; expiresAt: string; originAvailable?: boolean }>
   invalidate(key: string, image: boolean): Promise<void>
   /** Only a store that can sign each part has this; the others are always uploaded in one request. */
