@@ -85,6 +85,8 @@ The existing blob GC remains the single final-object deletion path. It confirms 
 
 The service-only `attachments/gc` route reconciles staging through `file_managed_upload_closed`. Its selector matches reservation ID, uploader, subject and staging key. Both registered uploads and abandoned uploads can qualify. Registration receipts, message references, final objects and their actual-byte charges remain available.
 
+After cleanup, a repeated finish can answer an existing ready declaration while its original seven-day receipt is valid. It checks the declared key and uploader, the requested upload key and reservation identity, and the registered final blob. The durable upload ledger survives expiry of a successor's one-hour receipt. Separate sends of identical bytes can share a final blob. Reading the existing result preserves each message, its charges and its retention. Once the original receipt expires or is swept, these keys can no longer confirm the declaration.
+
 ### Establishing the closure boundary
 
 By default both physical providers retain the reservation. To enable cleanup, a storage operator records one verified issuance window under `upload_closure` in the global transfer settings. Store the supporting evidence in a protected operations record. The settings contain its short nonsecret reference. Historical deployments sharing logical keys require an independently established mapping to the same origin, bucket and prefix for the entire issuance window, including retries. Keep each window on its verified namespace throughout execution.

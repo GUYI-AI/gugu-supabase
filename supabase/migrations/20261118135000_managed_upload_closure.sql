@@ -69,19 +69,23 @@ BEGIN
     EXECUTE replace(definition,step,'UPDATE chat.file_transfer_uploads SET staging_deleted=true,close_evidence=p_evidence WHERE staging_key=p_key AND NOT staging_deleted;');
 END $update$;
 
--- A successful finish may be retried after staging has been removed. Only an existing
--- pair of receipts for the same verified blob can answer without inspecting bytes again.
+-- The original declaration outlives a successor's temporary blob receipt. Its ready
+-- blob and the registered upload ledger can answer a finish replay after cleanup.
 DO $replay$
-DECLARE definition text; step text:='IF p.bucket_id<>''pending'' THEN';
+DECLARE definition text; step text:='IF NOT FOUND THEN RAISE EXCEPTION ''no declared upload %'',p_pending_key';
 BEGIN
     SELECT pg_get_functiondef('chat.file_blob_settle(text,text,text,text,bigint,text,integer,integer,jsonb)'::regprocedure) INTO definition;
     IF strpos(definition,step)=0 THEN RAISE EXCEPTION 'Missing declared upload settle predecessor'; END IF;
     EXECUTE replace(definition,step,$new$IF p_sha256 IS NULL AND p_size_bytes IS NULL THEN
-        IF p.bucket_id='oss' AND EXISTS (
-            SELECT 1 FROM chat.file_transfer_uploads u JOIN chat.file_blob_uploads r
-              ON r.staging_key=u.staging_key AND r.uploader=u.account_id AND r.blob_id=u.blob_id
-            WHERE u.staging_key=p_upload_key AND u.account_id=p_uploader AND u.blob_id=p.id)
-        THEN RETURN jsonb_build_object('status','ready','blob_id',p.id,'created',false); END IF;
+        IF receipt.expires_at>now() AND EXISTS (
+            SELECT 1 FROM chat.file_transfer_uploads u
+            JOIN chat.file_transfer_reservations r ON r.id=u.reservation_id
+            JOIN chat.file_blobs b ON b.id=u.blob_id
+            WHERE u.staging_key=p_upload_key AND u.account_id=p_uploader AND u.staging_deleted
+              AND r.kind='upload' AND r.account_id=u.account_id AND r.subject=u.staging_key
+              AND u.staging_key='staging/'||p_uploader||'/'||r.id::text
+              AND b.bucket_id='oss' AND b.id=receipt.blob_id)
+        THEN RETURN jsonb_build_object('status','ready','blob_id',receipt.blob_id,'created',false); END IF;
         RAISE EXCEPTION 'No matching completed upload receipts' USING HINT='file_transfer_conflict';
     END IF;
     $new$||step);
