@@ -32,17 +32,3 @@ it('cannot delete staging or claim objects while disabled, regardless of HTTP bo
   expect(fixture.rpc).toHaveBeenCalledExactlyOnceWith('file_blob_gc_run_begin', {})
   expect(fixture.remove).not.toHaveBeenCalled()
 })
-
-it('reports managed staging while disabled and rejects an explicit apply without an admitted run', async () => {
-  const id = '1edd91d8-86b6-4d0c-92b0-a01131dce334'
-  fixture.rpc.mockImplementation(async (name: string) => ({
-    data: name === 'file_managed_upload_closable' ? [] : { acquired: false, batch_limit: 5, concurrency: 1 }, error: null,
-  }))
-  const opts = { scope: 'staging', ids: [id], run: id, evidence: 'verified', limit: 500 }
-  expect((await fixture.handler!(request('gc', { ...opts, mode: 'report' }))).status).toBe(200)
-  const refused = await fixture.handler!(request('gc', { ...opts, mode: 'apply' }))
-  expect(refused.status).toBe(409)
-  expect((await refused.json()).error).toBe('gc_unavailable')
-  expect(fixture.rpc.mock.calls.map(([name]) => name)).toEqual(['file_managed_upload_closable', 'file_blob_gc_run_begin'])
-  expect(fixture.remove).not.toHaveBeenCalled()
-})

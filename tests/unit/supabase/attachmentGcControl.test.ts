@@ -14,22 +14,11 @@ function fixture(acquired = true, count = 5) {
   const deps = { serviceRpc, storageRemove: remove, objects: {}, now: () => new Date('2026-11-14T00:00:00Z'), log: vi.fn() } as unknown as AttachmentsDeps
   return { deps, serviceRpc, remove, maxActive: () => maxActive }
 }
-it.each(['kick', 'file-accept', 'staging'] as const)('keeps the %s entry and staging cleanup closed when no consumer is admitted', async entry => {
+it.each(['kick', 'file-accept'] as const)('keeps the %s entry and staging cleanup closed when no consumer is admitted', async entry => {
   const f = fixture(false), staging = vi.fn()
   expect(await handleGc(f.deps, entry, staging)).toEqual({ claimed: 0, deleted: 0, failed: 0 })
   expect(f.serviceRpc.mock.calls.map(([fn]) => fn)).toEqual(['file_blob_gc_run_begin'])
   expect(f.remove).not.toHaveBeenCalled(); expect(staging).not.toHaveBeenCalled()
-})
-it('runs an explicit staging batch under the shared lease without expiring or claiming final objects', async () => {
-  const f = fixture()
-  const sweep = vi.fn(async (remaining: number, guard: () => Promise<void>) => {
-    expect(remaining).toBe(5)
-    await guard()
-  })
-  await handleGc(f.deps, 'staging', sweep)
-  expect(sweep).toHaveBeenCalledOnce()
-  expect(f.serviceRpc.mock.calls.map(([fn]) => fn)).toEqual(['file_blob_gc_run_begin', 'file_blob_gc_run_renew', 'file_blob_gc_run_end'])
-  expect(f.remove).not.toHaveBeenCalled()
 })
 it('uses the database-owned bound and deletes sequentially under one consumer token', async () => {
   const f = fixture(), staging = vi.fn()

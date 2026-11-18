@@ -33,7 +33,7 @@ export interface DbError {
   /** The HTTP status PostgREST answered with; 0 when the request never reached it. */
   status?: number
 }
-export type Rpc = (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: DbError | null }>
+export type Rpc = (fn: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<{ data: unknown; error: DbError | null }>
 
 export interface AttachmentsDeps {
   /** The same classifier used for local files and App data, pinned by the Edge entry point. */
@@ -421,7 +421,7 @@ function stagingOf(body: Record<string, unknown>, userId: string): string {
 
 /** 暂存的字节:算哈希、存进 OSS 的最终位置、登记成 blob(提交和放进文件夹共用)。暂存已经没了 ⇒ 交给库认上一次的登记。 */
 async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey: string, declaredType: string | null, fileName: string, settle?: { pendingKey: string }) {
-  const permit=await call(deps.serviceRpc,'file_managed_upload_for',{p_key:stagingKey,p_user:userId}) as { max_bytes:number; blob_id?:string|null; staging_deleted?:boolean }
+  const permit=await call(deps.serviceRpc,'file_managed_upload_for',{p_key:stagingKey,p_user:userId}) as { max_bytes:number; blob_id?:string | null; staging_deleted?:boolean }
   if (settle && permit.blob_id && permit.staging_deleted) {
     await call(deps.serviceRpc, 'file_blob_settle', {
       p_uploader: userId, p_pending_key: settle.pendingKey, p_upload_key: stagingKey,
@@ -616,7 +616,7 @@ async function abandonExpiredParts(deps: AttachmentsDeps, remaining: number, gua
   return stale.length
 }
 
-export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-accept' | 'staging' = 'kick',
+export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-accept' = 'kick',
   sweepStaging?: (remaining: number, guard: () => Promise<void>) => Promise<void>) {
   const result = { claimed: 0, deleted: 0, failed: 0 }
   let claimedCount: number | null = null
@@ -636,13 +636,6 @@ export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-acce
       if (await call(deps.serviceRpc, 'file_blob_gc_run_renew', { p_token: token }) !== true) {
         throw new Refusal(503, 'not_configured', 'Attachment GC consumer is no longer permitted')
       }
-    }
-    if (entry === 'staging') {
-      claimedCount = 0
-      if (!sweepStaging) throw new Error('Missing staging collector')
-      await sweepStaging(run.batch_limit, guard)
-      completed = true
-      return result
     }
     await call(deps.serviceRpc, 'file_temporary_expire', { p_limit: 500 })
     await call(deps.serviceRpc, 'file_transfer_expire', { p_limit: 500 })

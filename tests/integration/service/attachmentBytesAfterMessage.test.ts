@@ -184,9 +184,9 @@ describe('the message is there before its bytes', ()=>{
     const blob=(await settle(first.key,first.digest)).blob_id
     expect((await settle(second.key,second.digest)).blob_id).toBe(blob)
     await service()
-    const replay='SELECT chat.file_blob_settle($1,$2,$3,NULL,NULL,NULL) AS r', args=[sender,first.key,second.key]
+    const replay='SELECT chat.file_blob_settle($1,$2,$3,NULL,NULL,NULL) AS r', args=[sender,first.key,first.key]
     expect((await reject(replay,args)).hint).toBe('file_transfer_conflict')
-    await db.query("SELECT chat.file_managed_upload_closed($1,'isolated-cleanup')",[second.key])
+    for (const key of [first.key,second.key]) await db.query("SELECT chat.file_managed_upload_closed($1,'isolated-cleanup')",[key])
     const snapshot=async()=>(await db.query(`SELECT
       (SELECT jsonb_agg(r ORDER BY r.id) FROM chat.file_transfer_reservations r WHERE r.subject=ANY($1)) AS reservations,
       (SELECT jsonb_agg(u ORDER BY u.staging_key) FROM chat.file_transfer_uploads u WHERE u.staging_key=ANY($1)) AS uploads,
@@ -196,6 +196,7 @@ describe('the message is there before its bytes', ()=>{
     [[first.key,second.key],blob])).rows[0]
     const before=await snapshot()
     expect((await db.query(replay,args)).rows[0].r).toMatchObject({status:'ready',blob_id:blob})
+    expect((await reject(replay,[sender,first.key,second.key])).hint).toBe('file_transfer_conflict')
     expect((await reject(replay,[outsider,first.key,second.key])).hint).toBe('file_transfer_conflict')
     expect(await snapshot()).toEqual(before)
     for (const message of [first.message,second.message]) expect(await resolve(message)).toMatchObject({status:'ready',sha256:first.digest})

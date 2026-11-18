@@ -3,7 +3,7 @@
 // a part whose length differs from its signature 403, complete-all 200 and again 404 NoSuchUpload, abort 204, a part
 // after abort 404 NoSuchUpload. The database half is the three functions of 20261115190000, in memory.
 import { describe, expect, it } from 'vitest'
-import { sweepManagedUploads } from '../../../supabase/functions/_shared/upload-closure'
+import { handleStagingCleanup } from '../../../supabase/functions/_shared/staging-cleanup-core'
 import { type OssConfig } from '../../../supabase/functions/_shared/oss'
 import { ossObjectStorage, supabaseObjectStorage } from '../../../supabase/functions/_shared/attachment-object-storage'
 import {
@@ -296,16 +296,17 @@ describe('verified staging cleanup', () => {
     }
     const receipts: unknown[] = []
     f.deps.serviceRpc = async (fn, args) => {
-      if (fn === 'file_managed_upload_closable') return { data: [{ reservation_id: ID, account_id: USER,
-        staging_key: KEY, upload_id: 'U1', evidence: 'test-window', held_bytes: SIZE * 2 }], error: null }
-      if (fn !== 'file_managed_upload_closed') throw new Error(fn)
-      receipts.push(args)
-      return { data: null, error: null }
+      if (fn === 'file_staging_cleanup_run_begin') return { data: { admitted: true, run_token: ID, batch_limit: 5, concurrency: 1 }, error: null }
+      if (fn === 'file_managed_staging_claim') return { data: [{ staging_key: KEY, claim_token: ID, upload_id: 'U1', attempt_count: 1 }], error: null }
+      if (fn === 'file_staging_cleanup_finish') receipts.push(args)
+      return { data: true, error: null }
     }
-    const result = await sweepManagedUploads(f.deps, { kind: 'oss', oss, cdn: CDN }, '', { ids: [ID] }, { remaining: 5, guard: async () => {} })
+    const store = f.deps.objects!
+    const result = await handleStagingCleanup({ serviceRpc: f.deps.serviceRpc, claim: {}, prepare: store.prepareStaging,
+      objects: { remove: store.remove, exists: store.stagingExists! }, log: f.deps.log })
     const held = state === 'untracked' || state === 'bucket missing'
-    expect(result.failed).toEqual(held ? [ID] : [])
-    expect(receipts).toEqual(held ? [] : [{p_key:KEY,p_evidence:'sweep:'+ID+':test-window'}])
+    expect(result.failed).toBe(held ? 1 : 0)
+    expect(receipts).toEqual(held ? [] : [{ p_run: ID, p_key: KEY, p_claim: ID }])
     expect(f.objects.get(final)).toBe(SIZE)
     expect(f.objects.has(key)).toBe(false)
     if (state === 'untracked') expect(f.uploads.get('U2')!.state).toBe('open')

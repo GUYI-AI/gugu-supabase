@@ -38,6 +38,20 @@ describe('closed operation HTTP protocol', () => {
     expect(f.deps.sendCode).not.toHaveBeenCalled(); expect(f.deps.verifyCode).not.toHaveBeenCalled(); expect(f.deps.hardDelete).not.toHaveBeenCalled()
     expect(f.deps.flow).toHaveBeenCalledWith(expect.objectContaining({ p_action: 'result', p_operation_digest: expect.any(String), p_receipt_digest: expect.any(String) }))
   })
+  it('cancels before device preparation without sending mail, checking OTP or deleting Auth', async () => {
+    const f = fixture()
+    expect((await f.call('cancel', { ...proof, native_generation: confirm.native_generation })).status).toBe(200)
+    expect(f.deps.flow).toHaveBeenCalledWith(expect.objectContaining({ p_action: 'cancel_operation',
+      p_native_generation: confirm.native_generation, p_server_generation: null, p_user_id: owner.id, p_session_id: owner.sessionId }))
+    expect(f.deps.sendCode).not.toHaveBeenCalled(); expect(f.deps.verifyCode).not.toHaveBeenCalled(); expect(f.deps.hardDelete).not.toHaveBeenCalled()
+  })
+  it('requires original Auth and valid preparation generations for cancellation', async () => {
+    const f = fixture()
+    expect((await f.call('cancel', proof)).status).toBe(400)
+    expect((await f.call('cancel', { ...proof, native_generation: confirm.native_generation, server_generation: 'bad' })).status).toBe(400)
+    expect((await f.call('cancel', { ...proof, native_generation: confirm.native_generation }, false)).status).toBe(401)
+    expect(f.deps.flow).not.toHaveBeenCalled()
+  })
   it('never sends another OTP for an idempotent challenge replay', async () => {
     const f = fixture(); vi.mocked(f.deps.flow).mockResolvedValue({ ok: true, operation: operation(), dispatch_required: false })
     expect((await f.call('challenge', proof)).status).toBe(200)

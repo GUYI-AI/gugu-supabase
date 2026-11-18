@@ -1,6 +1,6 @@
 import {
   type CdnConfig, type FetchLike, type OssConfig, CDN_SIGN_TTL_SECONDS, MAX_ATTACHMENT_BYTES,
-  cdnSignedUrl, objectKey, ossCopy, ossDelete, ossExists, ossRequest, ossSign, ossSignedRequest, postObjectForm, refreshCdn,
+  cdnSignedUrl, ossCopy, ossDelete, ossExists, ossRequest, ossSignedRequest, postObjectForm, refreshCdn,
 } from './oss.ts'
 import { type AttachmentObjectStorage, type MultipartStorage, ObjectStorageError } from './object-storage.ts'
 import { type Inspector, inspectFileStream } from './file-inspection.ts'
@@ -8,12 +8,12 @@ import { type Inspector, inspectFileStream } from './file-inspection.ts'
 /** Bytes are read by the file service (`inspector`) from a request signed here; this Edge worker only copies by ETag. */
 export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch: FetchLike; inspector: Inspector; directSign?:AttachmentObjectStorage['sign'] }): AttachmentObjectStorage {
   const { oss, cdn, fetch } = config
-  const bucketRequest = async (query: Record<string, string>) => {
+  const bucketRequest = async (query: Record<string, string>, signal?: AbortSignal) => {
     const signed = await ossSign(oss, { method: 'GET', bucketLevel: true, query })
-    return fetch(`https://${oss.bucket}.${oss.endpointPublic}/?${signed.query}`, { headers: signed.headers })
+    return fetch(`https://${oss.bucket}.${oss.endpointPublic}/?${signed.query}`, { headers: signed.headers, signal })
   }
-  const requireUnversioned = async () => {
-    const res = await bucketRequest({ versioning: '' })
+  const requireUnversioned = async (signal?: AbortSignal) => {
+    const res = await bucketRequest({ versioning: '' }, signal)
     const body = await res.text()
     if (!res.ok || !/<VersioningConfiguration(?:\s[^>]*)?(?:\/>|>)/.test(body)
       || /<Status>\s*(Enabled|Suspended)\s*<\/Status>/.test(body)) {
@@ -37,19 +37,16 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
       const response = await ossRequest(oss, fetch, { method: 'PUT', key, body: bytes as BodyInit, internal: true })
       if (response.status !== 200) throw new ObjectStorageError(response.status, null, 'Could not stage attachment bytes')
     },
-    exists: (key) => ossExists(oss, fetch, key),
-    remove: (key) => ossDelete(oss, fetch, key),
-    removeStaging: async (key, uploadId, guard) => {
-      await requireUnversioned()
-      if (uploadId) {
-        await guard()
-        await store.parts!.abandon(key, uploadId)
-      }
-      await guard()
-      await store.remove(key)
-      if (await store.exists(key)) throw new Error('Staging object still exists')
+    exists: (key, signal) => ossExists(oss, signal ? (input, init) => fetch(input, { ...init, signal }) : fetch, key),
+    remove: (key, signal) => ossDelete(oss, signal ? (input, init) => fetch(input, { ...init, signal }) : fetch, key),
+    prepareStaging: async (key, uploadId, signal) => {
+      await requireUnversioned(signal)
+      if (uploadId) await store.parts!.abandon(key, uploadId, signal)
+    },
+    stagingExists: async (key, signal) => {
+      if (await store.exists(key, signal)) return true
       // HEAD has no error body. Require the object-level code before treating a 404 as absence.
-      const missing = await ossRequest(oss, fetch, { method: 'GET', key, internal: true, headers: { Range: 'bytes=0-0' } })
+      const missing = await ossRequest(oss, (input, init) => fetch(input, { ...init, signal }), { method: 'GET', key, internal: true, headers: { Range: 'bytes=0-0' } })
       if (missing.status !== 404) {
         await missing.body?.cancel()
         throw new Error('OSS did not confirm the staging key is missing')
@@ -58,13 +55,14 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
       // An opener can lose its response before the provider upload ID reaches the ledger.
       // A different ID is never ours to abort. Retain the hold until there are no sessions for this key.
       const query = { uploads: '', prefix: objectKey(oss, key), 'max-uploads': '1' }
-      const listed = await bucketRequest(query)
+      const listed = await bucketRequest(query, signal)
       const xml = await listed.text()
       if (listed.status !== 200 || !/<ListMultipartUploadsResult[ >]/.test(xml)
         || !xml.trimEnd().endsWith('</ListMultipartUploadsResult>') || !xml.includes(`<Bucket>${oss.bucket}</Bucket>`)
         || !xml.includes(`<Prefix>${query.prefix}</Prefix>`) || !xml.includes('<IsTruncated>false</IsTruncated>') || /<Upload[ >]/.test(xml)) {
         throw new Error('OSS did not confirm the staging multipart uploads are gone')
       }
+      return false
     },
     sign: async (key, image, now, permit) => {
       if(permit?.direct) {
@@ -119,8 +117,8 @@ function ossMultipart(oss: OssConfig, fetch: FetchLike): MultipartStorage {
       if (head.status !== 200 || !Number.isSafeInteger(size)) throw new ObjectStorageError(head.status === 200 ? 502 : head.status, null, `OSS HEAD ${key}: ${head.status}`)
       return size
     },
-    abandon: async (key, uploadId) => {
-      await answer(await ossRequest(oss, fetch, { method: 'DELETE', key, query: { uploadId }, internal: true }), [204, 404], 'abort multipart upload')
+    abandon: async (key, uploadId, signal) => {
+      await answer(await ossRequest(oss, (input, init) => fetch(input, { ...init, signal }), { method: 'DELETE', key, query: { uploadId }, internal: true }), [204, 404], 'abort multipart upload')
     },
   }
 }
@@ -141,7 +139,7 @@ export interface SupabaseObjectConfig {
  */
 export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentObjectStorage {
   const base = config.url.replace(/\/$/, '')
-  const objectUrl = (key: string, info = false) => base + (info ? '/storage/v1/object/info/' : '/storage/v1/object/') + encodeURIComponent(config.bucket) + '/' + key.split('/').map(encodeURIComponent).join('/')
+  const objectUrl = (key: string) => base + '/storage/v1/object/' + encodeURIComponent(config.bucket) + '/' + key.split('/').map(encodeURIComponent).join('/')
   // Header names are case-insensitive: merge through Headers so a caller's Content-Type replaces the default
   // instead of being joined into "a, b", which Storage rejects as an invalid MIME type.
   const withHeaders = (base: HeadersInit, extra?: HeadersInit) => {
@@ -189,7 +187,7 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
     }),
     inspect: async (key, limit, retainBytes) => {
       const version = async () => {
-        const response = await request(objectUrl(key, true))
+        const response = await request(base + '/storage/v1/object/info/' + encodeURIComponent(config.bucket) + '/' + key.split('/').map(encodeURIComponent).join('/'))
         await check(response)
         const info = await response.json() as { version?: unknown }
         if (typeof info.version !== 'string' || !info.version) throw new ObjectStorageError(503, 'not_configured', 'Supabase Storage did not report an object version')
@@ -223,8 +221,8 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
       await response.body?.cancel()
     },
     put: (key, bytes) => write(key, bytes),
-    exists: async (key) => {
-      const response = await request(objectUrl(key), { method: 'HEAD' })
+    exists: async (key, signal) => {
+      const response = await request(objectUrl(key), { method: 'HEAD', ...(signal ? { signal } : {}) })
       try { await check(response) }
       catch (error) {
         if (error instanceof ObjectStorageError && error.status === 404) return false
@@ -233,23 +231,25 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
       await response.body?.cancel()
       return true
     },
-    remove: async (key) => {
+    remove: async (key, signal) => {
       const response = await request(base + '/storage/v1/object/' + encodeURIComponent(config.bucket), {
         method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prefixes: [key] }),
+        ...(signal ? { signal } : {}),
       })
       await check(response)
       await response.body?.cancel()
     },
-    removeStaging: async (key, uploadId, guard) => {
+    prepareStaging: async (_key, uploadId) => {
       if (uploadId !== null) throw new Error('Unexpected multipart ID for Supabase Storage')
-      await guard()
-      await store.remove(key)
+    },
+    stagingExists: async (key, signal) => {
       const url = objectUrl(key)
-      const head = await request(url, { method: 'HEAD' })
+      const head = await request(url, { method: 'HEAD', signal })
       await head.body?.cancel()
       // Some Storage versions return HTTP 400 for a missing key, including HEAD with no body.
+      if (head.ok) return true
       if (head.status !== 400 && head.status !== 404) throw new Error('Storage did not confirm staging absence')
-      const info = await request(objectUrl(key, true))
+      const info = await request(objectUrl(key, true), { signal })
       if (info.status !== 400 && info.status !== 404) {
         await info.body?.cancel()
         throw new Error('Storage did not confirm the missing staging object')
@@ -258,6 +258,7 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
       if (!(error.code === 'NoSuchKey' || (String(error.statusCode) === '404' && error.error === 'not_found' && error.message === 'Object not found'))) {
         throw new Error('Unconfirmed Storage staging absence')
       }
+      return false
     },
     sign: async (key, _image, now, permit) => ({
       url: await config.signDownload(key, permit?.expiresSeconds ?? CDN_SIGN_TTL_SECONDS,permit?.trafficBits), thumbUrl: null,

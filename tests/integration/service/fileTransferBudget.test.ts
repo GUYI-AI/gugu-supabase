@@ -63,9 +63,9 @@ beforeEach(async () => {
 })
 afterEach(async () => { await db.query('ROLLBACK') })
 describe('atomic transfer budgets', () => {
-  it('limits closure to verified physical windows, rotates failed attempts and preserves the first receipt',async()=>{
+  it('limits closure to verified physical windows, keeps reports read-only and preserves the first receipt',async()=>{
     const namespace={provider:'oss',region:'example',bucket:'test',prefix:'one'}
-    const proof={namespace,issued_from:'2000-01-01T00:00:00Z',issued_before:'infinity',upload_inflight_seconds:7200,evidence:'test-provider-bound',periodic:true}
+    const proof={namespace,issued_from:'2000-01-01T00:00:00Z',issued_before:'infinity',upload_inflight_seconds:7200,evidence:'test-provider-bound',terminal_sha256:'a'.repeat(64),periodic:true}
     const select=async(report:boolean,limit=500)=>(await db.query('SELECT * FROM chat.file_managed_upload_closable($1,$2,$3)',[namespace,limit,report])).rows
     await db.query(`WITH ids AS (SELECT gen_random_uuid() AS id FROM generate_series(1,501)),
       reservations AS (INSERT INTO chat.file_transfer_reservations(id,kind,account_id,subject,bytes,state,created_at,expires_at)
@@ -81,7 +81,7 @@ describe('atomic transfer budgets', () => {
     expect((await db.query('SELECT * FROM chat.file_managed_upload_closable($1,500)',[{...namespace,prefix:'two'}])).rows).toHaveLength(0)
     expect(await select(false)).toEqual(batch)
     const next=await select(false,1)
-    expect(batch.some(row=>row.reservation_id===next[0].reservation_id)).toBe(false)
+    expect(next).toEqual(batch.slice(0,1))
     const key=next[0].staging_key
     await db.query("SELECT chat.file_managed_upload_closed($1,'first')",[key])
     await db.query("SELECT chat.file_managed_upload_closed($1,'retry')",[key])
