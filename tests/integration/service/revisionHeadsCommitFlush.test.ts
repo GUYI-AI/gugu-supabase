@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-// Revision heads are written once per transaction, at commit (chat.flush_user_revisions); who is a member of a line is
-// serialized by the line lock (chat.lock_lines). See 20261116160000_revision_heads_commit_flush.sql for the contract.
+// Ordinary publishers flush heads at commit; personal operation receipts flush only after their admission is complete.
+// Both delegate to one sorted-recipient writer. Membership is serialized by the line lock (chat.lock_lines).
 //
 // The regression: provision_taskpage_agent published to the owner while minting an agent, then locked the members of
 // the project group; add_group_agent of another session locked {member, its agent, owner} in id order. Each held a
@@ -285,13 +285,38 @@ describe('removing an identity and its direct chats stay serialized', () => {
   })
 })
 
-describe('the commit flush stays the only writer of heads', () => {
+describe('the shared finalizer stays the only writer of heads', () => {
   it('no function writes heads or revisions except the flush and account erasure', async () => {
     const { rows } = await admin.query<{ fn: string }>(`SELECT p.oid::regprocedure::text AS fn FROM pg_proc p
       JOIN pg_namespace n ON n.oid=p.pronamespace
       WHERE n.nspname NOT IN ('pg_catalog','information_schema')
         AND p.prosrc ~* '(insert\\s+into|update|delete\\s+from)\\s+chat\\.account_revision(s|_heads)\\M' ORDER BY 1`)
-    expect(rows.map((row) => row.fn)).toEqual(['chat.flush_user_revisions()', 'identity.erase_account_references(text[])'])
+    expect(rows.map((row) => row.fn)).toEqual(['chat.flush_pending_user_revisions()', 'identity.erase_account_references(text[])'])
+  })
+
+  it('permits only the commit trigger and the four terminal personal RPCs to call the finalizer', async () => {
+    const { rows } = await admin.query<{ name: string }>(`SELECT n.nspname||'.'||p.proname AS name
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname IN ('chat','identity','public')
+        AND p.prosrc ~ 'chat[.]flush_pending_user_revisions[[:space:]]*[(]' ORDER BY 1`)
+    expect(rows.map(row => row.name)).toEqual([
+      'chat.delete_my_conversation', 'chat.flush_user_revisions', 'chat.hide_my_conversation',
+      'chat.publish_native_conversation_message', 'chat.undo_my_conversation_hide',
+    ])
+  })
+
+  it('the catalog audit detects an additional direct writer', async () => {
+    await admin.query('BEGIN')
+    try {
+      // Uncommitted catalog DDL is visible only to this connection; no head is actually written.
+      await admin.query(`CREATE FUNCTION chat.fixture_revision_writer_bypass() RETURNS void LANGUAGE sql AS $$
+        UPDATE chat.account_revision_heads SET revision=revision;
+      $$`)
+      const { rows } = await admin.query<{ fn: string }>(`SELECT p.oid::regprocedure::text AS fn FROM pg_proc p
+        JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='chat'
+          AND p.prosrc ~* '(insert\\s+into|update|delete\\s+from)\\s+chat\\.account_revision(s|_heads)\\M' ORDER BY 1`)
+      expect(rows.map(row => row.fn)).toContain('chat.fixture_revision_writer_bypass()')
+    } finally { await admin.query('ROLLBACK') }
   })
 
   it('no function makes every deferred constraint immediate (that would run the flush mid-transaction)', async () => {
