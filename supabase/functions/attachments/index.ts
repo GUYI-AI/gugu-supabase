@@ -28,6 +28,7 @@ import { configureAttachmentGc } from '../_shared/attachment-gc-config.ts'
 import { ossDirectSigner } from '../_shared/oss-direct-url.ts'
 import { fileServiceInspector } from '../_shared/file-inspection.ts'
 import { handleDocumentImport, WORKSPACE_TEXT_MAX_BYTES, workspaceUploadKind } from '../_shared/document-import-core.ts'
+import { handleStagingCleanup, handleStagingCleanupControl, StagingCleanupError } from '../_shared/staging-cleanup-core.ts'
 
 const env = (key: string): string => Deno.env.get(key)?.trim() ?? ''
 
@@ -116,8 +117,9 @@ function depsFor(authorization: string, storage: AttachmentStorageConfig): Attac
       const { data, error, status } = await asUser.rpc(fn, args)
       return { data, error: error ? { message: error.message, hint: error.hint, code: error.code, status } : null }
     },
-    serviceRpc: async (fn, args) => {
-      const { data, error, status } = await asService.rpc(fn, args)
+    serviceRpc: async (fn, args, signal) => {
+      const query = asService.rpc(fn, args)
+      const { data, error, status } = await (signal ? query.abortSignal(signal) : query)
       return { data, error: error ? { message: error.message, hint: error.hint, code: error.code, status } : null }
     },
     storageSignedUrl:signStorage,
@@ -171,13 +173,29 @@ Deno.serve(async (request) => {
       if (route==='document-import') return json(await handleDocumentImport(deps,body))
       return json(await (route==='usage-import'?handleUsageImport(deps.serviceRpc,body):handleStorageInventory(deps.serviceRpc,body)))
     }
+    if (['staging-cleanup', 'staging-cleanup-status', 'staging-cleanup-configure', 'staging-cleanup-evidence'].includes(route)) {
+      if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY')))
+        return json({ error: 'denied', message: 'Staging cleanup is restricted to the service' }, 401)
+      const body = await request.json().catch(() => null)
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return json({ error: 'invalid_evidence' }, 400)
+      try {
+        if (route === 'staging-cleanup') {
+          if (Object.keys(body).length) return json({ error: 'invalid_controls' }, 400)
+          return json(await handleStagingCleanup({ serviceRpc: deps.serviceRpc, objects: deps.objects!, log }))
+        }
+        return json({ cleanup: await handleStagingCleanupControl(deps.serviceRpc, route, body) })
+      } catch (error) {
+        const code = error instanceof StagingCleanupError ? error.code : 'staging_cleanup_failed'
+        return json({ error: code }, code.startsWith('invalid_') && !(error instanceof StagingCleanupError && error.uncertain) ? 400 : 503)
+      }
+    }
     if (route === 'gc') {
       if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY'))) {
         return json({ error: 'denied', message: 'gc is the server\'s own job' }, 401)
       }
       let stagingDeleted = 0
       const result = await handleGc(deps, 'kick', async (remaining, guard) => {
-        // OSS expires abandoned staging uploads through its own lifecycle rule.
+        // Committed staging uses the separate evidence-gated entry; this bounded sweep covers legacy bucket staging only.
         if (storage.kind === 'oss') return
         const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })
         const { data: expired, error } = await service.rpc('attachment_expired_staging', { p_bucket: storage.bucket })
