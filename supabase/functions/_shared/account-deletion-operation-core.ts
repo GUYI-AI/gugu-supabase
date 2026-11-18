@@ -41,7 +41,7 @@ async function readBody(req: Request): Promise<Record<string, unknown>> {
 export function createAccountDeletionOperationHandler(deps: OperationDependencies) {
   return async (req: Request): Promise<Response> => {
     const route = new URL(req.url).pathname.replace(/\/+$/, '').split('/').at(-1);
-    if (!['register', 'challenge', 'confirm', 'result', 'prepare_device', 'read_preparation', 'cancel_preparation'].includes(route ?? '')) return fail('not_found', 404);
+    if (!['register', 'challenge', 'confirm', 'result', 'prepare_device', 'read_preparation', 'cancel_preparation', 'cancel'].includes(route ?? '')) return fail('not_found', 404);
     if (req.method !== 'POST') return fail('method_not_allowed', 405);
     let body: Record<string, unknown>;
     try { body = await readBody(req); } catch { return fail('invalid_request', 400); }
@@ -62,6 +62,13 @@ export function createAccountDeletionOperationHandler(deps: OperationDependencie
         if (body.consent_version !== consent) return fail('invalid_request', 400);
       }
       if (route === 'register') return output(await deps.flow(args));
+      if (route === 'cancel') {
+        if (typeof body.native_generation !== 'string' || !uuid.test(body.native_generation)
+            || (body.server_generation !== undefined && body.server_generation !== null
+              && (typeof body.server_generation !== 'string' || !uuid.test(body.server_generation)))) return fail('invalid_request', 400);
+        return output(await deps.flow({ ...args, p_action: 'cancel_operation', p_native_generation: body.native_generation,
+          p_server_generation: typeof body.server_generation === 'string' ? body.server_generation : null }));
+      }
       if (route === 'prepare_device' || route === 'read_preparation' || route === 'cancel_preparation') {
         if (typeof body.native_generation !== 'string' || !uuid.test(body.native_generation)) return fail('invalid_request', 400);
         args.p_native_generation = body.native_generation;

@@ -62,6 +62,15 @@ not an unchecked legacy public endpoint.
 
 ## Preparation and closure
 
+The `cancel` HTTP action closes an authenticated original operation before final
+confirmation, including one that has no device preparation yet. It requires the
+native generation and the original capability/SID. A registered device
+preparation additionally requires its exact server generation and uses the
+existing cancellation helper. Without a preparation, the response carries a null
+server generation; it proves pre-confirmation closure, never native runtime exit.
+Both paths fence late send callbacks, retain rate-limit history and refuse after
+confirmation has started. Cancellation stays available when admission is disabled.
+
 The device migration owns the three private helper signatures:
 
 ```

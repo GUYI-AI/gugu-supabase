@@ -21,7 +21,7 @@ beforeAll(async () => {
 })
 
 type Committed = Awaited<ReturnType<typeof committedOperation>>
-async function committedOperation(a: pg.Client) {
+async function committedOperation(a: pg.Client, prepare = true) {
   await a.query('BEGIN')
   const previous = (await a.query(`SELECT o.enabled operation_enabled,d.enabled preparation_enabled,v.test_only,v.test_user_id
     FROM account_deletion_private.operation_access o CROSS JOIN account_deletion_private.device_preparation_access d
@@ -32,9 +32,13 @@ async function committedOperation(a: pg.Client) {
   await a.query(`INSERT INTO identity.gugu_devices(device_id,user_id,machine_id,tier,label,hostname,platform,auth_session_id,capabilities)
     VALUES($1,$2,$3,'fixture','phone','phone','android',$4,'{"host_kind":"phone","runtimes":["pi"],"actions":{"actions":[]}}')`, [device, f.p_user_id, machine, f.p_session_id])
   const registered = await flowOn(a, 'register', f); expect(registered.ok).toBe(true)
-  const prepared = await flowOn(a, 'prepare_device', { ...f, p_device_id: device })
-  expect(prepared.preparation.prepared).toBe(true)
-  const args = { ...f, p_server_generation: prepared.preparation.server_generation as string }
+  let serverGeneration: string | null = null
+  if (prepare) {
+    const prepared = await flowOn(a, 'prepare_device', { ...f, p_device_id: device })
+    expect(prepared.preparation.prepared).toBe(true)
+    serverGeneration = prepared.preparation.server_generation
+  }
+  const args = { ...f, p_server_generation: serverGeneration }
   const begun = await flowOn(a, 'begin', args); expect(begun.dispatch_required).toBe(true)
   expect((await flowOn(a, 'sent', { ...args, p_lease_token: begun.lease_token })).ok).toBe(true)
   const result = { args, previous, device, operation: registered.operation.operation_id as string, request: begun.operation.request_id as string }
@@ -65,12 +69,12 @@ async function waitForBlock(holder: pg.Client, waiter: pg.Client) {
     throw new Error('Expected account-admission wait was not observed')
   }
 }
-async function withContenders(run: (a: pg.Client, b: pg.Client, f: Committed) => Promise<void>) {
+async function withContenders(run: (a: pg.Client, b: pg.Client, f: Committed) => Promise<void>, prepare = true) {
   const a = new pg.Client({ connectionString: database }), b = new pg.Client({ connectionString: database })
   let f: Committed | undefined
   try {
     await a.connect(); await b.connect()
-    f = await committedOperation(a)
+    f = await committedOperation(a, prepare)
     await run(a, b, f)
   } finally {
     await Promise.allSettled([a.query('ROLLBACK'), b.query('ROLLBACK')])
@@ -79,6 +83,31 @@ async function withContenders(run: (a: pg.Client, b: pg.Client, f: Committed) =>
   }
 }
 describe('operation admission independent-connection fences', () => {
+  it.each(['cancel_operation', 'prepare_device'])('serializes unprepared %s against the competing prepare/cancel', async first => {
+    await withContenders(async (a, b, f) => {
+      await a.query('BEGIN'); await b.query('BEGIN'); await b.query("SET LOCAL statement_timeout='5s'")
+      const blocked = await waitForBlock(a, b)
+      const args = { ...f.args, p_device_id: f.device }
+      expect((await flowOn(a, first, args)).ok).toBe(true)
+      const second = first === 'cancel_operation' ? 'prepare_device' : 'cancel_operation'
+      const pending = flowOn(b, second, args).then(value => ({ value }), error => ({ error }))
+      await blocked(); await a.query('COMMIT')
+      const completed = await pending
+      if ('error' in completed) throw completed.error
+      expect(completed.value).toMatchObject({ ok: false, error: first === 'cancel_operation' ? 'request_active' : 'scope_conflict', status: 409 })
+      await b.query('COMMIT')
+      expect((await flowOn(a, 'result', f.args)).operation.state).toBe(first === 'cancel_operation' ? 'closed_before_confirm' : 'open')
+      expect((await db.query('SELECT count(*)::int n FROM auth.users WHERE id=$1', [f.args.p_user_id])).rows[0].n).toBe(1)
+    }, false)
+  })
+  it('requires the real prepared generations instead of cancelling an existing seal as unprepared', async () => {
+    await withContenders(async (a, _b, f) => {
+      expect((await flowOn(a, 'cancel_operation', { ...f.args, p_server_generation: null })).error).toBe('scope_conflict')
+      expect((await db.query('SELECT state FROM account_deletion_private.device_preparations WHERE operation_id=$1', [f.operation])).rows[0].state).toBe('prepared')
+      expect((await flowOn(a, 'cancel_operation', f.args)).operation).toMatchObject({ state: 'closed_before_confirm', can_release_preparation: true })
+      expect((await db.query('SELECT state FROM account_deletion_private.device_preparations WHERE operation_id=$1', [f.operation])).rows[0].state).toBe('released')
+    })
+  })
   it.each(['cancel_preparation', 'claim_confirmation'])('serializes %s winning before the competing confirmation/cancel', async first => {
     await withContenders(async (a, b, f) => {
       await a.query('BEGIN'); await b.query('BEGIN'); await b.query("SET LOCAL statement_timeout='5s'")
@@ -151,6 +180,38 @@ async function preparationContractFixture() {
     END $$`)
 }
 describe('recoverable deletion operation authority', () => {
+  it('closes a registered operation with no device preparation, including while admission is disabled', async () => {
+    const f = { ...await fixture(), p_server_generation: null }
+    await flow('register', f)
+    await db.query('UPDATE account_deletion_private.operation_access SET enabled=false')
+    const closed = await flow('cancel_operation', f)
+    expect(closed.operation).toMatchObject({ state: 'closed_before_confirm', can_release_preparation: true })
+    expect(closed.preparation).toMatchObject({ cancelled: true, native_generation: f.p_native_generation, server_generation: null })
+    expect((await flow('cancel_operation', f)).operation.revision).toBe(closed.operation.revision)
+    expect((await db.query('SELECT count(*)::int n FROM account_deletion_private.device_preparations')).rows[0].n).toBe(0)
+    expect((await db.query('SELECT count(*)::int n FROM auth.users WHERE id=$1', [f.p_user_id])).rows[0].n).toBe(1)
+  })
+  it.each(['sending', 'challenge'])('cancels an unprepared %s without reviving its late callback or resetting send limits', async state => {
+    const f = { ...await fixture(), p_server_generation: null }, begun = await flow('begin', f)
+    if (state === 'challenge') await flow('sent', { ...f, p_lease_token: begun.lease_token })
+    expect((await flow('cancel_operation', f)).operation.state).toBe('closed_before_confirm')
+    expect((await db.query('SELECT state FROM account_deletion_private.requests WHERE id=$1', [begun.operation.request_id])).rows[0].state).toBe('expired')
+    expect((await flow('sent', { ...f, p_lease_token: begun.lease_token })).error).toBe('state_conflict')
+    const next = { ...f, p_operation_digest: hash(randomUUID()), p_receipt_digest: hash(randomUUID()) }
+    expect((await flow('register', next)).ok).toBe(true)
+    expect((await flow('begin', next)).error).toBe('rate_limited')
+  })
+  it('refuses unprepared cancellation with a different capability, SID or a started confirmation', async () => {
+    const f = { ...await fixture(), p_server_generation: null }
+    await flow('register', f)
+    expect((await flow('cancel_operation', { ...f, p_receipt_digest: hash('wrong') })).error).toBe('not_found')
+    const sid = randomUUID()
+    await db.query('INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())', [sid, f.p_user_id])
+    expect((await flow('cancel_operation', { ...f, p_session_id: sid })).error).toBe('scope_conflict')
+    await db.query("UPDATE account_deletion_private.operations SET confirm_started_at=clock_timestamp() WHERE operation_digest=$1", [f.p_operation_digest])
+    expect((await flow('cancel_operation', f)).error).toBe('request_active')
+    expect((await db.query('SELECT state,preparation_cancelled FROM account_deletion_private.operations')).rows[0]).toEqual({ state: 'open', preparation_cancelled: false })
+  })
   it('installs disabled and grants only the service entry, never private tables', async () => {
     expect((await db.query('SELECT enabled FROM account_deletion_private.operation_access')).rows[0].enabled).toBe(false)
     for (const role of ['anon', 'authenticated', 'service_role']) {
