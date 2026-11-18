@@ -8,9 +8,9 @@ Deleting a chat makes the existing file-delete guard recognize a cascade; no cal
 
 ## Release shape
 
-Forward migration `20261115101100` requires the two-argument `identity.erase_human_account(text,text)` installed by `101000`, including its private audit-registration call and the indexed command predicates from `071502`. It inserts exactly one closed helper call before the original chat loop and rejects an unknown predecessor. The one-argument compatibility wrapper and trusted Auth trigger are unchanged.
+Forward migration `20261119001500` requires the two-argument `identity.erase_human_account(text,text)` installed by `19001400`, including its private audit-registration call and the indexed command predicates from `071502`. It inserts exactly one closed helper call before the original chat loop and rejects an unknown predecessor. The one-argument compatibility wrapper and trusted Auth trigger are unchanged.
 
-Order is `071502` → audit helpers `090000/100000` → registered audit `100400/100500` → unified `101000` → this `101100` → paired principal releases `113000/113100`. `100000` defines audit helpers rather than replacing the erasure body. `101000` clones the indexed one-argument body and installs the wrapper, so this release must patch the two-argument body afterwards. `113000` guards Auth aliases; private `113100` patches `billing.erase_accounting_identity`, a separate trigger function. Neither is a replacement for this body's predecessor check. Existing installed migration bytes and release ledgers are not modified.
+Order is `071502` → audit helpers `19001000/19001100` → registered audit `19001200/19001300` → unified `19001400` → this `19001500` → paired principal releases `19001600/19001700`. `19001100` defines audit helpers rather than replacing the erasure body. `19001400` clones the indexed one-argument body and installs the wrapper, so this release must patch the two-argument body afterwards. `19001600` guards Auth aliases; private `19001700` patches `billing.erase_accounting_identity`, a separate trigger function. Neither is a replacement for this body's predecessor check. Existing installed migration bytes and release ledgers are not modified.
 
 ## Distinct remove-agent behavior
 

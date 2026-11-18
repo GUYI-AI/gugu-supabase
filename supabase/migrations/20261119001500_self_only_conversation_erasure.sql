@@ -98,7 +98,7 @@ END $$;
 ALTER FUNCTION identity.erase_self_only_conversations(text[]) OWNER TO postgres;
 REVOKE ALL ON FUNCTION identity.erase_self_only_conversations(text[]) FROM PUBLIC,anon,authenticated,service_role;
 
--- 101000 owns the trusted two-argument body and one-argument compatibility
+-- The preceding unified release owns the trusted two-argument body and one-argument compatibility
 -- wrapper. Patch only that body, after registration and before the original
 -- shared-chat/command/identity/storage cleanup; fail closed on an unknown shape.
 DO $upgrade$
