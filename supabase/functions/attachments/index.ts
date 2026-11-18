@@ -24,6 +24,7 @@ import { ossObjectStorage, supabaseObjectStorage } from '../_shared/attachment-o
 import { type AttachmentStorageConfig, attachmentStorageConfig, StorageConfigError } from '../_shared/attachment-storage-config.ts'
 import { handleUsageImport,handleStorageInventory,handleFileResolve } from '../_shared/file-transfer-core.ts'
 import { handleProjectFiles } from '../_shared/project-file-transfer-core.ts'
+import { sweepManagedUploads } from '../_shared/upload-closure.ts'
 import { ossDirectSigner } from '../_shared/oss-direct-url.ts'
 import { fileServiceInspector } from '../_shared/file-inspection.ts'
 import { handleDocumentImport, WORKSPACE_TEXT_MAX_BYTES, workspaceUploadKind } from '../_shared/document-import-core.ts'
@@ -162,9 +163,28 @@ Deno.serve(async (request) => {
       if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY'))) {
         return json({ error: 'denied', message: 'gc is the server\'s own job' }, 401)
       }
+      const raw = await request.text()
+      let options
+      try { options = raw.trim() ? JSON.parse(raw) : {} }
+      catch { throw new Refusal(400, 'invalid', 'Expected a GC options object') }
+      if (!options || typeof options !== 'object' || Array.isArray(options)) {
+        throw new Refusal(400, 'invalid', 'Expected a GC options object')
+      }
+      const project = env('GUGU_PUBLIC_SUPABASE_URL') || env('SUPABASE_URL')
+      if (Object.keys(options).length) {
+        if (options.scope !== 'staging' || !['report', 'apply'].includes(options.mode)) {
+          throw new Refusal(400, 'invalid', 'Specify report or apply for staging cleanup')
+        }
+        if (options.mode === 'apply' && (!Array.isArray(options.ids) || !options.ids.length
+          || typeof options.run !== 'string' || typeof options.evidence !== 'string')) {
+          throw new Refusal(400, 'invalid', 'Apply requires the backed-up IDs, run UUID and proof reference')
+        }
+        return json(await sweepManagedUploads(deps, storage, project, options.mode === 'report', options.ids, options.limit, options.run, options.evidence))
+      }
       const result = await handleGc(deps, 'kick')
+      const managed = await sweepManagedUploads(deps, storage, project, false)
       // OSS expires abandoned staging uploads with its own lifecycle rule; only the Supabase bucket needs this sweep.
-      if (storage.kind === 'oss') return json({ ...result, staging_deleted: 0 })
+      if (storage.kind === 'oss') return json({ ...result, managed, staging_deleted: 0 })
       const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })
       const bucket = storage.bucket
       const { data: expired, error: expiredError } = await service.rpc('attachment_expired_staging', { p_bucket: bucket })
@@ -174,7 +194,7 @@ Deno.serve(async (request) => {
         const { error } = await service.storage.from(bucket).remove(names)
         if (error) throw new Error('Could not remove expired staging uploads')
       }
-      return json({ ...result, staging_deleted: names.length })
+      return json({ ...result, managed, staging_deleted: names.length })
     }
     // PostgREST checks the JWT's signature and expiry; the RPC checks that its session still exists and the account is
     // neither banned nor deleted. That is what Auth's getUser answered, without a second server round trip per call.

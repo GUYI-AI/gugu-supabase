@@ -3,6 +3,7 @@
 // a part whose length differs from its signature 403, complete-all 200 and again 404 NoSuchUpload, abort 204, a part
 // after abort 404 NoSuchUpload. The database half is the three functions of 20261115190000, in memory.
 import { describe, expect, it } from 'vitest'
+import { sweepManagedUploads } from '../../../supabase/functions/_shared/upload-closure'
 import { type OssConfig } from '../../../supabase/functions/_shared/oss'
 import { ossObjectStorage, supabaseObjectStorage } from '../../../supabase/functions/_shared/attachment-object-storage'
 import {
@@ -38,6 +39,11 @@ function fakes(opts: { prefix?: string; size?: number; expired?: boolean; blob?:
       uploads.set(id, { key, parts: new Map(), state: 'open' })
       return new Response(`<InitiateMultipartUploadResult><UploadId>${id}</UploadId></InitiateMultipartUploadResult>`, { status: 200 })
     }
+    if (method === 'GET' && url.searchParams.has('uploads')) {
+      const open = [...uploads.values()].some(u => u.state === 'open' && u.key.startsWith(url.searchParams.get('prefix')!))
+      return new Response(`<ListMultipartUploadsResult><Bucket>${oss.bucket}</Bucket><Prefix>${url.searchParams.get('prefix')}</Prefix><IsTruncated>false</IsTruncated>${open ? '<Upload><Key>pending</Key></Upload>' : ''}</ListMultipartUploadsResult>`)
+    }
+    if (method === 'GET' && !objects.has(key)) return new Response('<Error><Code>NoSuchKey</Code></Error>', { status: 404 })
     const upload = uploadId ? uploads.get(uploadId) : undefined
     if (uploadId && (!upload || upload.state !== 'open' || upload.key !== key)) return new Response('<Error><Code>NoSuchUpload</Code></Error>', { status: 404 })
     if (method === 'POST' && upload) {
@@ -265,5 +271,42 @@ describe('object prefix', () => {
     await parts.complete(KEY, id)
     await parts.abandon(KEY, id)
     for (const url of [...f.calls.map(c => c.url), part!.url]) expect(new URL(url).pathname).toBe(`/production/${KEY}`)
+  })
+})
+
+describe('verified staging cleanup', () => {
+  it.each(['open', 'completed', 'untracked', 'bucket missing'] as const)('checks the physical state for %s', async (state) => {
+    const f = fakes({ prefix: 'isolated' })
+    await begin(f.deps)
+    const key = 'isolated/' + KEY
+    const final = 'isolated/ab/' + 'ab'.repeat(32)
+    f.objects.set(final, SIZE)
+    if (state === 'completed') {
+      f.objects.set(key, SIZE)
+      f.uploads.get('U1')!.state = 'completed'
+    }
+    if (state === 'untracked') await f.deps.objects!.parts!.open(KEY)
+    const oss = { ...OSS, objectPrefix: 'isolated' }
+    if (state === 'bucket missing') {
+      f.deps.objects = ossObjectStorage({ oss, cdn: CDN, inspector: async () => { throw new Error('unused') },
+        fetch: (url, init) => init?.method === 'GET' && !new URL(url).search
+          ? Promise.resolve(new Response('<Error><Code>NoSuchBucket</Code></Error>', { status: 404 })) : f.fetch(url, init) })
+    }
+    const receipts: unknown[] = []
+    f.deps.serviceRpc = async (fn, args) => {
+      if (fn === 'file_managed_upload_closable') return { data: [{ reservation_id: ID, account_id: USER,
+        staging_key: KEY, upload_id: 'U1', evidence: 'test-window', held_bytes: SIZE * 2 }], error: null }
+      if (fn !== 'file_managed_upload_closed') throw new Error(fn)
+      receipts.push(args)
+      return { data: null, error: null }
+    }
+    const result = await sweepManagedUploads(f.deps, { kind: 'oss', oss, cdn: CDN }, '', false, [ID])
+    const held = state === 'untracked' || state === 'bucket missing'
+    expect(result.failed).toEqual(held ? [ID] : [])
+    expect(receipts).toEqual(held ? [] : [{p_key:KEY,p_evidence:'sweep:'+ID+':test-window'}])
+    expect(f.objects.get(final)).toBe(SIZE)
+    expect(f.objects.has(key)).toBe(false)
+    if (state === 'untracked') expect(f.uploads.get('U2')!.state).toBe('open')
+    expect(f.calls.filter(c => c.method === 'DELETE').map(c => new URL(c.url).pathname)).toEqual(['/'+key,'/'+key])
   })
 })

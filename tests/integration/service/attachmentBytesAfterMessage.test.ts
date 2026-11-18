@@ -157,7 +157,7 @@ describe('the message is there before its bytes', ()=>{
       [sender,send.key,send.digest,'image/png'])).rows[0].r
     if (registered) await db.query('SELECT chat.file_managed_upload_registered($1,$2)',[send.key,sender])
     const revisions=(await db.query("SELECT count(*)::int AS n FROM chat.account_revisions WHERE event='message_file_changed' AND resource_key->>'entity_id'=$1",[send.message])).rows[0].n
-    // The client has no successful answer and resumes from its local copy, with a new key on every attempt.
+    // Older clients may resume a lost response with a new key on each attempt.
     for (let attempt=0;attempt<3;attempt++) {
       const uploadKey=await permit()
       expect(await settle(send.key,send.digest,60,uploadKey)).toMatchObject({status:'ready',blob_id:first.blob_id,created:false})
@@ -166,6 +166,9 @@ describe('the message is there before its bytes', ()=>{
         .toEqual({blob_id:first.blob_id,receipt_blob:first.blob_id,actual_bytes:'60',keep:'temporary'})
       expect(await retention(send.message,'temporary')).toBe(true)
       expect(await settle(send.key,send.digest,60,uploadKey), 'the resumed finish itself is repeatable').toMatchObject({status:'ready',blob_id:first.blob_id})
+      await db.query("SELECT chat.file_managed_upload_closed($1,'isolated-cleanup')",[uploadKey])
+      expect((await db.query('SELECT chat.file_blob_settle($1,$2,$3,NULL,NULL,NULL) AS r',[sender,send.key,uploadKey])).rows[0].r)
+        .toMatchObject({status:'ready',blob_id:first.blob_id,created:false})
     }
     expect(await resolve(send.message)).toMatchObject({status:'ready',sha256:send.digest})
     await service()
@@ -176,7 +179,7 @@ describe('the message is there before its bytes', ()=>{
     const first=await declaredSend(), other=await declaredSend()
     await settle(first.key,first.digest); await settle(other.key,other.digest)
     await service()
-    for (const [key,digest,size] of [[first.key,sha(),60],[first.key,first.digest,61],[other.key,first.digest,60]]) {
+    for (const [key,digest,size] of [[first.key,sha(),60],[first.key,first.digest,61],[other.key,first.digest,60],[other.key,null,null]]) {
       expect((await reject('SELECT chat.file_blob_settle($1,$2,$3,$4,$5,$6)',[sender,first.key,key,digest,size,'image/png'])).hint).toBe('file_transfer_conflict')
     }
     expect(await resolve(other.message)).toMatchObject({status:'ready',sha256:other.digest})
