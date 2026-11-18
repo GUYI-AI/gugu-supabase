@@ -34,6 +34,29 @@ it('refuses an oversized server claim before any object deletion', async () => {
   expect(f.remove).not.toHaveBeenCalled()
   expect(f.serviceRpc).toHaveBeenLastCalledWith('file_blob_gc_run_end', { p_token: token })
 })
+it('counts expired multipart uploads in the same five-candidate budget as blobs and staging', async () => {
+  const f = fixture(true, 2), rpc = f.deps.serviceRpc, staging = vi.fn()
+  let active = 0, peak = 0
+  const abandon = vi.fn(async () => { peak = Math.max(peak, ++active); await Promise.resolve(); active-- })
+  f.deps.objects = { parts: { abandon } } as unknown as NonNullable<AttachmentsDeps['objects']>
+  const claim = vi.fn(async (fn: string, args: Record<string, unknown>) => fn === 'file_managed_upload_parts_claim'
+    ? { data: Array.from({ length: 3 }, (_, n) => ({ staging_key: 'staging/' + n, account_id: 'account', upload_id: String(n) })), error: null }
+    : rpc(fn, args))
+  f.deps.serviceRpc = claim
+  await handleGc(f.deps, 'kick', staging)
+  expect(claim).toHaveBeenCalledWith('file_managed_upload_parts_claim', { p_limit: 3 })
+  expect(abandon).toHaveBeenCalledTimes(3)
+  expect(peak).toBe(1)
+  expect(staging).not.toHaveBeenCalled()
+})
+it('refuses an oversized multipart claim before abandoning any multipart upload', async () => {
+  const f = fixture(true, 2), rpc = f.deps.serviceRpc, abandon = vi.fn()
+  f.deps.objects = { parts: { abandon } } as unknown as NonNullable<AttachmentsDeps['objects']>
+  f.deps.serviceRpc = async (fn, args) => fn === 'file_managed_upload_parts_claim'
+    ? { data: Array.from({ length: 4 }, () => ({})), error: null } : rpc(fn, args)
+  await expect(handleGc(f.deps)).rejects.toMatchObject({ status: 503 })
+  expect(abandon).not.toHaveBeenCalled()
+})
 it('shares the remaining budget with staging and stops when the consumer is revoked', async () => {
   const f = fixture(true, 2), staging = vi.fn(async (remaining: number, guard: () => Promise<void>) => {
     expect(remaining).toBe(3); await guard()
