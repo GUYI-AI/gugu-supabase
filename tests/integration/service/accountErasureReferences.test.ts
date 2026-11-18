@@ -43,6 +43,22 @@ async function remnants(ids: string[]) {
   return found.sort()
 }
 
+async function onlyRegisteredAuditCriteriaRemain() {
+  // Account erasure now registers the approved short-lived two-round audit
+  // work. Keep scanning that private table: only these exact fields may match,
+  // and prove the retained row is the closed pending job for this deletion.
+  expect(await remnants([owner, agent])).toEqual([
+    'identity.account_audit_redaction_jobs.delete_user_ids',
+    'identity.account_audit_redaction_jobs.source_subject_id',
+  ])
+  const jobs=(await db.query(`SELECT delete_user_ids,auth_email,state,phase,scan_round,
+    target_at=deleted_at+interval '24 hours' AS target_bounded
+    FROM identity.account_audit_redaction_jobs WHERE source_subject_id=$1`,[owner])).rows
+  expect(jobs).toHaveLength(1)
+  expect([...jobs[0].delete_user_ids].sort()).toEqual([owner,agent].sort())
+  expect(jobs[0]).toMatchObject({auth_email:owner+'@erasure.invalid',state:'pending',phase:'auth',scan_round:1,target_bounded:true})
+}
+
 describe('auth account erasure removes residual references without losing shared content', () => {
   it('deletes a revoked attachment after its blob has been collected, including an archived owned agent', async () => {
     await db.query(`INSERT INTO chat.session_attachments(id,owner_user_id,sender_user_id,sender_session_id,
@@ -50,7 +66,7 @@ describe('auth account erasure removes residual references without losing shared
       VALUES($1,$2,$3,'fixture-session',$4,NULL,$5,'collected.txt',now())`, [randomUUID(), owner, agent, [peer], randomUUID()])
     await db.query('UPDATE identity.users SET removed_at=now() WHERE id=$1', [agent])
     await db.query('DELETE FROM auth.users WHERE id=$1', [owner])
-    expect(await remnants([owner, agent])).toEqual([])
+    await onlyRegisteredAuditCriteriaRemain()
     expect((await db.query('SELECT id FROM auth.users WHERE id=$1', [peer])).rows).toHaveLength(1)
     expect((await db.query('SELECT * FROM identity.account_lifecycle_context')).rows).toEqual([])
   })
@@ -85,7 +101,7 @@ describe('auth account erasure removes residual references without losing shared
 
     await db.query('DELETE FROM auth.users WHERE id=$1', [owner])
 
-    expect(await remnants([owner, agent])).toEqual([])
+    await onlyRegisteredAuditCriteriaRemain()
     expect((await db.query('SELECT inline_text,updated_by,version,updated_at FROM chat.workspace_items WHERE id=$1', [item.id])).rows)
       .toEqual([{ inline_text: 'retained', updated_by: null, version: item.version, updated_at: item.updated_at }])
     await db.query(`UPDATE chat.workspace_items SET filename='renamed.md' WHERE id=$1`, [item.id])
@@ -113,6 +129,6 @@ describe('auth account erasure removes residual references without losing shared
     await expect(db.query('SELECT identity.erase_account_references($1)', [[owner]])).rejects.toThrow('auth deletion transaction')
     await db.query('ROLLBACK TO denied')
     await db.query('DELETE FROM auth.users WHERE id=$1', [owner])
-    expect(await remnants([owner, agent])).toEqual([])
+    await onlyRegisteredAuditCriteriaRemain()
   })
 })
