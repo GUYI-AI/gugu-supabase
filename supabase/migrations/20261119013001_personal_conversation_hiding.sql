@@ -91,7 +91,9 @@ COMMENT ON TABLE chat.conversation_list_state IS
 DO $erase_lock_order$
 DECLARE definition text; previous text; iteration text;
 BEGIN
-  SELECT pg_get_functiondef('identity.erase_human_account(text)'::regprocedure) INTO definition;
+  -- 001400 keeps the one-argument compatibility wrapper; the erasure body is now
+  -- in the reviewed two-argument core. Preserve the wrapper and audit registration.
+  SELECT pg_get_functiondef('identity.erase_human_account(text,text)'::regprocedure) INTO definition;
   previous := definition;
   iteration := '    FOR affected_chat_id IN
         SELECT DISTINCT cm.chat_id
