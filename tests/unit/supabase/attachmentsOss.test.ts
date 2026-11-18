@@ -28,6 +28,7 @@ import {
   handleShare,
   handleGc,
   handleUpload,
+  objectStorage,
   handleUrls,
   Refusal,
   refusalFromDb,
@@ -364,6 +365,16 @@ describe('managed authorization before bytes or signatures', () => {
     await expect(handleUpload(f.deps,USER,{})).rejects.toMatchObject({status:426,code:'client_outdated',message:expect.stringMatching(/^Update Gugu to send files/)})
     expect(f.controls).toEqual([])
     expect(f.calls).toEqual([])
+  })
+  it.each([
+    [400, null, 502, 'failed'], [403, null, 502, 'failed'], [409, null, 502, 'failed'],
+    [409, 'upload_used', 409, 'upload_used'],
+  ] as const)('reports signer failure %s %s at the upload boundary', async (status, code, outwardStatus, outwardCode) => {
+    const f = fakes()
+    f.deps.objects = objectStorage(f.deps)
+    f.deps.objects.uploadBounds = async (bytes, seconds) => ({ maxBytes: bytes, expiresSeconds: seconds })
+    f.deps.objects.upload = async () => { throw new ObjectStorageError(status, code, 'signing failed') }
+    await expect(handleUpload(f.deps, USER, { size_bytes: 5 })).rejects.toMatchObject({ status: outwardStatus, code: outwardCode })
   })
   it('refuses a provider lifetime mismatch before issuing an upload reservation or URL',async()=>{
     const f=fakes()

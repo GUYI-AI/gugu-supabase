@@ -219,8 +219,9 @@ async function issueUpload(deps: AttachmentsDeps, userId: string, body: Record<s
   const seconds=(Date.parse(permit.expires_at)-Date.parse(permit.signed_at))/1000
   const form=await store.upload(permit.staging_key,new Date(permit.signed_at),{maxBytes:Number(permit.max_bytes),expiresSeconds:seconds})
     .catch(error => {
-      if (error instanceof ObjectStorageError) throw new Refusal(error.status, error.code ?? 'failed', error.message)
-      throw error
+      if (error instanceof ObjectStorageError && error.status === 409 && error.code === 'upload_used')
+        throw new Refusal(409, 'upload_used', error.message)
+      throw new Refusal(502, 'failed', 'The storage provider could not sign the upload')
     })
   return { staging_key:permit.staging_key,url:form.url,fields:form.fields,...(form.method?{method:form.method}:{}),
     ...(form.headers?{headers:form.headers}:{}),expires_at:form.expiresAt,max_bytes:Number(permit.max_bytes) }
