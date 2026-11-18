@@ -14,6 +14,7 @@ const seats:{id:string,member:string,token:string,session:string}[]=[], clients:
 let otherLogin:typeof seats[number]
 const targetDevice='gate-device-'+randomUUID()
 const transportReady=new Set<string>()
+const transportStates:string[][]=[]
 let fileFixture:Fixture|null=null,fileService:Running|null=null
 let fileLoginRole:string|null=null
 const fileMachines:Machine[]=[],filePages:Page[]=[]
@@ -25,10 +26,12 @@ async function until(check:()=>boolean|Promise<boolean>,timeout=5000){
 function rpc(token:string){return fetch(url+'/rest/v1/rpc/'+probe,{method:'POST',headers:{apikey:anon,authorization:'Bearer '+token,'content-type':'application/json'},body:'{}'})}
 async function subscribe(token:string,topic:string,received:string[]){
   const c=createClient(url,anon,options);clients.push(c);await c.realtime.setAuth(token)
+  const states:string[]=[];transportStates.push(states)
   const channel=c.channel(topic,{config:{private:true,broadcast:{ack:true}}})
     .on('broadcast',{event:'gate_probe'},e=>received.push(e.payload.tag))
     .on('broadcast',{event:'transport_probe'},e=>transportReady.add(e.payload.tag))
   await new Promise<void>((resolve,reject)=>{channel.subscribe((status)=>{
+    states.push(status)
     if(status==='SUBSCRIBED')resolve();if(status==='CHANNEL_ERROR'||status==='TIMED_OUT')reject(Error('Owned private channel did not authorize'))
   })})
   return channel
@@ -107,11 +110,27 @@ it('denies old HTTP JWTs and stops content on old live private subscriptions aft
   const send=async(s:typeof first,tag:string)=>{await db.query("SELECT chat.send_user_event($1::jsonb,'gate_probe',$2,true)",[JSON.stringify({tag}),original(s)])}
   // SUBSCRIBED attests channel authorization, not the lazy database-broadcast
   // replication startup. Exercise both actual transports before the assertions.
-  await until(async()=>{
-    for(const s of seats)await db.query("SELECT chat.send_user_event($1::jsonb,'transport_probe',$2,true)",[JSON.stringify({tag:s.member}),original(s)])
-    if(transportReady.has(first.member)&&transportReady.has(second.member))return true
-    await pause(150);return false
-  },15000)
+  try{
+    await until(async()=>{
+      for(const s of seats)await db.query("SELECT chat.send_user_event($1::jsonb,'transport_probe',$2,true)",[JSON.stringify({tag:s.member}),original(s)])
+      if(transportReady.has(first.member)&&transportReady.has(second.member))return true
+      await pause(150);return false
+    },15000)
+  }catch(error){
+    // Report only transport state/counts, never topics, principals, payloads or
+    // credentials. Keep the original timeout and every authorization assertion.
+    const topics=await Promise.all(seats.map(async s=>(await namespace(s))+original(s)))
+    const routing=await Promise.all(seats.map(async(s,i)=>(await db.query(
+      'SELECT $2=ANY(ARRAY(SELECT team_private.event_topics($1))) matches',[original(s),topics[i]])).rows[0].matches))
+    const messages=(await db.query('SELECT count(*)::int n FROM realtime.messages WHERE topic=ANY($1::text[])',[topics])).rows[0].n
+    const slots=(await db.query(`SELECT active,slot_type,wal_status,
+      pg_wal_lsn_diff(pg_current_wal_lsn(),confirmed_flush_lsn)::text lag_bytes
+      FROM pg_replication_slots WHERE slot_type='logical'`)).rows
+    const waits=(await db.query(`SELECT backend_type,state,wait_event_type,wait_event,count(*)::int n
+      FROM pg_stat_activity WHERE datname=current_database() GROUP BY 1,2,3,4`)).rows
+    console.info('team-gate-transport-diagnostic',JSON.stringify({ready:seats.map(s=>transportReady.has(s.member)),states:transportStates,routing,messages,slots,waits}))
+    throw error
+  }
   expect((await rpc(first.token)).status).toBe(200)
   const stored=()=>fetch(url+'/storage/v1/object/authenticated/feedback-screenshots/'+objectKey,{headers:{apikey:anon,authorization:'Bearer '+first.token}})
   const readable=await stored()
@@ -150,6 +169,14 @@ it('denies old HTTP JWTs and stops content on old live private subscriptions aft
 },45000)
 
 it('checks the same real Auth session on file HTTP reads and live document messages',async()=>{
+  // Establish this test's revoked-session precondition even if the preceding
+  // broadcast check failed before its normal logout. Do not weaken file 404.
+  const existing=(await db.query('SELECT count(*)::int n FROM auth.sessions WHERE id=$1',[seats[0].session])).rows[0].n
+  if(existing){
+    const out=await fetch(url+'/auth/v1/logout?scope=local',{method:'POST',headers:{apikey:anon,authorization:'Bearer '+seats[0].token}})
+    expect(out.ok).toBe(true);await out.body?.cancel()
+  }
+  expect((await db.query('SELECT count(*)::int n FROM auth.sessions WHERE id=$1',[seats[0].session])).rows[0].n).toBe(0)
   fileFixture=new Fixture();await fileFixture.connect()
   const status=JSON.parse(execFileSync(resolve('node_modules/.bin/supabase'),['status','--workdir',resolve('.local/test-db'),'--output','json'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}))
   const filesDbUrl=await fileFixture.filesLogin();fileLoginRole=new URL(filesDbUrl).username
