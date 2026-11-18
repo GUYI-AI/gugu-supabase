@@ -12,19 +12,20 @@ BEGIN
 END $native$;
 GRANT EXECUTE ON FUNCTION chat.publish_native_conversation_message(text,text,text,text,text,timestamptz) TO authenticated;
 
-CREATE OR REPLACE FUNCTION chat.restore_message_conversation() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+-- Apply the cross-channel identity filter to the insert-only restoration helper.
+-- Its private text signature is introduced by 013001; no unused trigger overload.
+DO $im$
+DECLARE definition text; marker text := '        message.sender_user_id,message.to_user_ids,m.user_id));';
 BEGIN
-  IF NEW.deleted_at IS NULL AND NEW.retracted_at IS NULL
-    AND NOT COALESCE(chat.is_pending_delivery(NEW.id,NEW.content_type,NEW.sender_user_id,NEW.client_message_id),false)
-    AND COALESCE(NEW.client_message_id,'') !~ '^session-import-(root|turn):' THEN
-    PERFORM chat.restore_conversation_list_rows(NEW.chat_id,ARRAY(
-      SELECT DISTINCT m.user_id FROM chat.active_members m JOIN identity.users u ON u.id=m.user_id AND u.type='human'
-      WHERE m.chat_id IN(NEW.chat_id,(SELECT c.source_chat_id FROM chat.chats c WHERE c.id=NEW.chat_id AND c.kind='topic'))
-        AND chat.message_visible_to(NEW.chat_id,NEW.created_at,NEW.is_whisper,NEW.sender_user_id,NEW.to_user_ids,m.user_id)
-        AND NOT EXISTS(SELECT 1 FROM chat.native_conversation_publications p WHERE p.owner_user_id=m.user_id
-          AND p.agent_user_id=NEW.sender_user_id AND p.chat_id=NEW.chat_id AND p.message_id=NEW.id)));
+  SELECT pg_get_functiondef('chat.restore_message_conversation(text)'::regprocedure) INTO definition;
+  IF (length(definition)-length(replace(definition,marker,'')))/length(marker)<>1 THEN
+    RAISE EXCEPTION 'Unexpected unified IM restoration predecessor';
   END IF;
-  RETURN NEW;
-END $$;
-REVOKE ALL ON FUNCTION chat.restore_message_conversation() FROM PUBLIC,anon,authenticated,service_role;
+  definition := replace(definition,marker,
+    '        message.sender_user_id,message.to_user_ids,m.user_id)
+      AND NOT EXISTS (SELECT 1 FROM chat.native_conversation_publications p
+        WHERE p.owner_user_id=m.user_id AND p.agent_user_id=message.sender_user_id
+          AND p.chat_id=message.chat_id AND p.message_id=message.id));');
+  EXECUTE definition;
+END $im$;
+REVOKE ALL ON FUNCTION chat.restore_message_conversation(text) FROM PUBLIC,anon,authenticated,service_role;
