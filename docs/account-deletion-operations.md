@@ -1,9 +1,13 @@
-# Recoverable deletion operations (V2 candidate)
+# Recoverable deletion operations (V2)
 
-Refs #318. This is an unwired, closed-by-default protocol layered on the fixed
-reconciliation dependency in #317. Installing it does not enable access, send
-mail, create an account, or connect a Settings entry. The native operation store
-and reversible device-preparation migration are separate dependencies.
+Refs #318 and #275. This is a closed-by-default protocol layered on the fixed
+reconciliation dependency in #317. The deployed account-deletion Edge entry
+routes `/account-deletion/v2/<action>` to it; existing unversioned routes retain
+their legacy receipt domain. Unsupported V2 routes never fall back to legacy
+retry/confirmation. Installing the entry does not open the database admission
+gates, send mail, create an account, or connect a Settings entry. Native custody,
+trusted result intake, complete erasure and financial/personal eligibility are
+separate delivery prerequisites. Deployment and fixture acceptance use normal CD.
 
 ## Result custody and binding
 
@@ -30,9 +34,10 @@ owner/SID and whole-operation closure checks when the admission gate is disabled
 
 ## Explicit intents
 
-The HTTP core accepts POST routes register, challenge, confirm, result and the
-three preparation actions. It is exported as a module, with no deployed Edge
-entry or browser/native final UI integration in this candidate.
+The HTTP core accepts POST routes register, challenge, confirm, result, cancel
+and the three preparation actions beneath the distinct V2 path. It shares the
+existing verified Auth/official OTP/hard-delete adapter. This increment does not
+claim browser/native final UI integration or real-device acceptance.
 
 - Every request carries local_operation_id and receipt_token. Neither enters a
   URL, diagnostic, screenshot or journal. Raw receipts are never minted or
