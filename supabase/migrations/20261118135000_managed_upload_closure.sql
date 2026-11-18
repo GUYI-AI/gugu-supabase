@@ -60,7 +60,7 @@ BEGIN
           AND (q.staging_key IS NULL OR q.state='awaiting_evidence'
                OR q.window_namespace=p_namespace AND q.window_reference=ref AND q.terminal_evidence_sha256=terminal_hash
                  AND q.permit_expires_at=r.expires_at AND q.state IN ('pending','failed') AND q.next_attempt_at<=now())
-        ORDER BY r.expires_at,r.id LIMIT p_limit
+        ORDER BY CASE WHEN q.state IN ('pending','failed') THEN 1 ELSE 0 END,r.expires_at,r.id LIMIT p_limit
     LOOP
         evidence := ref;
         RETURN NEXT;
@@ -183,6 +183,13 @@ DECLARE definition text; step text:='OR NOT EXISTS(SELECT 1 FROM chat.file_stagi
 BEGIN
     SELECT pg_get_functiondef('chat.file_staging_cleanup_kick()'::regprocedure) INTO definition;
     IF strpos(definition,step)=0 THEN RAISE EXCEPTION 'Missing staging kick predecessor'; END IF;
+    definition := replace(definition,'WHERE c.singleton AND q.state IN',$gate$WHERE c.singleton
+        AND (q.window_namespace IS NULL OR EXISTS(SELECT 1 FROM chat.file_transfer_limits l
+          WHERE l.scope='global' AND l.scope_id='*' AND l.settings->'upload_closure'->'periodic'='true'::jsonb
+          AND l.settings->'upload_closure'->'namespace'=q.window_namespace
+          AND l.settings->'upload_closure'->>'evidence'=q.window_reference
+          AND l.settings->'upload_closure'->>'terminal_sha256'=q.terminal_evidence_sha256))
+        AND q.state IN$gate$);
     EXECUTE replace(definition,step,$new$OR NOT EXISTS(
       SELECT 1 FROM chat.file_transfer_limits l CROSS JOIN chat.file_staging_cleanup_control c
       CROSS JOIN LATERAL chat.file_managed_upload_closable(l.settings->'upload_closure'->'namespace',1,true,

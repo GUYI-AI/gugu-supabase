@@ -1,6 +1,6 @@
 import {
   type CdnConfig, type FetchLike, type OssConfig, CDN_SIGN_TTL_SECONDS, MAX_ATTACHMENT_BYTES,
-  cdnSignedUrl, ossCopy, ossDelete, ossExists, ossRequest, ossSignedRequest, postObjectForm, refreshCdn,
+  cdnSignedUrl, objectKey, ossCopy, ossDelete, ossExists, ossRequest, ossSign, ossSignedRequest, postObjectForm, refreshCdn,
 } from './oss.ts'
 import { type AttachmentObjectStorage, type MultipartStorage, ObjectStorageError } from './object-storage.ts'
 import { type Inspector, inspectFileStream } from './file-inspection.ts'
@@ -139,7 +139,7 @@ export interface SupabaseObjectConfig {
  */
 export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentObjectStorage {
   const base = config.url.replace(/\/$/, '')
-  const objectUrl = (key: string) => base + '/storage/v1/object/' + encodeURIComponent(config.bucket) + '/' + key.split('/').map(encodeURIComponent).join('/')
+  const objectUrl = (key: string, info = false) => base + (info ? '/storage/v1/object/info/' : '/storage/v1/object/') + encodeURIComponent(config.bucket) + '/' + key.split('/').map(encodeURIComponent).join('/')
   // Header names are case-insensitive: merge through Headers so a caller's Content-Type replaces the default
   // instead of being joined into "a, b", which Storage rejects as an invalid MIME type.
   const withHeaders = (base: HeadersInit, extra?: HeadersInit) => {
