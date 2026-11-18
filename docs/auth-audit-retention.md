@@ -1,6 +1,6 @@
 # Auth audit retention
 
-Release `20261115100000` adds closed helpers; it does not change the unified Auth deletion entry. Install the separately reviewed platform-owner time index first, then these helpers, then the unified caller. No platform owner or role membership changes are needed when the existing narrow DML privileges are present.
+Release `20261119001100` adds closed helpers; it does not change the unified Auth deletion entry. Install the separately reviewed platform-owner time index first, then these helpers, then the unified caller. No platform owner or role membership changes are needed when the existing narrow DML privileges are present.
 
 `identity.erase_auth_audit_actor(text[],text)` requires the exact current transaction's full ordered privacy-erasure identity set. The second argument is the Auth deletion row's email, passed only in function parameters. NULL/empty email still performs all ID matching. The caller owns context creation and removal. Helper errors must roll back the deletion transaction.
 
