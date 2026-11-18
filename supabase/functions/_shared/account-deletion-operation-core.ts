@@ -35,7 +35,7 @@ async function readBody(req: Request): Promise<Record<string, unknown>> {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw Error('body');
   return body;
 }
-/** Unwired V2 HTTP core. The database gate defaults closed. No receipt is minted
+/** V2 HTTP core. The database gate defaults closed. No receipt is minted
  * here: its 32 random bytes must already be held by native operation custody.
  */
 export function createAccountDeletionOperationHandler(deps: OperationDependencies) {
