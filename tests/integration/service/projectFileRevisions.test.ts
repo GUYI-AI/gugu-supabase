@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 const url=process.env.GUGU_INTEGRATION_DATABASE_URL??''
 let db:pg.Client, owner:string, member:string, outsider:string, hiddenReader:string, group:string, device:string, otherDevice:string, item:string
@@ -37,7 +38,7 @@ beforeAll(async()=>{
 })
 afterAll(async()=>{await db?.end()})
 beforeEach(async()=>{
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   ;[owner,member,outsider,hiddenReader,group,device,otherDevice,item]=Array.from({length:8},randomUUID)
   for(const id of [owner,member,outsider,hiddenReader]) await db.query(`INSERT INTO auth.users(id,aud,role,email,raw_app_meta_data,raw_user_meta_data,created_at,updated_at)
     VALUES($1,'authenticated','authenticated',$2,'{"provider":"email"}','{}',now(),now())`,[id,id+'@project-files.invalid'])

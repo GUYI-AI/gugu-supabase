@@ -2,10 +2,11 @@
 // gugu-supabase 20261016104500_file_blobs、20261016105500_message_file_refs)。依赖从外面传进来(OSS 配置、fetch、
 // 以调用者身份和以 service_role 调库、Supabase 存储),所以单元测试在 Node 里用假的 OSS 和库跑同一份代码。
 //
-//   POST upload   → 一张直传 OSS 的 PostObject 表单:key = staging/<调用者>/<uuid>,25 MiB 由 OSS 管。
-//   POST commit   → 读暂存对象(内网)、自己算 sha256 和类型 → 服务端复制到 <aa>/<sha256>(只复制读到的那一份)
-//                   → 登记(service_role)→ 删暂存 → 以调用者的身份 attachment_commit(放进「附件」、发消息,一个事务;
-//                   带 item_id + expected_version 就是那个文件的下一版)。
+//   POST upload   → A quota-scoped immutable staging upload permit with provider-enforced size and lifetime bounds.
+//   POST commit   → With sha256: declare the pending file and its keep, then attachment_commit sends its message before the bytes.
+//                   Without sha256: hash, promote and register staged bytes before attachment_commit.
+//   POST finish   → Hash and promote bytes, settle the declaration with its receipt/quota and declared keep atomically.
+//                   Staging stays immutable until permit cleanup; declared settle includes registration in its transaction.
 //   POST forward  → 以调用者的身份 attachment_forward。
 //   POST share    → 群文件夹里的文件按引用发:文本文件先定成带字节的一版(attachment_document_snapshot),再 attachment_share。
 //   POST urls     → 以调用者的身份 file_urls_as(条目的某一版,或悄悄话附件那条消息),再签:OSS 的走 CDN 鉴权 A(图片另给缩略图链接),老对象走存储的签名链接。
@@ -339,12 +340,12 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
     // An image's width and height ride along, so the place its readers draw while the bytes come is already its size.
     const width = int(body, 'width'), height = int(body, 'height')
     await call(deps.userRpc, 'attachment_declare', { p_staging_key: stagingKey, p_sha256: declared, p_size_bytes: int(body, 'size_bytes'), p_content_type: str(body, 'content_type', false),
-      ...(width != null && height != null ? { p_width: width, p_height: height } : {}) })
+      ...(width != null && height != null ? { p_width: width, p_height: height } : {}), ...(keep ? { p_keep: keep } : {}) })
   }
   else await registerStaged(deps, userId, stagingKey, str(body, 'content_type', false), str(body, 'file_name')!)
   const rows = (await writeFile(deps, 'attachment_commit', commitArgs)) as unknown[]
   const message = rows[0] as { id?: string } | undefined
-  if (message?.id) await keepAs(deps, keep, { message_id: message.id }, commitArgs.p_sender_user_id)
+  if (!declared && message?.id) await keepAs(deps, keep, { message_id: message.id }, commitArgs.p_sender_user_id)
   return message ?? null
 }
 
@@ -356,10 +357,8 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
 export async function handleFinish(deps: AttachmentsDeps, userId: string, body: Record<string, unknown>) {
   const pendingKey = stagingOf(body, userId)
   const uploadKey = body.upload_key == null ? pendingKey : stagingOf({ staging_key: body.upload_key }, userId)
-  const keep = keepOf(body)
+  // Released clients still send keep here; the declaration already owns it.
   await registerStaged(deps, userId, uploadKey, str(body, 'content_type', false), str(body, 'file_name', false) ?? '', { pendingKey })
-  const messageId = str(body, 'message_id', false)
-  if (messageId) await keepAs(deps, keep, { message_id: messageId }, str(body, 'as', false) ?? userId)
   return { status: 'ready' }
 }
 
@@ -370,7 +369,7 @@ export async function handlePending(deps: AttachmentsDeps) {
 
 /**
  * How long the copy that just joined a chat stays (the uploader's 「临时 / 保留」): the same mark the person makes later, applied
- * as they upload. Not given: unchanged. A failure is the request's: the commit is idempotent, so the retry marks it again.
+ * after a legacy upload-first commit or folder placement. Declared sends apply it during registration instead.
  */
 async function keepAs(deps: AttachmentsDeps, keep: Keep, ref: { message_id: string } | { item_id: string }, as: string | null) {
   if (keep) await call(deps.userRpc, 'file_storage_mark_as', { p_refs: [ref], p_action: keep, p_as: as })
@@ -487,9 +486,10 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
       await new Promise((r) => setTimeout(r, deps.retryDelayMs ?? 1000))
     }
     // 新建的一行:复制和登记之间,回收可能把同一个 sha 的旧 blob 整个收完(连对象一起删了)。这时上传登记已经引用着
-    // 新的一行,回收领不走它 —— 删暂存之前看一眼,对象不在就再复制一次。
+    // 新的一行,回收领不走它 —— 返回之前看一眼,对象不在就再复制一次。
+    // Settle already made the storage ready: a repair copy can briefly answer 404, which retryFileDownload retries.
     if (created && !(await objectStorage(deps).exists(finalKey))) await copy()
-    await call(deps.serviceRpc,'file_managed_upload_registered',{p_key:stagingKey,p_user:userId,
+    if (!settle) await call(deps.serviceRpc,'file_managed_upload_registered',{p_key:stagingKey,p_user:userId,
       p_document:document.kind === 'document' ? {text:document.text,content_type:document.contentType} : null})
     // Keep staging immutable until the permit closes: an early delete would let the same policy recreate it.
     // Cleanup retains the reservation until terminal upload evidence and physical deletion are confirmed.

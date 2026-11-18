@@ -2,6 +2,7 @@ import { createFixtureGroup } from '../../support/groupFixture'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS, FLUSH_REVISIONS } from '../../support/revisionTransaction'
 
 /**
  * 入群申请推到审批人(迁移 20261002091500):chat.group_join_requests 每变一次,给这个群的群主、管理员和发起人
@@ -71,6 +72,7 @@ async function addAgent(actor: string, chatId: string, agentId: string) {
 /** The friend_requests_changed revisions a user has received so far: the join request each one names. */
 async function inbox(userId: string): Promise<(string | null)[]> {
   await asService()
+  await database.query(FLUSH_REVISIONS)
   const { rows } = await database.query<{ join_request_id: string | null }>(
     `SELECT resource_key->>'join_request_id' AS join_request_id FROM chat.account_revisions
       WHERE user_id = $1 AND event = 'friend_requests_changed' ORDER BY revision`, [userId])
@@ -87,7 +89,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await database?.end() })
 beforeEach(async () => {
-  await database.query('BEGIN')
+  await database.query(BEGIN_READING_REVISIONS)
   owner = await human('Owner'); admin = await human('Admin'); member = await human('Member'); bystander = await human('Bystander')
   memberAgent = await agentOf(member, 'Member Agent')
   ownerAgent = await agentOf(owner, 'Owner Agent')

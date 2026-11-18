@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 // Removing an agent closes its DMs with the personal deletion state; nothing else about them changes.
 let db: Client, connectionString: string, committed = false
@@ -36,7 +37,7 @@ beforeAll(async () => {
 afterAll(async () => { await db?.end() })
 beforeEach(async () => {
   committed = false
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   ;[owner, friend, agent, device, ownerDm, friendDm, group, message] = Array.from({ length: 8 }, randomUUID)
   for (const id of [owner, friend]) await db.query(`INSERT INTO auth.users(id,aud,role,email,created_at,updated_at)
     VALUES($1,'authenticated','authenticated',$2,now(),now())`, [id, `${id}@close-dms.invalid`])
