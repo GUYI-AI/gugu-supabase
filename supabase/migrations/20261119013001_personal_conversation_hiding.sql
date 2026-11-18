@@ -147,7 +147,7 @@ END;
 $$;
 REVOKE ALL ON FUNCTION chat.restore_conversation_list_rows(text,text[]) FROM PUBLIC,anon,authenticated,service_role;
 
--- Invoked only by the existing broadcaster, after its ordinary line admission
+-- Invoked only by the existing physical INSERT broadcaster, after its line admission
 -- and after a sparse-index hit. The common visible path never enters this helper.
 CREATE FUNCTION chat.restore_message_conversation(p_message_id text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
@@ -179,28 +179,27 @@ END;
 $$;
 REVOKE ALL ON FUNCTION chat.restore_message_conversation(text) FROM PUBLIC,anon,authenticated,service_role;
 
--- Reuse the existing AFTER INSERT broadcaster's line lock. A separate trigger or
--- a WHEN probe before that lock could miss an overlapping uncommitted hide.
--- The visible common path adds only this indexed existence read: no extra trigger,
--- helper invocation, advisory/row lock, recipient walk, write or revision.
+-- Reuse the existing physical INSERT trigger, after its ordinary broadcast has
+-- acquired the line lock. The generic broadcaster also handles idempotent replay;
+-- it must not restore a row for an old message. No second trigger is added.
+-- The visible common path adds only this indexed existence read, no helper call,
+-- extra advisory/row lock, recipient walk, write or personal revision.
 DO $message_restore$
-DECLARE target regprocedure := 'chat.broadcast_to_chat_member_user_events(text,text,jsonb)'::regprocedure;
+DECLARE target regprocedure := 'chat.broadcast_message_created()'::regprocedure;
   definition text; prior_acl aclitem[]; permission record;
-  marker text := '    PERFORM chat.lock_chat_revision_recipients(p_chat_id);';
+  marker text := '    PERFORM chat.broadcast_to_chat_member_user_events(NEW.chat_id, ''message_created'', payload);';
 BEGIN
   SELECT pg_get_functiondef(p.oid),COALESCE(p.proacl,acldefault('f',p.proowner))
     INTO definition,prior_acl FROM pg_proc p WHERE p.oid=target;
   IF (length(definition)-length(replace(definition,marker,'')))/length(marker)<>1 THEN
-    RAISE EXCEPTION 'Unexpected message restoration broadcaster predecessor';
+    RAISE EXCEPTION 'Unexpected physical message restoration predecessor';
   END IF;
   definition := replace(definition,marker,marker||'
-    IF p_event = ''message_created'' THEN
-        IF EXISTS (SELECT 1 FROM chat.conversation_list_state state
-            WHERE state.conversation_hidden_at IS NOT NULL
-              AND state.chat_id = ANY(ARRAY[p_chat_id,
-                (SELECT c.source_chat_id FROM chat.chats c WHERE c.id=p_chat_id AND c.kind=''topic'')])) THEN
-            PERFORM chat.restore_message_conversation(p_payload #>> ''{message,id}'');
-        END IF;
+    IF EXISTS (SELECT 1 FROM chat.conversation_list_state state
+        WHERE state.conversation_hidden_at IS NOT NULL
+          AND state.chat_id = ANY(ARRAY[NEW.chat_id,
+            (SELECT c.source_chat_id FROM chat.chats c WHERE c.id=NEW.chat_id AND c.kind=''topic'')])) THEN
+        PERFORM chat.restore_message_conversation(NEW.id);
     END IF;');
   EXECUTE definition;
   FOR permission IN SELECT grantee,bool_or(is_grantable) AS grantable FROM aclexplode(prior_acl)

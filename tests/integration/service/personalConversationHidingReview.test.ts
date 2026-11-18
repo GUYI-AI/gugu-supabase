@@ -193,11 +193,11 @@ it('does not visit an un-prelocked group admitted while erasure waits on an old 
 })
 
 
-it('reuses the broadcaster line lock and indexes only hidden rows without a second insert trigger', async () => {
-  const body=(await admin.query("SELECT pg_get_functiondef('chat.broadcast_to_chat_member_user_events(text,text,jsonb)'::regprocedure) definition")).rows[0].definition as string
-  expect(body.indexOf('PERFORM chat.restore_message_conversation')).toBeGreaterThan(body.indexOf('PERFORM chat.lock_chat_revision_recipients(p_chat_id)'))
-  expect(body.indexOf('PERFORM chat.restore_message_conversation')).toBeLessThan(body.indexOf('FOR target_user_id IN'))
-  expect(body.match(/PERFORM chat\.lock_chat_revision_recipients\(p_chat_id\)/g)).toHaveLength(1)
+it('restores only inside the existing physical INSERT trigger after its ordinary broadcast', async () => {
+  const body=(await admin.query("SELECT pg_get_functiondef('chat.broadcast_message_created()'::regprocedure) definition")).rows[0].definition as string
+  expect(body.indexOf('PERFORM chat.restore_message_conversation')).toBeGreaterThan(body.indexOf('PERFORM chat.broadcast_to_chat_member_user_events(NEW.chat_id'))
+  expect(body.match(/PERFORM chat\.broadcast_to_chat_member_user_events\(/g)).toHaveLength(1)
+  expect(body).not.toContain('PERFORM chat.lock_')
   expect((await admin.query("SELECT count(*)::int count FROM pg_trigger WHERE tgrelid='chat.messages'::regclass AND tgname LIKE '%restore_conversation%'")).rows[0].count).toBe(0)
   expect((await admin.query("SELECT indexdef FROM pg_indexes WHERE schemaname='chat' AND indexname='conversation_list_state_hidden'")).rows[0].indexdef).toContain('WHERE (conversation_hidden_at IS NOT NULL)')
 })
