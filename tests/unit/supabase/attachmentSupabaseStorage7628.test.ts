@@ -7,7 +7,6 @@ function storage(fetcher: typeof fetch) {
   return supabaseObjectStorage({
     url: 'https://project.example', serviceKey: 'server-only-fixture', bucket: 'attachments',
     fetch: fetcher,
-    signUpload: async () => 'https://project.example/storage/v1/object/upload/sign/attachments/staging?token=scoped',
     signDownload: async () => 'https://project.example/signed/object',
   })
 }
@@ -114,8 +113,20 @@ describe('community attachment storage', () => {
     await expect(denied.exists('ab/hash')).rejects.toBeInstanceOf(ObjectStorageError)
   })
 
+  it.each([
+    [400, { statusCode: '409', error: 'Duplicate' }, 409, 'upload_used'],
+    [409, { code: 'KeyAlreadyExists' }, 409, 'upload_used'],
+    [409, { code: 'ResourceAlreadyExists' }, 409, 'upload_used'],
+    [400, { statusCode: '400', error: 'InvalidKey' }, 400, null],
+    [400, { statusCode: '409', error: 'OtherConflict' }, 400, null],
+    [409, { code: 'BucketAlreadyExists' }, 409, null],
+  ] as const)('classifies the signing response %s %j', async (status, body, expected, code) => {
+    const api = storage(async () => Response.json(body, { status }))
+    await expect(api.upload('staging/u/file', new Date())).rejects.toMatchObject({ status: expected, code })
+  })
   it('returns only a scoped upload URL and never the server credential', async () => {
-    const plan = await storage(vi.fn()).upload('staging/u/file', new Date('2026-10-21T00:00:00Z'))
+    const sign = vi.fn(async () => Response.json({ url: '/object/upload/sign/attachments/staging/u/file?token=scoped' }))
+    const plan = await storage(sign).upload('staging/u/file', new Date('2026-10-21T00:00:00Z'))
     expect(plan.method).toBe('PUT')
     expect(JSON.stringify(plan)).not.toContain('server-only-fixture')
     expect(plan.url).toContain('token=scoped')

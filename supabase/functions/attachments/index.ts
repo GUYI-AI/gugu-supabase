@@ -107,11 +107,7 @@ function depsFor(authorization: string, storage: AttachmentStorageConfig): Attac
       : supabaseObjectStorage({
         url, serviceKey: env('SUPABASE_SERVICE_ROLE_KEY'), bucket: storage.bucket,
         fetch: (input, init) => fetch(input, init),
-        signUpload: async (key) => {
-          const { data, error } = await asService.storage.from(storage.bucket).createSignedUploadUrl(key)
-          if (error || !data?.signedUrl) throw new Error('could not sign attachment upload')
-          return publicStorageUrl(data.signedUrl, url)
-        },
+        publicUrl: env('GUGU_PUBLIC_SUPABASE_URL') || url,
         signDownload: (key,seconds)=>signStorage(storage.bucket,key,seconds),
       }),
     fetch: (input, init) => fetch(input, init),

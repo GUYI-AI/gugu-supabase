@@ -128,7 +128,7 @@ export interface SupabaseObjectConfig {
   serviceKey: string
   bucket: string
   fetch: FetchLike
-  signUpload(key: string): Promise<string>
+  publicUrl?: string
   signDownload(key: string, seconds: number, trafficBits?:number): Promise<string>
 }
 
@@ -181,10 +181,26 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
       // Supabase signed uploads do not bind a per-object size or custom TTL. Reserve the real bucket ceiling.
       return {maxBytes,expiresSeconds:7200}
     },
-    upload: async (key, now) => ({
-      url: await config.signUpload(key), method: 'PUT', fields: {},
-      expiresAt: new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString(),
-    }),
+    upload: async (key, now) => {
+      const path = '/object/upload/sign/' + [config.bucket, ...key.split('/')].map(encodeURIComponent).join('/')
+      const response = await request(base + '/storage/v1' + path, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      })
+      if (!response.ok) {
+        // Storage JS discards the legacy Duplicate field when the envelope includes a numeric statusCode.
+        const failure = await response.json().catch(() => null)
+        const duplicate = response.status === 400 && failure?.statusCode === '409' && failure?.error === 'Duplicate'
+          || response.status === 409 && ['KeyAlreadyExists', 'ResourceAlreadyExists'].includes(failure?.code)
+        if (duplicate) throw new ObjectStorageError(409, 'upload_used', 'The staging object already exists')
+        throw new ObjectStorageError(response.status, null, 'Could not sign the staging upload')
+      }
+      const { url } = await response.json()
+      if (typeof url !== 'string' || !url.startsWith(path + '?')) throw new Error('Unexpected signed staging path')
+      const signed = new URL((config.publicUrl || base).replace(/\/$/, '') + '/storage/v1' + url)
+      if (!signed.searchParams.get('token')) throw new Error('Missing signed staging token')
+      return { url: signed.toString(), method: 'PUT', fields: {},
+        expiresAt: new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString() }
+    },
     inspect: async (key, limit, retainBytes) => {
       const version = async () => {
         const response = await request(base + '/storage/v1/object/info/' + encodeURIComponent(config.bucket) + '/' + key.split('/').map(encodeURIComponent).join('/'))

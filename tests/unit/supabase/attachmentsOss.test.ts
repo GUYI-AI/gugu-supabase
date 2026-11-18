@@ -370,8 +370,8 @@ describe('managed authorization before bytes or signatures', () => {
     const store=await import('../../../supabase/functions/_shared/attachment-object-storage')
     let signed=false
     f.deps.objects=store.supabaseObjectStorage({url:'https://db.example',serviceKey:'fixture',bucket:'attachments',
-      fetch:async()=>new Response(JSON.stringify({file_size_limit:MAX_ATTACHMENT_BYTES})),
-      signUpload:async()=>{signed=true;return 'https://db.example/scoped'},signDownload:async()=>'',
+      fetch:async(url)=>{ signed ||= url.includes('/object/upload/sign/'); return Response.json({file_size_limit:MAX_ATTACHMENT_BYTES}) },
+      signDownload:async()=>'',
     })
     await expect(handleUpload(f.deps,USER,{size_bytes:5})).rejects.toMatchObject({status:503,code:'not_configured'})
     expect(signed).toBe(false)
@@ -384,8 +384,8 @@ describe('managed authorization before bytes or signatures', () => {
       ?{data:{max_bytes:MAX_ATTACHMENT_BYTES,permit_seconds:7200},error:null}:original(fn,args)
     let signed=false
     f.deps.objects=store.supabaseObjectStorage({url:'https://db.example',serviceKey:'fixture',bucket:'attachments',
-      fetch:async()=>new Response(JSON.stringify({file_size_limit:MAX_ATTACHMENT_BYTES+1})),
-      signUpload:async()=>{signed=true;return 'https://db.example/scoped'},signDownload:async()=>'',
+      fetch:async(url)=>{ signed ||= url.includes('/object/upload/sign/'); return Response.json({file_size_limit:MAX_ATTACHMENT_BYTES+1}) },
+      signDownload:async()=>'',
     })
     await expect(handleUpload(f.deps,USER,{size_bytes:5})).rejects.toMatchObject({status:503,code:'not_configured'})
     expect(signed).toBe(false)
