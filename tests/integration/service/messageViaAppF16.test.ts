@@ -10,6 +10,7 @@
 //        pnpm exec vitest run messageViaAppF16`
 import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 interface QueryResult<Row> { rows: Row[] }
 interface DatabaseClient {
@@ -61,7 +62,7 @@ beforeAll(async () => {
 afterAll(async () => { await database?.end() })
 
 async function inRollback(body: () => Promise<void>): Promise<void> {
-  await database.query('BEGIN')
+  await database.query(BEGIN_READING_REVISIONS)
   try {
     await body()
   } finally {

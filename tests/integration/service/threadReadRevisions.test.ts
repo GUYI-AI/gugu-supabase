@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 interface Database {
   connect(): Promise<void>
@@ -49,7 +50,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await db?.end() })
 beforeEach(async () => {
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   owner = randomUUID(); reader = randomUUID(); group = randomUUID(); root = randomUUID()
   stream = `thread:${group}:${root}`
   await db.query("INSERT INTO identity.users(id,type,display_name) SELECT id,'human','Thread read fixture' FROM unnest($1::text[]) id", [[owner, reader]])

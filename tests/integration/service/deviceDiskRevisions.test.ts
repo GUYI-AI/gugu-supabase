@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 const GiB = 1024 ** 3 // SERVER_DISK_LOW_BYTES in the shared client health predicate.
 let db: Client
@@ -24,7 +25,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await db?.end() })
 beforeEach(async () => {
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   owner = randomUUID(); device = `disk-${randomUUID()}`
   await db.query('INSERT INTO auth.users(id,email) VALUES($1,$2)', [owner, `${owner}@disk.invalid`])
   await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Disk fixture') ON CONFLICT(id) DO NOTHING", [owner])

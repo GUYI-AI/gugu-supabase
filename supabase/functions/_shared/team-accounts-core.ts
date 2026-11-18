@@ -1,5 +1,6 @@
 import { parseTeamWrite, TeamRefusal } from './team-accounts-contract.ts';
 import type { teamAuth, TeamAuthCaller, PrincipalPlan } from './team-accounts-auth.ts';
+import { teamMailFlow, type InvitationMailer } from './team-mail-flow.ts';
 
 type Auth = ReturnType<typeof teamAuth>;
 export interface TeamAccountsDependencies {
@@ -7,6 +8,8 @@ export interface TeamAccountsDependencies {
   rpc(name: string, args: Record<string, unknown>): Promise<any>;
   revokeModel(input: Record<string, unknown>): Promise<boolean>;
   siteOrigin?: string;
+  clientIp?(request: Request): string | null;
+  invitationMailer?: InvitationMailer;
 }
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization, apikey, content-type, x-client-info',
   'access-control-allow-methods': 'GET, POST, OPTIONS' };
@@ -28,6 +31,7 @@ function sessionArgs(caller: TeamAuthCaller, input: Record<string, unknown>, act
   return { p_action: action, p_actor: caller.id, p_session: caller.sessionId, p_input: input };
 }
 export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
+  const mail = teamMailFlow(deps);
   async function login(prepared: any) {
     const plan: PrincipalPlan = prepared.plan;
     if (!plan || !prepared.membership?.id) throw new TeamRefusal('dependency_unavailable', 503);
@@ -71,6 +75,7 @@ export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
   return async (request: Request): Promise<Response> => {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
     const requestId = crypto.randomUUID();
+    let isInvitation = false, invitationAttempted = false, invitationReceipt: Record<string, unknown> | undefined;
     try {
       let input: Record<string, any>;
       if (request.method === 'GET') {
@@ -80,6 +85,7 @@ export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
       } else if (request.method === 'POST') input = parseTeamWrite(await requestBody(request));
       else return json({ ok: false, error: { code: 'invalid_request', message: 'Method unavailable.' }, request_id: requestId }, 405);
       const { action, ...body } = input;
+      isInvitation = action === 'invite';
       const token = request.headers.get('authorization')?.match(/^Bearer ([^\s]{1,8192})$/i)?.[1];
       let caller: TeamAuthCaller | null = null;
       if (!PUBLIC_WRITES.has(action)) {
@@ -90,9 +96,7 @@ export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
       else if (action === 'email_challenge') {
         if (body.invitation_token) { body.invitation_digest = await digest(body.invitation_token); delete body.invitation_token; }
         const challenge = await deps.rpc('team_email_workflow', { p_action: 'begin', p_input: body });
-        let sent = false; try { sent = await deps.auth.sendEmailCode(challenge.email); } catch { /* no raw Auth diagnostics */ }
-        await deps.rpc('team_email_workflow', { p_action: 'sent', p_input: { challenge_id: challenge.challenge_id, sent } });
-        if (!sent) throw new TeamRefusal('dependency_unavailable', 503);
+        await mail.sendCode(challenge, request);
         data = { challenge_id: challenge.challenge_id, expires_at: challenge.expires_at, resend_after_seconds: 60 };
       } else if (action === 'email_verify') {
         const challenge = await deps.rpc('team_email_workflow', { p_action: 'claim', p_input: { challenge_id: body.challenge_id } });
@@ -128,15 +132,19 @@ export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
         try { origin = new URL(configured); } catch { throw new TeamRefusal('dependency_unavailable', 503); }
         if (origin.protocol !== 'https:' || origin.username || origin.password || origin.search || origin.hash
             || !['', '/'].includes(origin.pathname)) throw new TeamRefusal('dependency_unavailable', 503);
+        invitationAttempted = true;
         const invitation = await deps.rpc('team_member_workflow', sessionArgs(caller!, body, action));
-        if (typeof invitation.email !== 'string' || !(await deps.auth.ensureAnchor(invitation.email))) throw new TeamRefusal('dependency_unavailable', 503);
+        if (typeof invitation?.invitation_id !== 'string' || typeof invitation.operation_id !== 'string') throw new TeamRefusal('dependency_unavailable', 503);
+        invitationReceipt = { invitation_id: invitation.invitation_id, operation_id: invitation.operation_id, invitation_created: true };
         const opaque = await deps.auth.invitationToken(invitation.invitation_id, invitation.seed);
         await deps.rpc('team_member_workflow', sessionArgs(caller!, { invitation_id: invitation.invitation_id, token_digest: await digest(opaque) }, 'bind_invitation'));
         if (!['cn', 'hk'].includes(invitation.region)) throw new TeamRefusal('dependency_unavailable', 503);
         const fragment = '?region=' + invitation.region + '#invitation_token=' + encodeURIComponent(opaque);
         data = { invitation_id: invitation.invitation_id, state: invitation.state, expires_at: invitation.expires_at,
+          operation_id: invitation.operation_id, invitation_created: true,
           invitation_url: origin.origin + '/team/invite' + fragment,
           app_deep_links: { stable: 'gugu://team/invite' + fragment, beta: 'gugu-beta://team/invite' + fragment, dev: 'gugu-dev://team/invite' + fragment } };
+        data = await mail.sendInvitation(invitation, data, request, caller!);
       } else if (action === 'set_role') data = await deps.rpc('team_member_workflow', sessionArgs(caller!, body, action));
       else if (action === 'disable') {
         const operation = await deps.rpc('team_member_workflow', sessionArgs(caller!, body, action));
@@ -159,9 +167,7 @@ export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
         const pending = await deps.rpc('team_member_workflow', sessionArgs(caller!, body, action));
         const challenge = await deps.rpc('team_email_workflow', { p_action: 'delivery', p_input: { challenge_id: pending.challenge_id } });
         if (challenge.state === 'sending') {
-          let sent = false; try { sent = await deps.auth.sendEmailCode(challenge.email); } catch { /* safe failure only */ }
-          await deps.rpc('team_email_workflow', { p_action: 'sent', p_input: { challenge_id: pending.challenge_id, sent } });
-          if (!sent) throw new TeamRefusal('dependency_unavailable', 503);
+          await mail.sendCode(challenge, request, caller);
         }
         data = { challenge_id: pending.challenge_id, expires_at: pending.expires_at, state: 'pending' };
       } else if (action === 'confirm_email_change') {
@@ -183,7 +189,15 @@ export function createTeamAccountsHandler(deps: TeamAccountsDependencies) {
       return json({ ok: true, data });
     } catch (error) {
       const refusal = error instanceof TeamRefusal ? error : new TeamRefusal('dependency_unavailable', 503);
-      return json({ ok: false, error: { code: refusal.code, message: 'The operation could not be completed.' }, request_id: requestId }, refusal.status);
+      let details = refusal.details;
+      if (isInvitation && !details) {
+        const unknown = invitationAttempted && !invitationReceipt && refusal.code === 'dependency_unavailable';
+        details = { ...(invitationReceipt ?? { operation_id: null, invitation_created: unknown ? null : false }),
+          delivery: { operation_id: null, state: unknown ? 'unknown' : 'pending',
+            reason_code: unknown ? 'invitation_outcome_unknown' : refusal.code } };
+      }
+      return json({ ok: false, error: { code: refusal.code, message: 'The operation could not be completed.' },
+        ...(details ? { data: details } : {}), request_id: requestId }, refusal.status);
     }
   };
 }

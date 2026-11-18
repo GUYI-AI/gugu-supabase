@@ -19,6 +19,8 @@ import { hasThumbnail, objectHeaders, sniff } from '../../../supabase/functions/
 import {
   type AttachmentsDeps,
   handleCommit,
+  handleFinish,
+  handlePending,
   handleSessionCommit,
   handleSessionUrls,
   handleForward,
@@ -30,6 +32,8 @@ import {
   Refusal,
   refusalFromDb,
 } from '../../../supabase/functions/_shared/attachments-core'
+import { ObjectStorageError } from '../../../supabase/functions/_shared/object-storage'
+import { inspectSource } from '../../../services/files/src/inspect.mjs'
 
 const OSS: OssConfig = {
   region: 'cn-wulanchabu', bucket: 'gugu-files-test', endpointInternal: 'oss-cn-wulanchabu-internal.aliyuncs.com',
@@ -182,6 +186,8 @@ function fakes(opts: {
   afterGet?: (bucket: Bucket) => void
   /** 登记成功之后。 */
   afterRegister?: (bucket: Bucket) => void
+  /** file_blob_settle's answer for a declared attachment's bytes ('ready' unless told). */
+  settle?: 'ready' | 'failed'
   /** 按引用发的是文本文件:它此刻的正文,和库里最新一版已经带着字节的正文(null = 没有带字节的一版)。 */
   document?: { text: string; snapshotted: string | null }
 } = {}) {
@@ -199,6 +205,17 @@ function fakes(opts: {
     textFiles: { maxBytes: 1024 * 1024, classify: () => ({ kind: 'file', why: 'binary fixture' }) },
     oss: OSS,
     cdn: CDN,
+    // The file service's own inspection over this fake OSS; its HTTP refusals map as fileServiceInspector maps them.
+    inspector: async (source, limit, retain) => {
+      try {
+        const r = await inspectSource({ source, limit, retain }, { fetch: deps.fetch as typeof fetch })
+        return { bytes: new Uint8Array(r.prefix), sizeBytes: r.sizeBytes, sha256: r.sha256, etag: r.etag }
+      } catch (error) {
+        const status = (error as { status?: number }).status
+        if (status === 404 || status === 413) throw new ObjectStorageError(status, status === 413 ? 'too_large' : null, String(error))
+        throw error
+      }
+    },
     fetch: async (url, init) => {
       order.push('object:' + (init?.method ?? 'GET'))
       const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>))
@@ -263,6 +280,7 @@ function fakes(opts: {
       }
       rpcs.push({ as: 'user', fn, args })
       if (fn === 'attachment_commit') return { data: [{ id: args.p_message_id, file_version: 1 }], error: null }
+      if (fn === 'attachment_declare') return { data: 'pending-blob', error: null }
       if (fn === 'send_friend_file_as_owner') return { data: { chat_id: 'dm-1', message_id: 'm-o', sender_user_id: USER, sent_by_agent: true }, error: null }
       if (fn === 'attachment_forward') {
         return { data: [{ id: args.p_message_id, forwarded_from_message_id: args.p_source_message_id }], error: null }
@@ -293,8 +311,10 @@ function fakes(opts: {
     },
     serviceRpc: async (fn, args) => {
       order.push('service:' + fn)
+      if (fn === 'file_blob_gc_run_begin') return { data: { acquired: true, token: '11111111-1111-4111-8111-111111111111', batch_limit: 50, concurrency: 1 }, error: null }
+      if (fn === 'file_blob_gc_run_renew' || fn === 'file_blob_gc_run_end') return { data: true, error: null }
       if (fn==='file_managed_upload_for') {controls.push({as:'service',fn,args});return {data:{max_bytes:MAX_ATTACHMENT_BYTES},error:null}}
-      if (fn==='file_managed_upload_registered'||fn==='file_transfer_expire'||fn==='file_temporary_expire') {controls.push({as:'service',fn,args});return {data:null,error:null}}
+      if (fn==='file_managed_upload_registered'||fn==='file_transfer_expire'||fn==='file_temporary_expire'||fn==='file_managed_upload_parts_claim') {controls.push({as:'service',fn,args});return {data:null,error:null}}
       if (fn==='file_transfer_settings') {controls.push({as:'service',fn,args});return {data:{},error:null}}
       rpcs.push({ as: 'service', fn, args })
       if (fn === 'file_blob_register') {
@@ -303,7 +323,8 @@ function fakes(opts: {
         opts.afterRegister?.(bucket)
         return { data: [{ blob_id: 'b1', created: opts.registerCreated ?? true }], error: null }
       }
-      if (fn === 'file_blob_gc_claim') return { data: opts.claimed ?? [], error: null }
+      if (fn === 'file_blob_settle') return { data: opts.settle === 'failed' ? { status: 'failed' } : { status: 'ready', blob_id: 'b1', created: true }, error: null }
+      if (fn === 'file_blob_gc_run_claim') return { data: opts.claimed ?? [], error: null }
       if (fn === 'file_blob_gc_finish' || fn === 'file_blob_gc_fail') return { data: null, error: null }
       return { data: null, error: { message: `no fake for ${fn}` } }
     },
@@ -535,6 +556,65 @@ describe('提交', () => {
   })
 })
 
+// Owner 11-15: a message is its text and its files' index. A declared commit sends the message before any byte is read;
+// finish hashes the bytes later and settles the declaration (or fails it); the old upload-first commit is unchanged.
+describe('bytes after the message', () => {
+  it.each(['temporary','permanent'])('declared keep %s travels with the declaration, with no fallible mark after the message', async keep => {
+    const f = fakes({ object: null })
+    await expect(handleCommit(f.deps, USER, commitBody({ sha256: 'ab'.repeat(32), size_bytes: 64, keep })))
+      .resolves.toEqual({ id: 'm1', file_version: 1 })
+    expect(f.rpcs.map(r => r.fn)).toEqual(['attachment_declare','attachment_commit'])
+    expect(f.rpcs[0]!.args).toMatchObject({ p_keep: keep })
+  })
+  it('finish ignores the released client keep field and does not issue a separate mark', async () => {
+    const f = fakes({ object: pngBytes() })
+    await expect(handleFinish(f.deps, USER, { staging_key: STAGING, file_name: 'shot.png', message_id: 'm1', keep: 'temporary' }))
+      .resolves.toEqual({ status: 'ready' })
+    expect(f.rpcs.some(r => r.fn === 'file_storage_mark_as')).toBe(false)
+  })
+
+  const declared = { sha256: 'ab'.repeat(32), size_bytes: 64, content_type: 'image/png' }
+  it('a declared commit sends the message without reading, copying or registering any byte', async () => {
+    const f = fakes({ object: null })
+    await expect(handleCommit(f.deps, USER, commitBody({ ...declared, width: 800, height: 600 }))).resolves.toEqual({ id: 'm1', file_version: 1 })
+    expect(f.calls, 'no object read or written').toEqual([])
+    expect(f.rpcs.map(r => `${r.as}:${r.fn}`)).toEqual(['user:attachment_declare', 'user:attachment_commit'])
+    expect(f.rpcs[0]!.args).toEqual({ p_staging_key: STAGING, p_sha256: 'ab'.repeat(32), p_size_bytes: 64, p_content_type: 'image/png', p_width: 800, p_height: 600 })
+    const file = fakes({ object: null })
+    await handleCommit(file.deps, USER, commitBody({ ...declared, content_type: 'application/pdf' }))
+    expect(file.rpcs[0]!.args, 'not an image: no size to declare').not.toHaveProperty('p_width')
+  })
+  it('finish hashes the bytes this function read and settles the declaration with them; a resumed upload names its own key', async () => {
+    const bytes = pngBytes(), f = fakes({ object: bytes })
+    await expect(handleFinish(f.deps, USER, { staging_key: STAGING, file_name: 'shot.png', message_id: 'm1' })).resolves.toEqual({ status: 'ready' })
+    const settle = f.rpcs.find(r => r.fn === 'file_blob_settle')!
+    expect(settle.as).toBe('service')
+    expect(settle.args).toMatchObject({ p_uploader: USER, p_pending_key: STAGING, p_upload_key: STAGING, p_sha256: createHash('sha256').update(bytes).digest('hex'), p_size_bytes: 64, p_content_type: 'image/png', p_width: 800, p_height: 600 })
+    expect(f.rpcs.some(r => ['file_blob_register', 'file_managed_upload_registered'].includes(r.fn)), 'a declared attachment settles and registers in one RPC').toBe(false)
+    const resumed = fakes({ object: bytes }), again = `staging/${USER}/44444444-4444-4444-8444-444444444444`
+    await handleFinish(resumed.deps, USER, { staging_key: STAGING, upload_key: again, file_name: 'shot.png', message_id: 'm1' })
+    expect(resumed.rpcs.find(r => r.fn === 'file_blob_settle')!.args).toMatchObject({ p_pending_key: STAGING, p_upload_key: again })
+  })
+  it('bytes that are not the declared file: 409 upload_mismatch; no upload there: 409 upload_missing; another\'s key: 400 before reading', async () => {
+    const wrong = fakes({ object: pngBytes(), settle: 'failed' })
+    await expect(handleFinish(wrong.deps, USER, { staging_key: STAGING, file_name: 'shot.png' })).rejects.toMatchObject({ status: 409, code: 'upload_mismatch' })
+    const missing = fakes({ object: null })
+    await expect(handleFinish(missing.deps, USER, { staging_key: STAGING, file_name: 'shot.png' })).rejects.toMatchObject({ status: 409, code: 'upload_missing' })
+    expect(missing.rpcs.some(r => r.fn === 'file_blob_settle')).toBe(false)
+    const other = fakes({ object: pngBytes() })
+    await expect(handleFinish(other.deps, '33333333-3333-4333-8333-333333333333', { staging_key: STAGING, file_name: 'shot.png' })).rejects.toMatchObject({ status: 400 })
+    expect(other.calls).toEqual([])
+  })
+  it('pending lists the caller\'s declarations still waiting for bytes, as the caller (a restarted sender resumes them)', async () => {
+    const f = fakes({ object: null })
+    const rows = [{ staging_key: STAGING, message_id: 'm1', chat_id: 'c1', as: USER, sha256: 'ab'.repeat(32), size_bytes: 64, content_type: 'image/png' }]
+    const base = f.deps.userRpc
+    f.deps.userRpc = async (fn, args) => fn === 'attachment_pending_mine' ? { data: rows, error: null } : base(fn, args)
+    await expect(handlePending(f.deps)).resolves.toEqual({ uploads: rows })
+    expect(f.calls, 'nothing read or written').toEqual([])
+  })
+})
+
 describe('代主人发给好友', () => {
   it('带 friend_user_id 的提交:登记字节,再以主人身份 send_friend_file_as_owner(agent、请求号、说明原样带上);缺请求号在读字节之前拒', async () => {
     const f = fakes({ object: pngBytes() })
@@ -666,7 +746,7 @@ describe('直传表单、签名链接、回收', () => {
     expect(controls.filter(r => r.fn === 'file_temporary_expire')).toEqual([{as:'service',fn:'file_temporary_expire',args:{p_limit:500}}])
     expect(order.indexOf('service:file_temporary_expire')).toBeLessThan(order.indexOf('service:file_transfer_expire'))
     expect(controls.filter(r => r.fn === 'file_transfer_expire')).toEqual([{as:'service',fn:'file_transfer_expire',args:{p_limit:500}}])
-    expect(order.indexOf('service:file_transfer_expire')).toBeLessThan(order.indexOf('service:file_blob_gc_claim'))
+    expect(order.indexOf('service:file_transfer_expire')).toBeLessThan(order.indexOf('service:file_blob_gc_run_claim'))
     expect(order).not.toContain('service:file_transfer_object_gone')
     expect(calls.map((c) => `${c.method} ${c.url.replace(/\?.*$/, '')}`)).toEqual([
       'DELETE https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/ab/x',
@@ -708,7 +788,7 @@ describe('直传表单、签名链接、回收', () => {
     expect(f.events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'file-accept',
       at: '2026-10-16T12:00:00.000Z', day: '2026-10-16', claimed: 1, deleted: 1, finished: 0, failed: 1, outcome: 'completed' }])
   })
-  it.each(['file_temporary_expire', 'file_transfer_expire', 'file_blob_gc_claim'])('gc records unknown claims and rethrows a %s refusal', async failedRpc => {
+  it.each(['file_temporary_expire', 'file_transfer_expire', 'file_blob_gc_run_claim'])('gc records unknown claims and rethrows a %s refusal', async failedRpc => {
     const f = fakes(), rpc = f.deps.serviceRpc
     f.deps.serviceRpc = (fn, args) => fn === failedRpc
       ? Promise.resolve({ data: null, error: { message: 'RPC unavailable' } }) : rpc(fn, args)
@@ -731,7 +811,7 @@ describe('直传表单、签名链接、回收', () => {
   it.each([false, true])('gc preserves the original exception when summary logging throws (stderr unavailable: %s)', async stderrFails => {
     const f = fakes(), original = new Error('claim transport unavailable'), loggingError = new Error('summary logger unavailable')
     const rpc = f.deps.serviceRpc
-    f.deps.serviceRpc = (fn, args) => fn === 'file_blob_gc_claim' ? Promise.reject(original) : rpc(fn, args)
+    f.deps.serviceRpc = (fn, args) => fn === 'file_blob_gc_run_claim' ? Promise.reject(original) : rpc(fn, args)
     f.deps.log = () => { throw loggingError }
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => { if (stderrFails) throw new Error('stderr unavailable') })
     try {

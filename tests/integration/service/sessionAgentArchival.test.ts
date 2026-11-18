@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 let db: Client
 let owner: string, outsider: string, agent: string, peer: string, device: string, group: string
@@ -71,7 +72,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await db?.end() })
 beforeEach(async () => {
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   ;[owner, outsider, agent, peer, device, group, interval] = Array.from({ length: 7 }, randomUUID)
   archivedAt = new Date(Date.now() - 20_000).toISOString()
   restoredAt = new Date(Date.now() - 10_000).toISOString()
@@ -398,7 +399,7 @@ describe('reversible agent session archival', () => {
         await db.query('COMMIT')
         await pending
         await sender.query('COMMIT')
-        await db.query('BEGIN')
+        await db.query(BEGIN_READING_REVISIONS)
       } else {
         await insert()
         pending = archive()
