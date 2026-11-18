@@ -2,8 +2,8 @@ import { accountDeletionDependencies } from './account-deletion-auth.ts';
 import type { OperationDependencies, OperationReply } from './account-deletion-operation-core.ts';
 
 /** Same verified Auth/official OTP/hard-delete adapter as the reconciliation
- * protocol; only the service-only RPC destination changes. No public entry is
- * wired by this module and no credential or response body is logged.
+ * protocol; only the service-only RPC destination changes. No credential or
+ * response body is logged.
  */
 export function accountDeletionOperationDependencies(settings: {
   url: string; anonKey: string; serviceKey: string; fetch?: typeof fetch;
