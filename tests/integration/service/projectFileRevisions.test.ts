@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 const url=process.env.GUGU_INTEGRATION_DATABASE_URL??''
 let db:pg.Client, owner:string, member:string, outsider:string, hiddenReader:string, group:string, device:string, otherDevice:string, item:string
@@ -37,7 +38,7 @@ beforeAll(async()=>{
 })
 afterAll(async()=>{await db?.end()})
 beforeEach(async()=>{
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   ;[owner,member,outsider,hiddenReader,group,device,otherDevice,item]=Array.from({length:8},randomUUID)
   for(const id of [owner,member,outsider,hiddenReader]) await db.query(`INSERT INTO auth.users(id,aud,role,email,raw_app_meta_data,raw_user_meta_data,created_at,updated_at)
     VALUES($1,'authenticated','authenticated',$2,'{"provider":"email"}','{}',now(),now())`,[id,id+'@project-files.invalid'])
@@ -77,6 +78,14 @@ describe('project local metadata and exact references, kept by the device that s
       await user(actor)
       expect((await db.query(PREPARE,[group,actor,123,kind])).rows[0].r).toMatchObject({chat_id:group})
     }
+  })
+  it('refuses an upload over the configured size with that size in bytes',async()=>{
+    await service()
+    await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=chat.file_transfer_limits.settings||EXCLUDED.settings",
+      [{inventory_ready:true,file_max_bytes:1000,upload_permit_seconds:120}])
+    await user(member)
+    const refused=await fails('SELECT chat.file_managed_upload_prepare($1,$2,$3,$4)',[group,member,1001,null])
+    expect([refused.message,refused.hint]).toEqual(['File exceeds configured upload size of 1000 bytes','file_transfer_too_large'])
   })
   it('publishes immutable device/project/path/SHA metadata, without a cloud blob, URL, key or absolute root',async()=>{
     expect(await publish()).toMatchObject({item_id:item,version:1,sha256:sha,size_bytes:123})
@@ -423,6 +432,31 @@ describe('temporary generations reuse managed budgets and private key issuance',
     await user()
     expect((await db.query('SELECT chat.file_managed_upload_as($1,$2,$3,128) AS r',[randomUUID(),group,owner])).rows[0].r.max_bytes).toBe(128)
     expect((await request()).transfer_status).toBe('requested')
+  })
+  // The published file is 123 bytes. The holder's file-accept refuses above the group's temporary space and file size
+  // and the global file size; whichever is lowest is the one the reader is told.
+  it.each([
+    ['the file size',{file_max_bytes:122},null],
+    ['the group temporary space',{temporary_group_bytes:122},null],
+    ['the global file size under a larger group one',{file_max_bytes:122},{file_max_bytes:1000}],
+  ])('refuses a new transfer at once, with both sizes, over %s',async(_name,global,override)=>{
+    await service()
+    await db.query('UPDATE chat.file_transfer_limits SET settings=settings||$1',[global])
+    if(override) await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('group',$1,$2)",[group,override])
+    const id=randomUUID()
+    await user(member)
+    const refused=await fails('SELECT chat.file_temporary_request($1,$2,$3)',[{item_id:item},member,id])
+    expect([refused.message,refused.hint]).toEqual(['File is 123 bytes; transfers through the server are at most 122 bytes','file_transfer_too_large'])
+    await service()
+    expect((await db.query('SELECT id FROM chat.file_temporary_transfers WHERE id=$1',[id])).rows).toEqual([])
+    await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"file_max_bytes\":123,\"temporary_group_bytes\":10000}' WHERE scope='global'")
+    expect((await request(id)).transfer_status).toBe('requested')
+  })
+  it('still serves a ready copy after the limit drops below the file',async()=>{
+    const id=await ready()
+    await service()
+    await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"file_max_bytes\":122}'")
+    expect(await request()).toMatchObject({transfer_id:id,transfer_status:'ready'})
   })
   it('wakes the holding device\'s channel with only the request id, not a renderer-only user bus',async()=>{
     const id=randomUUID(),transfer=await request(id)
