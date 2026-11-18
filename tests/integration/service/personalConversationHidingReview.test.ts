@@ -193,36 +193,32 @@ it('does not visit an un-prelocked group admitted while erasure waits on an old 
 })
 
 
-it('orders restoration after the existing message line lock and indexes only hidden rows', async () => {
-  const triggers = (await admin.query(`SELECT tgname FROM pg_trigger WHERE tgrelid='chat.messages'::regclass
-    AND tgtype=5 AND NOT tgisinternal ORDER BY tgname`)).rows.map(row => row.tgname)
-  expect(triggers.indexOf('messages_broadcast_created')).toBeGreaterThanOrEqual(0)
-  expect(triggers.indexOf('messages_broadcast_restore_conversation')).toBeGreaterThan(triggers.indexOf('messages_broadcast_created'))
-  expect(triggers.indexOf('messages_broadcast_restore_conversation')).toBeLessThan(triggers.indexOf('messages_c_record_agent_admission'))
-  expect((await admin.query(`SELECT indexdef FROM pg_indexes WHERE schemaname='chat'
-    AND indexname='conversation_list_state_hidden'`)).rows[0].indexdef).toContain('WHERE (conversation_hidden_at IS NOT NULL)')
+it('reuses the broadcaster line lock and indexes only hidden rows without a second insert trigger', async () => {
+  const body=(await admin.query("SELECT pg_get_functiondef('chat.broadcast_to_chat_member_user_events(text,text,jsonb)'::regprocedure) definition")).rows[0].definition as string
+  expect(body.indexOf('PERFORM chat.restore_message_conversation')).toBeGreaterThan(body.indexOf('PERFORM chat.lock_chat_revision_recipients(p_chat_id)'))
+  expect(body.indexOf('PERFORM chat.restore_message_conversation')).toBeLessThan(body.indexOf('FOR target_user_id IN'))
+  expect(body.match(/PERFORM chat\.lock_chat_revision_recipients\(p_chat_id\)/g)).toHaveLength(1)
+  expect((await admin.query("SELECT count(*)::int count FROM pg_trigger WHERE tgrelid='chat.messages'::regclass AND tgname LIKE '%restore_conversation%'")).rows[0].count).toBe(0)
+  expect((await admin.query("SELECT indexdef FROM pg_indexes WHERE schemaname='chat' AND indexname='conversation_list_state_hidden'")).rows[0].indexdef).toContain('WHERE (conversation_hidden_at IS NOT NULL)')
 })
 
-it.each([false, true])('returns without helper work, advisory locks or state/revision writes when no row is hidden (retained visible state=%s)', async retained => {
+it.each([false, true])('returns without restoration work or personal-state writes when no row is hidden (retained visible state=%s)', async retained => {
   await admin.query('BEGIN')
   try {
-    if (retained) await admin.query(`INSERT INTO chat.conversation_list_state(chat_id,user_id)
-      VALUES($1,$2)`, [room, owner])
-    // Invoke the real trigger on an otherwise inert message row. A helper call is
-    // a positive failure; the transaction rollback restores the production body.
-    await admin.query(`CREATE OR REPLACE FUNCTION chat.restore_conversation_list_rows(p_chat_id text,p_visible_users text[]) RETURNS void
+    if(retained)await admin.query('INSERT INTO chat.conversation_list_state(chat_id,user_id) VALUES($1,$2)',[room,owner])
+    await admin.query(`CREATE OR REPLACE FUNCTION chat.restore_message_conversation(p_message_id text) RETURNS void
       LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'unexpected restoration work'; END $$`)
-    await admin.query('CREATE TEMP TABLE fixture_message_restore_probe (LIKE chat.messages INCLUDING DEFAULTS) ON COMMIT DROP')
-    await admin.query(`CREATE TRIGGER fixture_restore_probe AFTER INSERT ON fixture_message_restore_probe
-      FOR EACH ROW EXECUTE FUNCTION chat.restore_message_conversation()`)
-    const locks = async () => (await admin.query(`SELECT locktype,mode,classid,objid,objsubid FROM pg_locks
-      WHERE pid=pg_backend_pid() AND locktype IN ('advisory','tuple') ORDER BY locktype,mode,classid,objid,objsubid`)).rows
-    const state = async () => (await admin.query(`SELECT to_jsonb(s) AS row,xmin::text AS version
-      FROM chat.conversation_list_state s WHERE chat_id=$1 ORDER BY user_id`, [room])).rows
-    const revisions = async () => (await admin.query(`SELECT count(*)::int AS count FROM chat.pending_user_revisions
-      WHERE transaction_id=pg_current_xact_id()`)).rows[0].count
-    const before = { locks: await locks(), state: await state(), revisions: await revisions() }
-    await admin.query('INSERT INTO fixture_message_restore_probe SELECT * FROM chat.messages WHERE id=$1', [anchor])
-    expect({ locks: await locks(), state: await state(), revisions: await revisions() }).toEqual(before)
-  } finally { await admin.query('ROLLBACK') }
+    const state=async()=>(await admin.query('SELECT to_jsonb(s) AS row,xmin::text AS version FROM chat.conversation_list_state s WHERE chat_id=$1 ORDER BY user_id',[room])).rows
+    const before=await state()
+    await admin.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'visible common path')",[randomUUID(),room,peer])
+    expect(await state()).toEqual(before)
+    expect((await admin.query(`SELECT count(*)::int count FROM chat.pending_user_revisions
+      WHERE transaction_id=pg_current_xact_id() AND event='chat_members_changed'
+        AND resource_key->>'kind'='own'`)).rows[0].count).toBe(0)
+    await admin.query('SAVEPOINT hidden_positive_control')
+    await admin.query(`INSERT INTO chat.conversation_list_state(chat_id,user_id,conversation_hidden_at) VALUES($1,$2,clock_timestamp())
+      ON CONFLICT(chat_id,user_id) DO UPDATE SET conversation_hidden_at=EXCLUDED.conversation_hidden_at`,[room,owner])
+    await expect(admin.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'hidden positive control')",[randomUUID(),room,peer])).rejects.toThrow('unexpected restoration work')
+    await admin.query('ROLLBACK TO SAVEPOINT hidden_positive_control')
+  } finally {await admin.query('ROLLBACK')}
 })

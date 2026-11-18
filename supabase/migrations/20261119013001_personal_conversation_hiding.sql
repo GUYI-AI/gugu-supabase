@@ -145,43 +145,69 @@ END;
 $$;
 REVOKE ALL ON FUNCTION chat.restore_conversation_list_rows(text,text[]) FROM PUBLIC,anon,authenticated,service_role;
 
-CREATE FUNCTION chat.restore_message_conversation() RETURNS trigger
+-- Invoked only by the existing broadcaster, after its ordinary line admission
+-- and after a sparse-index hit. The common visible path never enters this helper.
+CREATE FUNCTION chat.restore_message_conversation(p_message_id text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
-DECLARE affected_chats text[];
+DECLARE message chat.messages%ROWTYPE; affected_chats text[]; visible_users text[];
 BEGIN
-  -- This trigger follows messages_broadcast_created, whose ordinary fan-out already
-  -- owns the line lock. Checking earlier would miss an overlapping uncommitted hide.
-  IF NEW.deleted_at IS NOT NULL OR NEW.retracted_at IS NOT NULL
-     OR COALESCE(NEW.client_message_id, '') ~ '^session-import-(root|turn):' THEN
-    RETURN NEW;
+  SELECT m.id,m.chat_id,m.created_at,m.is_whisper,m.sender_user_id,m.to_user_ids,
+      m.deleted_at,m.retracted_at,m.client_message_id,m.content_type
+    INTO message.id,message.chat_id,message.created_at,message.is_whisper,message.sender_user_id,message.to_user_ids,
+      message.deleted_at,message.retracted_at,message.client_message_id,message.content_type
+    FROM chat.messages m WHERE m.id=p_message_id;
+  IF NOT FOUND OR message.deleted_at IS NOT NULL OR message.retracted_at IS NOT NULL
+     OR COALESCE(message.client_message_id, '') ~ '^session-import-(root|turn):'
+     OR COALESCE(chat.is_pending_delivery(message.id,message.content_type,message.sender_user_id,message.client_message_id),false) THEN
+    RETURN;
   END IF;
-  affected_chats := ARRAY[NEW.chat_id, (SELECT c.source_chat_id FROM chat.chats c
-    WHERE c.id = NEW.chat_id AND c.kind = 'topic')];
-  -- No hidden row: only the indexed presence read above/below, no extra lock,
-  -- recipient walk, pending-delivery lookup, state write or revision publication.
-  IF NOT EXISTS (SELECT 1 FROM chat.conversation_list_state state
-      WHERE state.chat_id = ANY(affected_chats) AND state.conversation_hidden_at IS NOT NULL) THEN
-    RETURN NEW;
-  END IF;
-  IF COALESCE(chat.is_pending_delivery(NEW.id,NEW.content_type,NEW.sender_user_id,NEW.client_message_id),false) THEN
-    RETURN NEW;
-  END IF;
-  PERFORM chat.restore_conversation_list_rows(NEW.chat_id, ARRAY(
+  affected_chats := ARRAY[message.chat_id, (SELECT c.source_chat_id FROM chat.chats c
+    WHERE c.id=message.chat_id AND c.kind='topic')];
+  visible_users := ARRAY(
     SELECT DISTINCT m.user_id FROM chat.conversation_list_state state
-    JOIN chat.active_members m ON m.chat_id = state.chat_id AND m.user_id = state.user_id
-    JOIN identity.users u ON u.id = m.user_id AND u.type = 'human'
-    WHERE state.chat_id = ANY(affected_chats) AND state.conversation_hidden_at IS NOT NULL
-      AND chat.message_visible_to(NEW.chat_id, NEW.created_at, NEW.is_whisper,
-        NEW.sender_user_id, NEW.to_user_ids, m.user_id)));
-  RETURN NEW;
+    JOIN chat.active_members m ON m.chat_id=state.chat_id AND m.user_id=state.user_id
+    JOIN identity.users u ON u.id=m.user_id AND u.type='human'
+    WHERE state.chat_id=ANY(affected_chats) AND state.conversation_hidden_at IS NOT NULL
+      AND chat.message_visible_to(message.chat_id,message.created_at,message.is_whisper,
+        message.sender_user_id,message.to_user_ids,m.user_id));
+  IF cardinality(visible_users)>0 THEN
+    PERFORM chat.restore_conversation_list_rows(message.chat_id,visible_users);
+  END IF;
 END;
 $$;
-REVOKE ALL ON FUNCTION chat.restore_message_conversation() FROM PUBLIC, anon, authenticated, service_role;
--- INSERT-only: conflicts/replays cannot restore a row. Alphabetically after the
--- existing broadcast (line held), before agent admission; the shared commit flush
--- assigns revisions only after this complete trigger chain has finished.
-CREATE TRIGGER messages_broadcast_restore_conversation AFTER INSERT ON chat.messages
-  FOR EACH ROW EXECUTE FUNCTION chat.restore_message_conversation();
+REVOKE ALL ON FUNCTION chat.restore_message_conversation(text) FROM PUBLIC,anon,authenticated,service_role;
+
+-- Reuse the existing AFTER INSERT broadcaster's line lock. A separate trigger or
+-- a WHEN probe before that lock could miss an overlapping uncommitted hide.
+-- The visible common path adds only this indexed existence read: no extra trigger,
+-- helper invocation, advisory/row lock, recipient walk, write or revision.
+DO $message_restore$
+DECLARE target regprocedure := 'chat.broadcast_to_chat_member_user_events(text,text,jsonb)'::regprocedure;
+  definition text; prior_acl aclitem[]; permission record;
+  marker text := '    PERFORM chat.lock_chat_revision_recipients(p_chat_id);';
+BEGIN
+  SELECT pg_get_functiondef(p.oid),COALESCE(p.proacl,acldefault('f',p.proowner))
+    INTO definition,prior_acl FROM pg_proc p WHERE p.oid=target;
+  IF (length(definition)-length(replace(definition,marker,'')))/length(marker)<>1 THEN
+    RAISE EXCEPTION 'Unexpected message restoration broadcaster predecessor';
+  END IF;
+  definition := replace(definition,marker,marker||'
+    IF p_event = ''message_created'' THEN
+        IF EXISTS (SELECT 1 FROM chat.conversation_list_state state
+            WHERE state.conversation_hidden_at IS NOT NULL
+              AND state.chat_id = ANY(ARRAY[p_chat_id,
+                (SELECT c.source_chat_id FROM chat.chats c WHERE c.id=p_chat_id AND c.kind=''topic'')])) THEN
+            PERFORM chat.restore_message_conversation(p_payload #>> ''{message,id}'');
+        END IF;
+    END IF;');
+  EXECUTE definition;
+  FOR permission IN SELECT grantee,bool_or(is_grantable) AS grantable FROM aclexplode(prior_acl)
+      WHERE privilege_type='EXECUTE' GROUP BY grantee LOOP
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %s%s',target,
+      CASE WHEN permission.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(permission.grantee)) END,
+      CASE WHEN permission.grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+  END LOOP;
+END $message_restore$;
 
 CREATE TABLE chat.conversation_hide_operations (
   user_id text NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
