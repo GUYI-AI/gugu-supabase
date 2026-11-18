@@ -121,9 +121,9 @@ describe('message revision lock order #6049', () => {
         const topicPid = (await topic.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid
         await source.query('BEGIN')
         await topic.query('BEGIN')
-        // Stop the source fan-out immediately after its first recipient. The
-        // messages themselves use the ordinary, unmodified INSERT path.
-        await source.query('SELECT 1 FROM chat.account_revision_heads WHERE user_id=$1 FOR NO KEY UPDATE', [f.low])
+        // Hold the source line the way a source fan-out does (chat.lock_lines), so the topic send
+        // parks on it. The messages themselves use the ordinary, unmodified INSERT path.
+        await source.query('SELECT chat.lock_lines(ARRAY[$1])', [f.group])
         const topicSend = send(topic, f.topic, firstJoin === 'sender' ? f.middle : f.high, firstJoin === 'mention' ? [f.middle] : null, true)
         try {
           await waitUntilBlocked(topicPid, sourcePid)

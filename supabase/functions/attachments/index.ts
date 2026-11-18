@@ -1,9 +1,10 @@
 // Community attachments: bytes in the project's Supabase Storage by default, or Alibaba Cloud OSS + CDN when every OSS
-// variable is set (see ../_shared/attachment-storage-config.ts). User/RLS and GC authorization are enforced below.
+// variable is set (see ../_shared/attachment-storage-config.ts). With OSS, the file service hashes staged bytes
+// (GUGU_FILES_INSPECT_URL / GUGU_FILES_INSPECT_SECRET). User/RLS and GC authorization are enforced below.
 import { createClient } from 'npm:@supabase/supabase-js@2.110.9'
 import {
   type AttachmentsDeps,
-  handleCommit,
+  handleCommit, handleFinish, handlePending,
   handleSessionCommit,
   handleSessionUrls,
   handleSessionRevoke,
@@ -12,6 +13,8 @@ import {
   handleShare,
   handleGc,
   handleUpload,
+  handleUploadComplete,
+  handleUploadParts,
   handleUrls,
   principalOf,
   Refusal,
@@ -22,6 +25,7 @@ import { type AttachmentStorageConfig, attachmentStorageConfig, StorageConfigErr
 import { handleUsageImport,handleStorageInventory,handleFileResolve } from '../_shared/file-transfer-core.ts'
 import { handleProjectFiles } from '../_shared/project-file-transfer-core.ts'
 import { ossDirectSigner } from '../_shared/oss-direct-url.ts'
+import { fileServiceInspector } from '../_shared/file-inspection.ts'
 import { handleDocumentImport, WORKSPACE_TEXT_MAX_BYTES, workspaceUploadKind } from '../_shared/document-import-core.ts'
 
 const env = (key: string): string => Deno.env.get(key)?.trim() ?? ''
@@ -94,7 +98,8 @@ function depsFor(authorization: string, storage: AttachmentStorageConfig): Attac
     },
     textFiles: { maxBytes: WORKSPACE_TEXT_MAX_BYTES, classify: workspaceUploadKind },
     objects: storage.kind === 'oss'
-      ? ossObjectStorage({ oss: storage.oss, cdn: storage.cdn, directSign:ossDirectSigner(storage.oss),fetch: (input, init) => fetch(input, init) })
+      ? ossObjectStorage({ oss: storage.oss, cdn: storage.cdn, directSign:ossDirectSigner(storage.oss),fetch: (input, init) => fetch(input, init),
+        inspector: fileServiceInspector({ url: env('GUGU_FILES_INSPECT_URL'), secret: env('GUGU_FILES_INSPECT_SECRET'), fetch: (input, init) => fetch(input, init) }) })
       : supabaseObjectStorage({
         url, serviceKey: env('SUPABASE_SERVICE_ROLE_KEY'), bucket: storage.bucket,
         fetch: (input, init) => fetch(input, init),
@@ -181,6 +186,10 @@ Deno.serve(async (request) => {
         return json(await handleFileResolve(deps,who.user.id,body))
       case 'upload':
         return json(await handleUpload(deps, who.user.id,body))
+      case 'upload-parts':
+        return json(await handleUploadParts(deps, who.user.id, body))
+      case 'upload-complete':
+        return json(await handleUploadComplete(deps, who.user.id, body))
       case 'session-commit':
         return json({ attachment: await handleSessionCommit(deps, who.user.id, body) })
       case 'session-revoke':
@@ -189,6 +198,10 @@ Deno.serve(async (request) => {
         return json(await handleSessionUrls(deps, who.user.id, body))
       case 'commit':
         return json({ message: await handleCommit(deps, who.user.id, body) })
+      case 'finish':
+        return json(await handleFinish(deps, who.user.id, body))
+      case 'pending':
+        return json(await handlePending(deps))
       case 'place':
         return json({ item: await handlePlace(deps, who.user.id, body) })
       case 'forward':

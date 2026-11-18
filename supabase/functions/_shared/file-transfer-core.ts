@@ -35,7 +35,7 @@ export async function handleFileDownload(deps:AttachmentsDeps,user:string,body:R
   if (traffic!==undefined&&(!Number.isSafeInteger(traffic)||traffic<819200||traffic>838860800)) throw new Refusal(503,'not_configured','Download rate is not configured')
   try {
     const signed=row.bucket_id==='oss'||row.bucket_id==='temporary'
-      ?await objectStorage(deps).sign(row.object_name,canSignThumbnail(row.content_type,row.size_bytes,row.width,row.height),new Date(row.signed_at),{
+      ?await objectStorage(deps).sign(row.object_name,row.bucket_id==='oss'&&canSignThumbnail(row.content_type,row.size_bytes,row.width,row.height),new Date(row.signed_at),{
         requestId:row.download_id,expiresSeconds:60,...(traffic===undefined?{}:{trafficBits:traffic}),...(row.bucket_id==='temporary'||body.origin===true?{direct:true}:{}),
       })
       :{url:await deps.storageSignedUrl(row.bucket_id,row.object_name,60,traffic),thumbUrl:null}

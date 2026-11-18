@@ -57,6 +57,8 @@ Use `pnpm run setup`: plain `pnpm setup` is pnpm's own built-in command and fail
 
 Setup installs the database foundation and every release, exposes the `identity`, `chat` and `moments` API schemas, and deploys the `server-login` and `attachments` functions. It also schedules attachment clean-up and sets sign-in codes to 6 digits. With SMTP configured, it adds the code to the sign-in and sign-up email templates. Finally it writes `../gugu/.envs/local.env` with the project URL and the public anon key, with official hosting, official models and the relay turned off.
 
+**Attachment size.** The `attachments` function hashes every uploaded file inside its Edge worker, and Supabase Edge Functions allow 2 seconds of CPU per request. On a CPU without SHA extensions, SHA-256 alone takes 1.1–1.5 s of CPU per 200 MiB, and reading the stream adds to it, so 100 MiB sits at the limit: the same 100 MiB commit sometimes finishes and sometimes is stopped by the CPU limit, and 200 MiB is always stopped. Supabase Cloud hardware may differ, so keep the `attachments` bucket's file size limit and `file_max_bytes` at or below 50 MiB. Larger files upload and then fail to send.
+
 Expected output ends with `Database and functions configured.` A `WARNING: sign-in emails do not contain the 6-digit code yet` line means SMTP is missing: configure it and run setup again. Re-running is safe; it refuses only an unknown or different installation.
 
 ## 5. Run the client from source

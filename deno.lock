@@ -2,7 +2,8 @@
   "version": "5",
   "specifiers": {
     "npm:@supabase/supabase-js@2.110.9": "2.110.9",
-    "npm:ali-oss@6.23.0": "6.23.0"
+    "npm:ali-oss@6.23.0": "6.23.0",
+    "npm:nodemailer@10.5.0": "10.5.0"
   },
   "npm": {
     "@supabase/auth-js@2.110.9": {
@@ -533,6 +534,9 @@
     },
     "xtend@4.0.2": {
       "integrity": "sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ=="
+    },
+    "nodemailer@10.5.0": {
+      "integrity": "sha512-L/w/HH5MqpzMDuZD7fQdt/+KqymuvrpaApaIjAH2XA3ILePwlcvXCVVvP75xVrXCEt2ggK2marrrHHFB5Qu0kA=="
     }
   },
   "workspace": {

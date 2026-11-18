@@ -13,6 +13,8 @@ export interface FilesConfig {
   jwksUrl: string | null
   jwtSecret: Uint8Array | null
   jwtIssuer: string | null
+  /** Service secret for the internal POST /inspect; null answers 503. */
+  inspectSecret: string | null
   timeoutMs: number
   debounceMs: number
   maxDebounceMs: number

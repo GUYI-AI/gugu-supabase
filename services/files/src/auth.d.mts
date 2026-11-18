@@ -15,6 +15,7 @@ export function bearerFromAuthorization(header: string | null | undefined): stri
 export interface Identity {
   userId: string
   exp: number
+  sessionId: string | null
 }
 export function createVerifier(options: {
   jwksUrl: string | null
@@ -29,5 +30,6 @@ export interface Grant {
   kind: string
   actorId: string
   actorName: string
+  teamSessionRequired: boolean
 }
-export function authorizeItem(pool: Pool, itemId: string, userId: string, asAgent: string | null): Promise<Grant>
+export function authorizeItem(pool: Pool, itemId: string, userId: string, asAgent: string | null, sessionId?: string | null): Promise<Grant>

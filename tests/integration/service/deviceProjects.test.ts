@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 /**
  * identity.device_projects / identity.publish_device_projects (OpenDCAI/gugu#113): each device records its local
@@ -102,7 +103,7 @@ beforeAll(async () => {
   await database.connect()
 })
 afterAll(async () => { await database?.end() })
-beforeEach(async () => { await database.query('BEGIN') })
+beforeEach(async () => { await database.query(BEGIN_READING_REVISIONS) })
 afterEach(async () => {
   if (!database) return
   try {

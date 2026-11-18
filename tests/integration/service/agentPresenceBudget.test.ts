@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 type Db = {
   connect(): Promise<void>
@@ -19,7 +20,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await db?.end() })
 beforeEach(async () => {
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   ;[owner, viewer, outsider, agent] = Array.from({ length: 4 }, randomUUID)
   for (const id of [owner, viewer, outsider]) await db.query('INSERT INTO auth.users(id,email) VALUES($1,$2)', [id, `${id}@presence-budget.example.test`])
   const device = `presence-budget-${randomUUID()}`

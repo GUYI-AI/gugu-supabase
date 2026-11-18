@@ -34,3 +34,13 @@ verify_jwt = false
 # Handler checks the user token with Auth; GC accepts only the server credential.
 [functions.attachments]
 verify_jwt = false
+
+# The handler verifies live user sessions; result receipts have narrower
+# authorization after deletion. No browser receives the server credential.
+[functions.account-deletion]
+verify_jwt = false
+
+# Email proofs are scoped capabilities; every member route verifies Auth and
+# a live database session. No client receives the server credential.
+[functions.team-accounts]
+verify_jwt = false

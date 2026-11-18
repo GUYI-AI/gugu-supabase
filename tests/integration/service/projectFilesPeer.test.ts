@@ -83,7 +83,7 @@ describe('project chat files kept by the device that sent each version',()=>{
     expect(await resolve({item_id:item},member)).toMatchObject({status:'ready',host_device_id:bound,host_label:'Studio Mac',host_online:false})
     // A removed device takes its versions with it.
     await service();await db.query('DELETE FROM identity.gugu_devices WHERE device_id=$1',[bound])
-    expect(await resolve({item_id:item},member)).toEqual({status:'gone'})
+    expect(await resolve({item_id:item},member)).toEqual({status:'gone',availability:'unavailable',expired_at:null})
   })
   it('asks an older version\'s own device for a temporary copy, kept as long as that device\'s account says',async()=>{
     await service()

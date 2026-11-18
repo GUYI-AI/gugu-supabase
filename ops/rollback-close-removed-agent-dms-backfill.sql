@@ -15,8 +15,7 @@ CREATE TEMP TABLE reopen_targets ON COMMIT DROP AS
 DO $locks$
 BEGIN
   PERFORM 1 FROM chat.chats c WHERE c.id IN (SELECT chat_id FROM reopen_targets) ORDER BY c.id FOR UPDATE;
-  PERFORM chat.lock_revision_heads(ARRAY(SELECT DISTINCT m.user_id FROM chat.active_members m
-    WHERE m.chat_id IN (SELECT chat_id FROM reopen_targets) ORDER BY 1));
+  PERFORM chat.lock_lines(ARRAY(SELECT chat_id FROM reopen_targets));
 END $locks$;
 
 UPDATE chat.chat_members m SET conversation_deleted_at = NULL

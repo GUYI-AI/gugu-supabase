@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { Client, type QueryResultRow } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 let db: Client
 let owner: string, peer: string, outsider: string, agent: string, device: string, room: string, secondRoom: string
@@ -17,7 +18,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await db?.end() })
 beforeEach(async () => {
-  await db.query('BEGIN'); committed = false
+  await db.query(BEGIN_READING_REVISIONS); committed = false
   ;[owner, peer, outsider, agent, device, room, secondRoom] = Array.from({ length: 7 }, randomUUID)
   for (const id of [owner, peer, outsider]) await db.query('INSERT INTO auth.users(id,email) VALUES($1,$2)', [id, `${id}@member-liveness.invalid`])
   await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Fixture','fixture','linux')", [device, owner])
@@ -119,7 +120,7 @@ it('restores predecessor views on operational rollback without changing source r
   const expected = await as('authenticated', owner, 'SELECT * FROM chat.active_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[room, secondRoom]])
   await db.query('SAVEPOINT operational_rollback')
   // Later releases that depend on the cache roll back first, newest first.
-  for (const later of ['rollback-removed-agent-mentions.sql', 'rollback-archived-agents-leave-groups.sql']) {
+  for (const later of ['rollback-revision-heads-commit-flush.sql', 'rollback-removed-agent-mentions.sql', 'rollback-archived-agents-leave-groups.sql']) {
     await db.query(readFileSync(new URL(`../../../ops/${later}`, import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
   }
   const rollback = readFileSync(new URL('../../../ops/rollback-identity-member-liveness.sql', import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, '')
@@ -148,7 +149,7 @@ it('rolls archived-agent group membership back without changing seats, identitie
   const access = (await db.query("SELECT relacl::text,reloptions FROM pg_class WHERE oid='chat.active_members'::regclass")).rows
   await db.query('SAVEPOINT archived_seat_rollback')
   // The later release that lives in chat_private rolls back first.
-  for (const file of ['rollback-removed-agent-mentions.sql', 'rollback-archived-agents-leave-groups.sql']) {
+  for (const file of ['rollback-revision-heads-commit-flush.sql', 'rollback-removed-agent-mentions.sql', 'rollback-archived-agents-leave-groups.sql']) {
     await db.query(readFileSync(new URL(`../../../ops/${file}`, import.meta.url), 'utf8').replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
   }
   expect(await counted()).toBe(3)
@@ -228,9 +229,15 @@ it.each(['remove-first', 'seat-first'])('commits %s admission/removal with no ca
     await removing.query('SET LOCAL ROLE authenticated')
     const remove = () => removing.query('SELECT identity.archive_user($1,true)', [agent])
     const seat = () => seating.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')", [secondRoom, agent])
-    if (order === 'remove-first') { await remove(); await seat() }
-    else { await seat(); await remove() }
-    await removing.query('COMMIT'); await seating.query('COMMIT')
+    // A new seat waits for its member's liveness change and the other way round (chat_members_lock_joiner_liveness):
+    // the second one parks until the first commits, and neither deadlocks.
+    if (order === 'remove-first') {
+      await remove(); const seated = seat()
+      await removing.query('COMMIT'); await seated; await seating.query('COMMIT')
+    } else {
+      await seat(); const removed = remove()
+      await seating.query('COMMIT'); await removed; await removing.query('COMMIT')
+    }
     expect((await db.query('SELECT count(*)::int AS n FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [secondRoom, agent])).rows[0].n).toBe(1)
     expect((await db.query('SELECT * FROM chat.active_members WHERE user_id=$1', [agent])).rows).toEqual([])
     expect((await db.query('SELECT is_live FROM identity.member_liveness WHERE user_id=$1', [agent])).rows).toEqual([{ is_live: false }])
