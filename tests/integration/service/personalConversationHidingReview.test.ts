@@ -210,7 +210,7 @@ it.each([false, true])('returns without helper work, advisory locks or state/rev
       VALUES($1,$2)`, [room, owner])
     // Invoke the real trigger on an otherwise inert message row. A helper call is
     // a positive failure; the transaction rollback restores the production body.
-    await admin.query(`CREATE OR REPLACE FUNCTION chat.restore_conversation_list_rows(text,text[]) RETURNS void
+    await admin.query(`CREATE OR REPLACE FUNCTION chat.restore_conversation_list_rows(p_chat_id text,p_visible_users text[]) RETURNS void
       LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'unexpected restoration work'; END $$`)
     await admin.query('CREATE TEMP TABLE fixture_message_restore_probe (LIKE chat.messages INCLUDING DEFAULTS) ON COMMIT DROP')
     await admin.query(`CREATE TRIGGER fixture_restore_probe AFTER INSERT ON fixture_message_restore_probe
