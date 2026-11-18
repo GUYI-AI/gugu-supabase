@@ -60,10 +60,15 @@ function proof(body: Record<string, unknown>): { p_request_id: string; p_receipt
 
 export function createAccountDeletionHandler(deps: DeletionDependencies): (req: Request) => Promise<Response> {
   async function execute(requestId: string, userId: string, lease: string): Promise<FlowReply> {
+    const authorized = await deps.flow({ p_action: 'execute', p_request_id: requestId, p_lease_token: lease });
+    if (!authorized.ok || authorized.request?.state === 'deleted') return authorized;
+    if (authorized.request?.state !== 'processing' || authorized.user_id !== userId || authorized.lease_token !== lease) {
+      return { ok: false, error: 'unavailable', status: 503 };
+    }
     let outcome: 'absent' | 'failed' | 'unknown';
     try { outcome = await deps.hardDelete(userId); } catch { outcome = 'unknown'; }
     return deps.flow({ p_action: 'finish', p_request_id: requestId, p_lease_token: lease,
-      p_error_code: outcome === 'absent' ? null : outcome === 'failed' ? 'auth_delete_failed' : 'outcome_unknown' });
+      p_error_code: outcome === 'absent' ? null : 'outcome_unknown' });
   }
   return async (req) => {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });

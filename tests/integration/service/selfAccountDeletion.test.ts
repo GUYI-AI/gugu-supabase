@@ -1,6 +1,8 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import pg from 'pg'
+import { accountDeletionDependencies } from '../../../supabase/functions/_shared/account-deletion-auth'
+import { createAccountDeletionHandler } from '../../../supabase/functions/_shared/account-deletion-core'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { beginDeletionFixture, endDeletionFixture } from './accountDeletionFixtureLock'
 
@@ -99,14 +101,15 @@ describe('self deletion workflow on the installed schema', () => {
     await db.query('UPDATE auth.users SET email=$2 WHERE id=$1', [f.user, 'changed@deletion.invalid'])
     expect((await flow('verified', { p_request_id: args.p_request_id, p_lease_token: attempt.lease_token })).error).toBe('authorization_expired')
   })
-  it('does not claim deletion while Auth still exists and permits a bound retry after rollback', async () => {
+  it('keeps a present account unresolved even when a legacy caller labels the DELETE failed', async () => {
     const f = await fixture(), args = await challenge(f), ready = await verify(args)
     expect(ready.request.state).toBe('processing')
     expect((await flow('finish', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token })).error).toBe('auth_user_still_exists')
     const failed = await flow('finish', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token, p_error_code: 'auth_delete_failed' })
-    expect(failed.request.state).toBe('retry_wait')
-    const retry = await flow('retry', args); expect(retry.request.state).toBe('processing')
-    expect(retry.lease_token).not.toBe(ready.lease_token)
+    expect(failed.request.state).toBe('processing')
+    expect(failed.request.can_retry).toBe(false)
+    expect((await flow('retry', args)).error).toBe('request_active')
+    expect((await db.query('SELECT deletion_attempts FROM account_deletion_private.requests WHERE id=$1', [args.p_request_id])).rows[0].deletion_attempts).toBe(1)
   })
   it('reconciles committed Auth deletion and removes all new original identity links', async () => {
     const f = await fixture(), args = await challenge(f), ready = await verify(args)
@@ -123,17 +126,114 @@ describe('self deletion workflow on the installed schema', () => {
   })
   it('does not allow another overlapping or expired authorized retry', async () => {
     const f = await fixture(), args = await challenge(f), ready = await verify(args)
-    expect((await flow('retry', args)).error).toBe('new_verification_required')
+    expect((await flow('retry', args)).error).toBe('request_active')
     await db.query("UPDATE account_deletion_private.requests SET lease_until=clock_timestamp()-interval '1 second',expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [args.p_request_id])
-    expect((await flow('retry', args)).error).toBe('new_verification_required')
+    expect((await flow('retry', args)).error).toBe('request_active')
     expect(ready.request.state).toBe('processing')
   })
-  it('closes already-verified retries when the dedicated-account gate is closed', async () => {
+  it('never replaces an unknown processing request when its lease and verification window expire', async () => {
+    const f = await fixture(), args = await challenge(f), ready = await verify(args)
+    await db.query("UPDATE account_deletion_private.requests SET created_at=clock_timestamp()-interval '10 minutes',expires_at=clock_timestamp()-interval '5 minutes',lease_until=clock_timestamp()-interval '1 minute' WHERE id=$1", [args.p_request_id])
+    const begin = await flow('begin', { ...f.args, p_receipt_digest: hash('another-operation') })
+    expect(begin.error).toBe('request_active')
+    const pending = await flow('result', { p_request_id: args.p_request_id, p_receipt_digest: f.receipt })
+    expect(pending.request.state).toBe('processing')
+    expect(pending.request.can_retry).toBe(false)
+    expect((await flow('retry', args)).error).toBe('request_active')
+    expect((await flow('execute', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token })).error).toBe('state_conflict')
+    // Deterministic late commit, without timers or an overlapping real request.
+    await db.query('DELETE FROM auth.users WHERE id=$1', [f.user])
+    expect((await flow('result', { p_request_id: args.p_request_id, p_receipt_digest: f.receipt })).request.state).toBe('deleted')
+  })
+  it.each([['expired', 'result'], ['expired', 'finish'], ['failed', 'result'], ['failed', 'finish']])('reconciles a late Auth commit over legacy %s through %s', async (state, action) => {
+    const f = await fixture(), args = await challenge(f), ready = await verify(args)
+    await db.query('UPDATE account_deletion_private.requests SET state=$2,lease_token=NULL,lease_until=NULL WHERE id=$1', [args.p_request_id, state])
+    await db.query('DELETE FROM auth.users WHERE id=$1', [f.user])
+    const done = await flow(action, { p_request_id: args.p_request_id, p_lease_token: ready.lease_token, p_receipt_digest: f.receipt })
+    expect(done.request.state).toBe('deleted')
+    expect((await flow('finish', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token })).request.state).toBe('deleted')
+    expect((await flow('result', { p_request_id: args.p_request_id, p_receipt_digest: f.receipt })).request.state).toBe('deleted')
+    expect((await flow('result', { p_request_id: args.p_request_id, p_receipt_digest: hash('wrong') })).error).toBe('not_found')
+    expect((await db.query("SELECT count(*)::int n FROM account_deletion_private.events WHERE request_id=$1 AND event='deleted'", [args.p_request_id])).rows[0].n).toBe(1)
+  })
+  it('keeps an expired request expired while its account still exists', async () => {
+    const f = await fixture(), args = await challenge(f)
+    await db.query("UPDATE account_deletion_private.requests SET state='expired' WHERE id=$1", [args.p_request_id])
+    expect((await flow('result', { p_request_id: args.p_request_id, p_receipt_digest: f.receipt })).request.state).toBe('expired')
+    expect((await db.query('SELECT count(*)::int n FROM auth.users WHERE id=$1', [f.user])).rows[0].n).toBe(1)
+  })
+  it('rechecks the execution lease, unchanged identity and original session before dispatch', async () => {
+    const f = await fixture(), args = await challenge(f), ready = await verify(args)
+    expect((await flow('execute', { p_request_id: args.p_request_id, p_lease_token: randomUUID() })).error).toBe('state_conflict')
+    expect((await flow('execute', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token })).user_id).toBe(f.user)
+    await db.query('DELETE FROM auth.sessions WHERE id=$1', [f.session])
+    expect((await flow('execute', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token })).error).toBe('authorization_expired')
+    expect((await flow('result', { p_request_id: args.p_request_id, p_receipt_digest: f.receipt })).request.state).toBe('processing')
+  })
+  it('blocks execution of an unresolved attempt when the dedicated-account gate is closed', async () => {
     const f = await fixture(), args = await challenge(f), ready = await verify(args)
     await flow('finish', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token!, p_error_code: 'auth_delete_failed' })
     await db.query('UPDATE account_deletion_private.access SET test_user_id=NULL')
-    expect((await flow('retry', args)).error).toBe('rollout_unavailable')
+    expect((await flow('execute', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token })).error).toBe('authorization_expired')
     expect((await db.query('SELECT count(*)::int n FROM auth.users WHERE id=$1', [f.user])).rows[0].n).toBe(1)
+  })
+  it.each([null, 'future', 'boundary', 'past'])('checks session not_after at execution (%s)', async expiry => {
+    const f = await fixture(), args = await challenge(f), ready = await verify(args)
+    const sql = expiry === null ? 'NULL' : expiry === 'future' ? "clock_timestamp()+interval '1 hour'" : expiry === 'boundary' ? 'clock_timestamp()' : "clock_timestamp()-interval '1 hour'"
+    await db.query(`UPDATE auth.sessions SET not_after=${sql} WHERE id=$1`, [f.session])
+    const execution = await flow('execute', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token })
+    if (expiry === null || expiry === 'future') expect(execution.user_id).toBe(f.user)
+    else expect(execution).toMatchObject({ ok: false, error: 'authorization_expired', status: 410 })
+    expect((await db.query('SELECT state,deletion_attempts FROM account_deletion_private.requests WHERE id=$1', [args.p_request_id])).rows[0]).toEqual({ state: 'processing', deletion_attempts: 1 })
+  })
+  it('does not dispatch or expire a legacy retry_wait request without authoritative recovery', async () => {
+    const f = await fixture(), args = await challenge(f)
+    await db.query("UPDATE account_deletion_private.requests SET state='retry_wait',created_at=clock_timestamp()-interval '2 minutes',lease_token=NULL,lease_until=NULL WHERE id=$1", [args.p_request_id])
+    expect((await flow('status', f.args)).request).toMatchObject({ state: 'processing', can_retry: false })
+    expect((await flow('begin', { ...f.args, p_receipt_digest: hash('new') })).error).toBe('request_active')
+    await expect(gateScript('close')).rejects.toThrow('Deletion outcome must be reconciled')
+    expect((await flow('result', { p_request_id: args.p_request_id, p_receipt_digest: hash('wrong') })).error).toBe('not_found')
+    expect((await db.query('SELECT state FROM account_deletion_private.requests WHERE id=$1', [args.p_request_id])).rows[0].state).toBe('retry_wait')
+    expect((await flow('retry', args)).error).toBe('request_active')
+    expect((await flow('result', { p_request_id: args.p_request_id, p_receipt_digest: f.receipt })).request).toMatchObject({ state: 'processing', can_retry: false })
+  })
+  it.each([502, 503, 504])('coordinates actual adapter HTTP %s, present readback, blocked retries and a late commit', async status => {
+    const f = await fixture(), rawReceipt = 'a'.repeat(64)
+    f.receipt = hash(rawReceipt); f.args.p_receipt_digest = f.receipt
+    const args = await challenge(f)
+    let deletes = 0, committed = false
+    const token = 'synthetic.' + Buffer.from(JSON.stringify({ session_id: f.session })).toString('base64url') + '.fixture'
+    const transport = (async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      const reply = (body: unknown, code = 200) => new Response(body === null ? null : JSON.stringify(body), { status: code })
+      if (path === '/rest/v1/rpc/account_deletion_flow') {
+        const rpc = JSON.parse(String(init?.body)); return reply(await flow(rpc.p_action, rpc))
+      }
+      const user = { id: f.user, email: f.email, email_confirmed_at: '2026-01-01T00:00:00Z' }
+      if (path === '/auth/v1/user') return reply(user)
+      if (path === '/auth/v1/verify') return reply({ access_token: 'temporary', user })
+      if (path === '/auth/v1/logout') return reply(null, 204)
+      if (path === '/auth/v1/admin/users/' + f.user) {
+        if (init?.method === 'DELETE') { deletes++; return reply({ error: 'upstream_unavailable' }, status) }
+        return committed ? reply(null, 404) : reply(user)
+      }
+      throw new Error('Unexpected synthetic transport path')
+    }) as typeof fetch
+    const handler = createAccountDeletionHandler(accountDeletionDependencies({ url: 'http://fixture.invalid', anonKey: 'synthetic', serviceKey: 'synthetic', fetch: transport }))
+    const call = (route: string, body: unknown) => handler(new Request('http://fixture.invalid/account-deletion/' + route, { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify(body) }))
+    const proof = { request_id: args.p_request_id, receipt_token: rawReceipt }
+    const response = await call('confirm', { ...proof, code: '123456', consent_version: f.consent, acknowledge_forfeit: true })
+    expect(response.status).toBe(202)
+    expect((await response.json()).request).toMatchObject({ state: 'processing', can_retry: false })
+    expect((await call('retry', proof)).status).toBe(409)
+    await db.query("UPDATE account_deletion_private.requests SET created_at=clock_timestamp()-interval '2 minutes' WHERE id=$1", [args.p_request_id])
+    expect((await call('challenge', { consent_version: f.consent })).status).toBe(409)
+    expect(deletes).toBe(1)
+    // The fixture commits the original operation after its HTTP outcome was lost.
+    await db.query('DELETE FROM auth.users WHERE id=$1', [f.user]); committed = true
+    expect((await (await call('result', proof)).json()).request.state).toBe('deleted')
+    expect((await (await call('result', proof)).json()).request.state).toBe('deleted')
+    expect(deletes).toBe(1)
   })
   it('opens only one new server-marked verified fixture and never lifts the restriction', async () => {
     const f = await fixture()
@@ -151,9 +251,12 @@ describe('self deletion workflow on the installed schema', () => {
     const f = await fixture(), args = await challenge(f), ready = await verify(args)
     await expect(gateScript('close')).rejects.toThrow('Deletion outcome must be reconciled')
     await flow('finish', { p_request_id: args.p_request_id, p_lease_token: ready.lease_token!, p_error_code: 'auth_delete_failed' })
+    await expect(gateScript('close')).rejects.toThrow('Deletion outcome must be reconciled')
+    await db.query('DELETE FROM auth.users WHERE id=$1', [f.user])
+    expect((await flow('result', { p_request_id: args.p_request_id, p_receipt_digest: f.receipt })).request.state).toBe('deleted')
     await gateScript('close')
     expect((await db.query('SELECT test_only,test_user_id FROM account_deletion_private.access')).rows[0]).toEqual({ test_only: true, test_user_id: null })
-    expect((await db.query('SELECT state FROM account_deletion_private.requests WHERE id=$1', [args.p_request_id])).rows[0].state).toBe('expired')
+    expect((await db.query('SELECT state FROM account_deletion_private.requests WHERE id=$1', [args.p_request_id])).rows[0].state).toBe('deleted')
   })
   it('keeps group message bodies and replies while anonymizing the deleted author in view/history/search', async () => {
     const f = await fixture(), peer = randomUUID(), room = randomUUID(), message = randomUUID(), reply = randomUUID()
