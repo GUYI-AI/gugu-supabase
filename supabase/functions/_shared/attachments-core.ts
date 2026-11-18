@@ -33,7 +33,7 @@ export interface DbError {
   /** The HTTP status PostgREST answered with; 0 when the request never reached it. */
   status?: number
 }
-export type Rpc = (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: DbError | null }>
+export type Rpc = (fn: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<{ data: unknown; error: DbError | null }>
 
 export interface AttachmentsDeps {
   /** The same classifier used for local files and App data, pinned by the Edge entry point. */
