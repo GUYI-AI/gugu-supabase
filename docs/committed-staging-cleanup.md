@@ -12,6 +12,12 @@ evidenced staging keys, confirms physical absence, then uses the existing upload
 closure function to release its staging reservation. It never deletes final blobs
 or changes final-file retention, readers or authorization.
 
+Declared messages can precede their bytes. Registration and publication therefore
+record the marker in either order. A resumed upload is bound to its original
+publication by the verified settle transaction; equal content alone never creates
+that relationship. Existing resumed uploads without this retained relationship
+remain subject to the independent historical evidence requirements below.
+
 ## Controls and retries
 
 The control is disabled by default. The database grants one global run lease and

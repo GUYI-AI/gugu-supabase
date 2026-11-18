@@ -68,6 +68,35 @@ beforeEach(async () => {
 afterEach(async () => { await db.query('ROLLBACK') })
 
 describe('durable committed staging cleanup', () => {
+  it.each([
+    { commitFirst: true, resumed: false }, { commitFirst: false, resumed: false },
+    { commitFirst: true, resumed: true }, { commitFirst: false, resumed: true },
+  ])('records declared publication when commitFirst=$commitFirst and resumed=$resumed', async ({ commitFirst, resumed }) => {
+    const sha = randomBytes(32).toString('hex'), message = randomUUID()
+    await user()
+    const original = await value('SELECT chat.file_managed_upload_as($1,$2,$3,60) AS v', [randomUUID(), group, owner])
+    await db.query('SELECT chat.attachment_declare($1,$2,60,$3)', [original.staging_key, sha, 'application/octet-stream'])
+    const commit = async () => {
+      await user()
+      await db.query('SELECT * FROM chat.attachment_commit($1,$2,$3,$4,$5)', [original.staging_key, message, group, owner, 'declared.bin'])
+      await admin()
+    }
+    if (commitFirst) await commit()
+    const permit = resumed
+      ? (await user(), await value('SELECT chat.file_managed_upload_as($1,$2,$3,60) AS v', [randomUUID(), group, owner]))
+      : original
+    await admin()
+    expect(await value('SELECT count(*)::int AS v FROM chat.file_staging_cleanup WHERE staging_key=$1', [permit.staging_key])).toBe(0)
+    const settled = await value('SELECT chat.file_blob_settle($1,$2,$3,$4,60,$5) AS v', [owner, original.staging_key, permit.staging_key, sha, 'application/octet-stream'])
+    if (!commitFirst) {
+      expect(await value('SELECT count(*)::int AS v FROM chat.file_staging_cleanup WHERE staging_key=$1', [permit.staging_key])).toBe(0)
+      await commit()
+    }
+    expect(await value('SELECT jsonb_build_object(\'blob\',registered_blob_id,\'proof\',publication_evidence) AS v FROM chat.file_staging_cleanup WHERE staging_key=$1', [permit.staging_key]))
+      .toEqual({ blob: settled.blob_id, proof: 'database-commit' })
+    await db.query('DELETE FROM chat.file_blob_uploads WHERE staging_key=$1', [original.staging_key])
+    expect(await value('SELECT count(*)::int AS v FROM chat.file_staging_cleanup WHERE staging_key=$1', [permit.staging_key])).toBe(1)
+  })
   it('defaults off and exposes counts only; API users cannot inspect queue identities or activate it', async () => {
     await service()
     expect(await status()).toMatchObject({ enabled: false, batch_limit: 5, concurrency: 1, inflight: 0 })
