@@ -180,18 +180,19 @@ describe('任务 agent 进群', () => {
     await database.query('SET CONSTRAINTS ALL IMMEDIATE')
   })
 
-  it('leaves successful RPC transactions checked immediately; failed enrollment restores the caller mode', async () => {
+  it('checks only the chat invariants immediately; failed enrollment restores the caller mode', async () => {
     await asService()
     await database.query(`CREATE TEMP TABLE mode_parent(id integer PRIMARY KEY);
       CREATE TEMP TABLE mode_child(id integer REFERENCES mode_parent(id) DEFERRABLE INITIALLY DEFERRED);
       GRANT ALL ON mode_parent, mode_child TO authenticated`)
     const group = await ownerOnlyGroup()
-    // A normal PostgREST call ends its transaction after this RPC. A direct SQL
-    // caller continuing the same transaction explicitly opts back into deferral.
+    // The RPC makes the two chat invariants immediate, not ALL: ALL would also run the account revision
+    // flush mid-transaction. A caller's own deferred constraint stays deferred.
     await provision(group)
-    await database.query('SAVEPOINT immediate_mode')
-    await expect(database.query('INSERT INTO mode_child VALUES (1)')).rejects.toMatchObject({ code: '23503' })
-    await database.query('ROLLBACK TO SAVEPOINT immediate_mode')
+    await database.query('SAVEPOINT deferred_mode')
+    await database.query('INSERT INTO mode_child VALUES (1)')
+    await expect(database.query('SET CONSTRAINTS ALL IMMEDIATE')).rejects.toMatchObject({ code: '23503' })
+    await database.query('ROLLBACK TO SAVEPOINT deferred_mode')
     await database.query('SET CONSTRAINTS ALL DEFERRED')
     await asService()
     await database.query(`CREATE FUNCTION pg_temp.reject_mode_seat() RETURNS trigger LANGUAGE plpgsql AS $$

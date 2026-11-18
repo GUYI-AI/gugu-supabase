@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 type Row = Record<string, unknown>
 interface Db {
@@ -31,7 +32,7 @@ async function as<T = Row>(viewer: string, sql: string, values: unknown[] = []) 
 }
 async function fixture(body: (f: { owner: string; peer: string; stranger: string; chat: string }) => Promise<void>) {
   const [owner, peer, stranger, chat] = Array.from({ length: 4 }, () => randomUUID())
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   try {
     await db.query("INSERT INTO identity.users(id,type,display_name) SELECT id,'human','snapshot fixture' FROM unnest($1::text[]) id", [[owner, peer, stranger]])
     await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES ($1,'group','snapshot group',$2)", [chat, owner])
@@ -106,7 +107,7 @@ describe('consistent account snapshot', () => {
       await writer.query("UPDATE identity.users SET display_name='committed later' WHERE id=$1", [owner])
       const barrier = 173812403
       await writer.query('SELECT pg_advisory_xact_lock($1)', [barrier])
-      await db.query('BEGIN')
+      await db.query(BEGIN_READING_REVISIONS)
       const pid = (await db.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid
       const blocked = as<{ value: Snapshot }>(owner,
         'WITH barrier AS MATERIALIZED (SELECT pg_advisory_xact_lock($1)) SELECT chat.sync_snapshot() AS value FROM barrier', [barrier])
@@ -124,7 +125,7 @@ describe('consistent account snapshot', () => {
       const before = (await blocked)[0]!.value
       expect(before.identities[0]!.display_name).toBe('snapshot concurrent')
       await db.query('COMMIT')
-      await db.query('BEGIN')
+      await db.query(BEGIN_READING_REVISIONS)
       const after = await snapshot(owner)
       expect(after.identities[0]!.display_name).toBe('committed later')
       const [{ value }] = await as<{ value: { operations: { revision: string }[] } }>(owner, 'SELECT chat.sync_since($1,100) AS value', [before.revision])

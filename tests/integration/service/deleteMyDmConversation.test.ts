@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 let db: pg.Client
 let owner: string, stranger: string, agent: string, device: string, dm: string, group: string, message: string, file: string
@@ -12,7 +13,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await db?.end() })
 beforeEach(async () => {
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   ;[owner,stranger,agent,device,dm,group,message,file] = Array.from({ length: 8 }, randomUUID)
   for (const id of [owner,stranger]) await db.query(`INSERT INTO auth.users(id,email) VALUES($1,$2)`, [id, `${id}@personal-dm.invalid`])
   await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Fixture','fixture','linux')", [device,owner])
@@ -112,9 +113,9 @@ it.each(['restore','remove-owner'])('serializes deletion against a competing %s 
   let failureCode: string | undefined
   try {
     await restoring.query('BEGIN')
-    // Match lifecycle's complete globally ordered head set; locking only owner could manufacture an inverse order.
+    // Hold the DM's line the way a fan-out over its members does.
     await restoring.query('SELECT chat.lock_chat_revision_recipients($1,$2)',[dm,[owner]])
-    await db.query('BEGIN')
+    await db.query(BEGIN_READING_REVISIONS)
     const pid = (await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
     const blocker = (await restoring.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
     outcome = remove().then(() => 'deleted', (error: Error & { code?: string }) => {
