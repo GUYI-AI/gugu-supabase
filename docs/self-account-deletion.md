@@ -51,10 +51,16 @@ part of password updates. No password is changed and no custom OTP is generated.
 
 ## Retained messages and references
 
-The existing Auth → identity erasure chain is reused. The following are its
-existing physical-table effects; this PR does not add message or group deletion.
+The Auth → identity erasure chain is reused. Forward release `101100` deletes a
+conversation of any kind when every member belongs to the erased human and all
+their owned agents, including removed agents. Messages, files and source topics
+cascade atomically; exclusively referenced bytes enter the existing collector.
+Another human or another owner's agent preserves the shared conversation.
+See [the scoped deletion and release-order rules](self-only-conversation-erasure.md).
+The table below describes the remaining, shared conversations; it is not a
+promise to retain self-only content.
 
-| Table | Existing erasure effect |
+| Table | Effect in retained shared conversations |
 | --- | --- |
 | `chat.messages` | Preserve rows, body, timestamps, replies, threads and file grouping; FK clears sender; remove erased IDs from recipients and per-user hidden markers |
 | `chat.chats` | Preserve group rows; transfer owner to a surviving human or archive; creator becomes successor/NULL. Existing DM is renamed for the deleted peer |
