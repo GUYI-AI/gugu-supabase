@@ -183,7 +183,7 @@ Deno.serve(async (request) => {
       }
       const result = await handleGc(deps, 'kick')
       const managed = await sweepManagedUploads(deps, storage, project, false)
-      // OSS expires abandoned staging uploads with its own lifecycle rule; only the Supabase bucket needs this sweep.
+      // The legacy staging query below reads the Supabase Storage catalog.
       if (storage.kind === 'oss') return json({ ...result, managed, staging_deleted: 0 })
       const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })
       const bucket = storage.bucket
