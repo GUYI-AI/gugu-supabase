@@ -63,9 +63,17 @@ beforeAll(async () => {
     || Number(database.port) !== owner.port || Number(target.port) !== owner.port - 1
     || owner.root !== process.cwd() + '/') throw Error('Owned checkout loopback fixture required')
   db = new pg.Client({ connectionString: database.href }); await db.connect()
-  const names = ['account-audit-redaction-nightly', 'account-audit-redaction-retry', 'account-audit-redaction-daily', 'account-audit-redaction-daily-guard']
+  const names = ['account-audit-redaction-hourly', 'account-audit-redaction-retry-10min', 'account-audit-redaction-check-hourly', 'account-audit-redaction-guard-hourly']
   schedules = (await db.query('SELECT jobname,schedule,command FROM cron.job WHERE jobname=ANY($1::text[])', [names])).rows
   expect(schedules).toHaveLength(4)
+  expect(schedules.map(({ jobname, schedule }) => ({ jobname, schedule })).sort((a,b) => a.jobname.localeCompare(b.jobname))).toEqual([
+    { jobname: 'account-audit-redaction-check-hourly', schedule: '15 * * * *' },
+    { jobname: 'account-audit-redaction-guard-hourly', schedule: '20 * * * *' },
+    { jobname: 'account-audit-redaction-hourly', schedule: '0 * * * *' },
+    { jobname: 'account-audit-redaction-retry-10min', schedule: '*/10 * * * *' },
+  ])
+  expect((await db.query("SELECT count(*)::int AS n FROM cron.job WHERE jobname=ANY($1::text[])",
+    [['account-audit-redaction-nightly','account-audit-redaction-retry','account-audit-redaction-daily','account-audit-redaction-daily-guard']])).rows[0].n).toBe(0)
   // Pause only this new worker in the owned fixture so it cannot race DDL faults.
   for (const schedule of schedules) await db.query('SELECT cron.unschedule($1)', [schedule.jobname])
 })
@@ -238,7 +246,7 @@ it('commits retry information before surfacing a real procedure failure', async 
   const job = await jobFor(owner.id)
   await db.query("UPDATE identity.account_audit_redaction_jobs SET target_at=deleted_at+interval '1 hour' WHERE id=$1", [job.id])
   await db.query(`ALTER TABLE file_private.storage_action_audit ADD CONSTRAINT unified_audit_late_failure CHECK(id<>'${operation}'::uuid OR actor_user_id NOT LIKE 'erased:%') NOT VALID`)
-  expect(schedules.find(item => item.jobname === 'account-audit-redaction-retry')!.command.startsWith('CALL ')).toBe(true)
+  expect(schedules.find(item => item.jobname === 'account-audit-redaction-retry-10min')!.command.startsWith('CALL ')).toBe(true)
   await expect(db.query('CALL identity.run_account_audit_redactions(1000,10,true)')).rejects.toMatchObject({ code: 'P0001' })
   expect(await jobFor(owner.id)).toMatchObject({ state: 'retry_wait', last_error_code: '23514' })
   expect(await row('SELECT id FROM auth.users WHERE id=$1', [owner.id])).toBeUndefined()
