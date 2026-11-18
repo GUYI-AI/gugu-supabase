@@ -82,9 +82,11 @@ describe('durable committed staging cleanup', () => {
       await admin()
     }
     if (commitFirst) await commit()
-    const permit = resumed
-      ? (await user(), await value('SELECT chat.file_managed_upload_as($1,$2,$3,60) AS v', [randomUUID(), group, owner]))
-      : original
+    let permit = original
+    if (resumed) {
+      await user()
+      permit = await value('SELECT chat.file_managed_upload_as($1,$2,$3,60) AS v', [randomUUID(), group, owner])
+    }
     await admin()
     expect(await value('SELECT count(*)::int AS v FROM chat.file_staging_cleanup WHERE staging_key=$1', [permit.staging_key])).toBe(0)
     const settled = await value('SELECT chat.file_blob_settle($1,$2,$3,$4,60,$5) AS v', [owner, original.staging_key, permit.staging_key, sha, 'application/octet-stream'])
