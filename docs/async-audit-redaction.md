@@ -1,6 +1,6 @@
 # Restricted background audit redaction
 
-Refs #302. Release `100400` installs only the closed registration/context contract. The later helper adapters and Auth caller/scheduler are required before this becomes a working asynchronous flow. It neither exposes a new API nor enables a worker.
+Refs #302. Release `20261119001200` installs only the closed registration/context contract. The later helper adapters and Auth caller/scheduler are required before this becomes a working asynchronous flow. It neither exposes a new API nor enables a worker.
 
 An account-erasure transaction registers its exact lifecycle identity set and the trusted optional Auth email. Missing or partial lifecycle context is refused. Repeating the same registration in the same source transaction returns the original job; changing its criteria is refused. Registration and account deletion commit or roll back together once the later caller is installed. API roles cannot read the email criteria, manipulate tables, enqueue jobs or assert a worker context.
 
