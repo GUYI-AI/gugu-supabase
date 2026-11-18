@@ -8,7 +8,7 @@ const at = new Date('2026-11-03T00:00:00Z'), request = '11111111-1111-4111-8111-
 function fixture(metadata: Record<string, unknown> = {}) {
   const directSign = vi.fn<AttachmentObjectStorage['sign']>(async () => ({ url: 'https://origin.example/same-object?x-oss-signature=fixture', thumbUrl: null, expiresAt: '2026-11-03T00:00:30Z' }))
   const objects = ossObjectStorage({ oss: { region: 'test', bucket: 'fixture', endpointPublic: 'oss.example', endpointInternal: 'internal.example', accessKeyId: 'fixture', accessKeySecret: 'fixture' },
-    cdn: { domain: 'cdn.example', authKey: 'fixture', authTtlSeconds: 1800 }, directSign, fetch: vi.fn() })
+    cdn: { domain: 'cdn.example', authKey: 'fixture', authTtlSeconds: 1800 }, directSign, fetch: vi.fn(), inspector: vi.fn() })
   const userRpc = vi.fn<AttachmentsDeps['userRpc']>(async () => ({ data: { status: 'ready', bucket_id: 'oss', object_name: 'same-object', download_id: request,
     signed_at: at.toISOString(), expires_at: '2026-11-03T00:01:00Z', content_type: 'application/octet-stream', size_bytes: 10, ...metadata }, error: null }))
   const deps = { objects, userRpc, serviceRpc: vi.fn(async () => ({ data: { download_link_bits_per_second: 819200 }, error: null })) } as unknown as AttachmentsDeps

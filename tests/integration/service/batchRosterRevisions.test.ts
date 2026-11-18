@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS, FLUSH_REVISIONS } from '../../support/revisionTransaction'
 
 // docs/batch-roster-revisions.md: one membership statement sends each recipient one roster revision per chat. It names the
 // recipient's own seat when the statement changed it, otherwise the first changed seat by id.
@@ -48,6 +49,7 @@ async function clear() {
 }
 async function revisions(event: string, chat: string) {
   await db.query('RESET ROLE')
+  await db.query(FLUSH_REVISIONS)
   const { rows } = await db.query<Revision>(
     `SELECT user_id,resource_key,tombstone FROM chat.account_revisions
       WHERE event=$1 AND resource_key->>'chat_id'=$2 ORDER BY user_id,revision`, [event, chat])
@@ -69,7 +71,7 @@ beforeAll(async () => {
   await db.connect()
 })
 afterAll(async () => { await db?.end() })
-beforeEach(async () => { await db.query('BEGIN') })
+beforeEach(async () => { await db.query(BEGIN_READING_REVISIONS) })
 afterEach(async () => { await db.query('ROLLBACK') })
 
 describe('one roster revision per recipient per statement', () => {

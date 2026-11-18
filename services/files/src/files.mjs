@@ -20,11 +20,12 @@
 //     LISTEN 连接断过就把所有开着的连接重核一遍(断线期间的通知收不到)。
 //
 // 两个端口:对外口只有 /:id、/:id/edit、/:id/replace 与 WebSocket(nginx 的 /files/ 剥掉前缀后转到这里);
-// 内部口只有 /healthz 与 /stats,只绑回环、❌ 经 nginx 暴露。
+// 内部口只有 /healthz、/stats 与 POST /inspect(附件字节的检查,见 inspect.mjs),只绑回环或内网、❌ 经 nginx 暴露。
 
 import http from 'node:http'
 import { Server, isTransactionOrigin } from '@hocuspocus/server'
 import pg from 'pg'
+import { inspectSource, sameSecret } from './inspect.mjs'
 import * as Y from 'yjs'
 import { contentOriginOf } from '@gugu/files-core/concurrent'
 
@@ -820,6 +821,23 @@ export function createFileService(config, { log, pool: givenPool }) {
   // ── 内部口 ──────────────────────────────────────────────────────────────────
   const admin = http.createServer(async (req, res) => {
     const path = (req.url ?? '/').split('?')[0]
+    if (path === '/inspect') {
+      if (req.method !== 'POST') return send(res, 405, { error: 'method-not-allowed' })
+      if (!config.inspectSecret) return send(res, 503, { error: 'not-configured' })
+      try {
+        if (!sameSecret(bearerFromAuthorization(req.headers.authorization), config.inspectSecret)) throw new Denied('bad-credential', 401)
+        let body
+        try { body = JSON.parse(await readBody(req)) } catch (error) { throw error instanceof Denied ? error : new Denied('bad-request', 400) }
+        const inspected = await inspectSource(body)
+        res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'no-store',
+          'x-gugu-sha256': inspected.sha256, 'x-gugu-size': String(inspected.sizeBytes), 'x-gugu-etag': inspected.etag })
+        return res.end(inspected.prefix)
+      } catch (error) {
+        if (error instanceof Denied) return send(res, error.status, { error: error.reason })
+        log.error('inspect failed', errorFields(error))
+        return send(res, 502, { error: 'source-unreadable' })
+      }
+    }
     if (req.method !== 'GET') return send(res, 405, { error: 'method-not-allowed' })
     if (path === '/healthz') {
       let db = false

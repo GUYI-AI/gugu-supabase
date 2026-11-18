@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 import { expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 it('keeps contact and group aliases private, synchronized and backward compatible', async () => {
   const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
@@ -22,7 +23,7 @@ it('keeps contact and group aliases private, synchronized and backward compatibl
     await q('ROLLBACK TO SAVEPOINT denied_write')
   }
   try {
-    await q('BEGIN')
+    await q(BEGIN_READING_REVISIONS)
     await q('INSERT INTO auth.users(id, created_at) SELECT id, now() FROM unnest($1::uuid[]) id', [[owner, member, stranger]])
     await q("INSERT INTO chat.chats(id, kind, name, creator_user_id) VALUES ($1,'group','Shared group',$3),($2,'dm',NULL,$3)", [group, direct, owner])
     await q("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES ($1,$2,'owner'),($1,$3,'member'),($4,$2,'owner')", [group, owner, member, direct])

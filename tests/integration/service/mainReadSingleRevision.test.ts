@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 let db: Client
 let owner: string, reader: string, chat: string, seq: string
@@ -23,7 +24,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await db?.end() })
 beforeEach(async () => {
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   owner = randomUUID(); reader = randomUUID(); chat = randomUUID()
   await db.query("INSERT INTO identity.users(id,type,display_name) VALUES($1,'human','Owner'),($2,'human','Reader')", [owner, reader])
   await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'group','Read fixture',$2)", [chat, owner])

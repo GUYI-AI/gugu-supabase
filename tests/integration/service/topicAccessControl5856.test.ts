@@ -14,6 +14,7 @@
 // 「读到 0 行」既可能是判据生效,也可能是我连错了库或 RLS 上下文没设对,只有正对照能把两者分开。
 import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 interface QueryResult<Row> { rows: Row[] }
 interface DatabaseClient {
@@ -70,7 +71,7 @@ afterAll(async () => { await database?.end() })
 
 /** 每条用例一个事务;无论断言成败都回滚,❌ 不给库留任何一行。 */
 async function inRollback(body: () => Promise<void>): Promise<void> {
-  await database.query('BEGIN')
+  await database.query(BEGIN_READING_REVISIONS)
   try {
     await body()
   } finally {

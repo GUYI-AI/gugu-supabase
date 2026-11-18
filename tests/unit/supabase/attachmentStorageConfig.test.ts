@@ -1,6 +1,6 @@
 // Which object store the attachments function talks to is decided by environment variables alone:
 // none set → Supabase Storage (community default), all set → OSS + CDN, anything in between → refuse.
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { attachmentStorageConfig, OSS_ENV, StorageConfigError } from '../../../supabase/functions/_shared/attachment-storage-config'
 import { ossObjectStorage } from '../../../supabase/functions/_shared/attachment-object-storage'
 import { type AttachmentsDeps, handleUrls } from '../../../supabase/functions/_shared/attachments-core'
@@ -54,7 +54,7 @@ describe('attachment storage configuration', () => {
   it('hands OSS uploads out as a signed post form without any credential', async () => {
     const config = attachmentStorageConfig(from({ ...OSS, ATTACHMENTS_OBJECT_PREFIX: 'devdb' }))
     if (config.kind !== 'oss') throw new Error('expected OSS')
-    const objects = ossObjectStorage({ oss: config.oss, cdn: config.cdn, fetch: async () => new Response(null, { status: 500 }) })
+    const objects = ossObjectStorage({ oss: config.oss, cdn: config.cdn, fetch: async () => new Response(null, { status: 500 }), inspector: vi.fn() })
     const form = await objects.upload('staging/user/one', new Date('2026-10-21T00:00:00Z'))
     expect(form.url).toBe('https://files-test.oss-cn-wulanchabu.aliyuncs.com/')
     expect(form.fields.key).toBe('devdb/staging/user/one')
@@ -70,7 +70,7 @@ describe('attachment storage configuration', () => {
       bucket_id: 'oss', object_name: 'ab/abcdef', sha256: 'abcdef', size_bytes: 3, content_type: 'image/png', width: 1, height: 1,
     }
     const deps = {
-      objects: ossObjectStorage({ oss: config.oss, cdn: config.cdn, fetch: async () => new Response(null, { status: 500 }) }),
+      objects: ossObjectStorage({ oss: config.oss, cdn: config.cdn, fetch: async () => new Response(null, { status: 500 }), inspector: vi.fn() }),
       userRpc: async (fn: string, args: Record<string, unknown>) => {
         expect(fn).toBe('file_transfer_download_as')
         expect(args.p_ref).toEqual({ message_id: 'm1' })

@@ -16,14 +16,15 @@ current confirmed email is read from Auth; body fields never select an identity.
 | GET `/status` | Bearer | Availability, fixed immediate/forfeit consent version and active attempt |
 | POST `/challenge` | Bearer, `consent_version: "immediate-forfeit-v1"` | Sends a fresh official email OTP; returns request and a secret receipt once |
 | POST `/confirm` | Bearer, `request_id`, `receipt_token`, `consent_version`, `code`, `acknowledge_forfeit: true` | Immediately calls Auth Admin hard deletion; 200 only after absence readback |
-| POST `/retry` | Bearer, same request/receipt | Bound retry of an already verified attempt within its original five-minute window |
+| POST `/retry` | Bearer, same request/receipt | Refuses unresolved attempts; retained for protocol compatibility, without authorizing another DELETE |
 | POST `/result` | Request/receipt capability, no login required | Minimal readback after deletion has removed the original session |
 
 A receipt is random 256-bit capability material, stored only as its hash. Keep it
 out of URLs, telemetry and logs. A 202 response means an uncertain in-flight
-outcome, not a waiting period or completed deletion. A definite Auth failure is
-503 with retry state; overlapping retries are refused and limited to three
-attempts. Expired authorization requires a new code. Unsupported routes return404.
+outcome, not a waiting period or completed deletion. A completed DELETE HTTP
+response, including 5xx, plus a currently present account does not prove rollback
+or termination. Only confirmed absence is classified as deleted; every other
+transport outcome remains processing. Unsupported routes return404.
 
 Official Auth `/otp` (`create_user=false`) sends a new code; `/verify` (`type=email`)
 consumes it. The verified identity/email must match the original user and request.
@@ -31,6 +32,20 @@ The temporary verification session is immediately signed out locally and never
 returned. A challenge expires five minutes after sending begins. Limits are one
 send/minute, three/15min/user, five code attempts/request and ten/15min/user.
 Changed emails, revoked sessions, stale consent and reused proofs fail closed.
+An expired execution lease is not a failed deletion. A processing request remains
+unconfirmed and blocks a new challenge or retry until its outcome is reconciled;
+its result does not advertise `can_retry`. Legacy `retry_wait` is also unresolved:
+begin/retry and gate closure refuse it, status projects processing, and an
+authenticated result capability normalizes it to processing. There is currently
+no authoritative rollback proof in this transport protocol, so automatic or
+shortcut retries remain unavailable pending a separate recovery contract.
+Execution also requires the original SID's not_after to be NULL or in the future.
+Read the original capability
+after a dispatch-recheck error: an HTTP error alone is not a cancellable workflow
+terminal. Committed Auth absence takes precedence over an older failed/expired
+classification. An orphaned processing operation whose account still exists
+requires an authoritative recovery decision; this release does not invent a
+timeout-based cancellation, background retry or recovery worker.
 Reauthentication nonce is not used because its installed verification contract is
 part of password updates. No password is changed and no custom OTP is generated.
 
@@ -102,7 +117,8 @@ JWT, receipt or raw Auth/SQL error is logged.
 Use an owned loopback fixture for installed-schema tests. Opt-in
 `GUGU_TEST_EMAIL_OTP=1` enables only its local mail catcher/template.
 `node scripts/test-account-deletion-http.mjs` exercises the exact handler over
-loopback HTTP against real Auth/email/triggers, including failure rollback/retry;
+loopback HTTP against real Auth/email/triggers, including rollback preservation,
+refusal to retry an uncertain outcome, and late-commit reconciliation;
 it reports booleans/counts/times and is not a deployed Edge smoke test. Real
 release acceptance must use Auth HTTP with the actual trigger owners/financial
 grants. A SQL delete by a stronger role is insufficient. Shared branch testing
@@ -132,6 +148,10 @@ above describes the existing deletion chain reused by Auth.
    after the erasure-performance and financial-owner/permission prerequisites.
    The official deployment guard does not support an unmerged branch here. Only
    CD writes successful staging source pins; this validation does not edit pins.
+   Install the outcome-reconciliation migration before the updated Edge handler:
+   its internal `execute` recheck fails closed against an older workflow. An old
+   handler can still finish an existing request, but must not be treated as proof
+   that the new pre-dispatch recheck is deployed.
 2. Installation leaves `test_only=true,test_user_id=NULL`: every ordinary user is
    closed. An authorized synthetic-account operator creates one new confirmed
    fixture through Auth Admin, with server-only app metadata

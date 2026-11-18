@@ -12,7 +12,7 @@ function fixture() {
   const serviceRpc=vi.fn<AttachmentsDeps['serviceRpc']>(async(fn)=>({data:fn==='file_temporary_host_for'
     ?{object_name:object,ciphertext_bytes:128,state:'uploading'}:fn==='file_temporary_key_for'?key:{},error:null}))
   const objects={uploadBounds:vi.fn(async()=>({maxBytes:128,expiresSeconds:120})),upload:vi.fn(async()=>({url:'https://origin.test',fields:{key:object},expiresAt:'2026-10-24T00:02:00Z'})),
-    inspect:vi.fn(async()=>({bytes:new Uint8Array(128),sizeBytes:128,sha256:sha,etag:'immutable'})),read:vi.fn(),promote:vi.fn(),put:vi.fn(),exists:vi.fn(),remove:vi.fn(),
+    inspect:vi.fn(async()=>({bytes:new Uint8Array(128),sizeBytes:128,sha256:sha,revision:'immutable'})),promote:vi.fn(),put:vi.fn(),exists:vi.fn(),remove:vi.fn(),
     sign:vi.fn(async()=>({url:'https://origin.test/cipher',thumbUrl:null,expiresAt:'2026-10-24T00:01:00Z'})),invalidate:vi.fn()}
   const deps:AttachmentsDeps={objects,userRpc,serviceRpc,fetch:vi.fn(),storageSignedUrl:vi.fn(),storageRemove:vi.fn(),now:()=>new Date('2026-10-24T00:00:00Z'),uuid:()=>download,log:vi.fn()}
   return {deps,objects,userRpc,serviceRpc}
@@ -39,7 +39,9 @@ describe('temporary file HTTP protocol',()=>{
     const f=fixture(),order:string[]=[]
     f.serviceRpc.mockImplementation(async(fn)=>{
       order.push(fn)
-      return {data:fn==='file_temporary_expire'?(order.length===1?1:0):fn==='file_blob_gc_claim'
+      if(fn==='file_blob_gc_run_begin') return {data:{acquired:true,token:download,batch_limit:5,concurrency:1},error:null}
+      if(fn==='file_blob_gc_run_renew'||fn==='file_blob_gc_run_end') return {data:true,error:null}
+      return {data:fn==='file_temporary_expire'?(order.length===1?1:0):fn==='file_blob_gc_run_claim'
         ?[{blob_id:'old',claim_token:'claim',bucket_id:'temporary',object_name:'temporary/old',content_type:'application/octet-stream'}]:null,error:null}
     })
     const accept=f.userRpc.getMockImplementation()!
@@ -54,7 +56,7 @@ describe('temporary file HTTP protocol',()=>{
   })
   it('continues file-accept permission issuance when the GC summary logger throws', async () => {
     const f=fixture(), loggingError=new Error('summary logger unavailable')
-    f.serviceRpc.mockImplementation(async(fn)=>({data:fn==='file_temporary_expire'?1:fn==='file_blob_gc_claim'?[]:null,error:null}))
+    f.serviceRpc.mockImplementation(async(fn)=>({data:fn==='file_blob_gc_run_begin'?{acquired:true,token:download,batch_limit:5,concurrency:1}:fn==='file_blob_gc_run_renew'||fn==='file_blob_gc_run_end'?true:fn==='file_temporary_expire'?1:fn==='file_blob_gc_run_claim'?[]:null,error:null}))
     f.deps.log=()=>{throw loggingError}
     const stderr=vi.spyOn(console,'error').mockImplementation(()=>{})
     try {
@@ -66,9 +68,9 @@ describe('temporary file HTTP protocol',()=>{
   })
   it('refuses modified ciphertext and malformed key material before publication',async()=>{
     const f=fixture(),body={transfer_id:transfer,ciphertext_bytes:128,ciphertext_sha256:sha,key}
-    f.objects.inspect.mockResolvedValueOnce({bytes:new Uint8Array(),sizeBytes:127,sha256:sha,etag:'etag'})
+    f.objects.inspect.mockResolvedValueOnce({bytes:new Uint8Array(),sizeBytes:127,sha256:sha,revision:'etag'})
     await expect(handleProjectFiles(f.deps,host,'file-commit',body)).rejects.toMatchObject({status:409})
-    f.objects.inspect.mockResolvedValueOnce({bytes:new Uint8Array(),sizeBytes:128,sha256:'cd'.repeat(32),etag:'etag'})
+    f.objects.inspect.mockResolvedValueOnce({bytes:new Uint8Array(),sizeBytes:128,sha256:'cd'.repeat(32),revision:'etag'})
     await expect(handleProjectFiles(f.deps,host,'file-commit',body)).rejects.toMatchObject({status:409})
     await expect(handleProjectFiles(f.deps,host,'file-commit',{...body,key:'bad'})).rejects.toMatchObject({status:400})
     expect(f.serviceRpc.mock.calls.every(([fn])=>fn!=='file_temporary_commit')).toBe(true)

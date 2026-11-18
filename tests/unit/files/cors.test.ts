@@ -60,6 +60,7 @@ beforeAll(async () => {
     jwksUrl: `http://127.0.0.1:${(jwks.address() as net.AddressInfo).port}/auth/v1/.well-known/jwks.json`,
     jwtSecret: null,
     jwtIssuer: null,
+    inspectSecret: null,
     timeoutMs: 30_000,
     debounceMs: 1_000,
     maxDebounceMs: 5_000,
