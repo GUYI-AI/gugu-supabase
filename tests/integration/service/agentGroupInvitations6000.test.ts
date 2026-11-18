@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { beforeAll, afterAll, beforeEach, afterEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS, FLUSH_REVISIONS } from '../../support/revisionTransaction'
 
 // Runs against the migrated, disposable PostgreSQL instance owned by schema-baseline CI.
 // Authenticated role + real JWT claims exercise RPC grants and RLS; every case rolls back.
@@ -76,7 +77,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await database?.end() })
 beforeEach(async () => {
-  await database.query('BEGIN')
+  await database.query(BEGIN_READING_REVISIONS)
   owner = randomUUID(); receiver = randomUUID(); outsider = randomUUID()
   ownAgent = randomUUID(); externalAgent = randomUUID(); siblingAgent = randomUUID()
   for (const id of [owner, receiver, outsider]) {
@@ -187,6 +188,7 @@ describe('Agent group invitation consent', () => {
   it('publishes an invitation revision that reaches an offline owner on catch-up', async () => {
     const group = await newGroup()
     const invitation = await invite(group)
+    await database.query(FLUSH_REVISIONS)
     await asUser(receiver)
     const revision = await result<unknown>('SELECT chat.sync_since($1,$2) AS result', [0, 500])
     expect(JSON.stringify(revision)).toContain('group_invitations_changed')

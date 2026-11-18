@@ -36,7 +36,9 @@ JSON 的并发(F43,`src/concurrent.mjs`):map 的键是地址,两端同时第一�
 看见旧值之后有意替换(比如重置成 `{}`)不修。页面运行时要装同一条 `keepReplacedMaps`(被替换掉的 map 不做 GC),
 否则离线重连时本地先判自己输了,自己那份在送到服务之前就被回收。计数在 `/stats` 的 `concurrentMerges`。
 
-内部口(只绑回环,❌ 经 nginx 暴露):`GET /healthz`(库与 LISTEN 都通才 200)、`GET /stats`。
+内部口(只绑回环或与 attachments 函数同一内网,❌ 经 nginx 暴露):`GET /healthz`(库与 LISTEN 都通才 200)、`GET /stats`、`POST /inspect`。
+
+`POST /inspect`:`Authorization: Bearer <服务间密钥>`,body `{ source: { url, headers }, limit, retain }` —— attachments 函数签好的一条读暂存对象的请求。流式读完,超过 `limit` 一个字节就停(413);回 200,正文是前 `min(大小, retain)` 字节,头 `x-gugu-sha256`、`x-gugu-size`、`x-gugu-etag`。来源不在 404、读不了 502、密钥不对 401、没配密钥 503。
 
 Replacement preparation is one-use state on the existing upload receipt, expires after 30 seconds, and needs no new file-service configuration.
 Finish cancels unused preparation under its receipt lock before resuming; success retires the old epoch through F71 so mounted editors reopen. An abandoned request releases after expiry, and late commits are rejected in the database.
@@ -51,6 +53,7 @@ For the service-only `attachments/document-import` migration, a row whose stored
 | `FILES_JWT_ISSUER` | 不核 | 给了就核 `iss` |
 | `FILES_HOST` / `FILES_PORT` | `127.0.0.1` / `18320` | 对外口;容器里设 `0.0.0.0`,宿主只发布到回环 |
 | `FILES_ADMIN_HOST` / `FILES_ADMIN_PORT` | `127.0.0.1` / `18321` | 内部口 |
+| `FILES_INSPECT_SECRET_FILE` | 不配 ⇒ `/inspect` 回 503 | 内部口 `POST /inspect` 的服务间密钥文件;attachments 函数的 `GUGU_FILES_INSPECT_SECRET` 是同一个值 |
 | `FILES_TIMEOUT_MS` | 30000 | 连接心跳超时 |
 | `FILES_DEBOUNCE_MS` / `FILES_MAX_DEBOUNCE_MS` | 1000 / 5000 | 存盘去抖 |
 | `FILES_MAX_FILE_BYTES` | 1 MiB | 文本 / JSON 文件上限 |

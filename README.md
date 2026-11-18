@@ -44,6 +44,10 @@ Collaborative file editing needs the long-running Node service in `services/file
 
 ## Local verification
 
+Optional visible iOS notifications use the existing account revision stream;
+see the [APNs transport](services/push/README.md) for registration, permissions,
+configuration and the separate physical-device acceptance requirements.
+
 For a self-managed Kong gateway, the versioned [gateway policies](deploy/kong/README.md)
 define REST preflight caching, Storage range-response header exposure, and the
 admin routes that only the service-role key may use.
@@ -63,3 +67,5 @@ pnpm test:db:stop
 `GUGU_TEST_DB_PORT` selects a free port. The script manages only the test project tagged for this checkout and binds the database to loopback; `stop` deletes this disposable database's volume. Installation tests require an empty database.
 
 The client repository's `supabase-contract` test project connects to this test database to verify the client–backend contract.
+
+Self-service account deletion is an opt-in identity channel with fresh email verification. Final confirmation immediately deletes the account and forfeits remaining usable credits; there is no cooling-off period. See [the API and operator contract](docs/self-account-deletion.md).

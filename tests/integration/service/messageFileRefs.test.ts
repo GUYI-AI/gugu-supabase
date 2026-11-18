@@ -2,6 +2,7 @@ import { createFixtureGroup } from '../../support/groupFixture'
 import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS, FLUSH_REVISIONS } from '../../support/revisionTransaction'
 
 /**
  * 消息指向文件夹里那个条目的那一版(迁移 20261016105500;设计 §3.2–§3.5、§7):
@@ -154,7 +155,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await database?.end() })
 beforeEach(async () => {
-  await database.query('BEGIN')
+  await database.query(BEGIN_READING_REVISIONS)
   owner = await human('Owner')
   member = await human('Member')
   outsider = await human('Outsider')
@@ -522,6 +523,7 @@ describe('attachment message metadata', () => {
     const sent = await commit(owner, (await upload(owner, content)).key, randomUUID(), group, owner, 'shot.png')
     const expected = { status: 'ready', source: 'managed-object', sha256: sha(content), width: 640, height: 480 }
     expect(sent).toMatchObject({ file_metadata: expected, content: envelope('shot.png', 'image/png', 1234) })
+    await database.query(FLUSH_REVISIONS) // newGroup's create_gugu_group deferred every constraint again
     for (const actor of [owner, member]) {
       const [row] = await read(sent.id, actor)
       expect(row!.file_metadata).toMatchObject(expected)
@@ -616,11 +618,11 @@ describe('attachment message metadata', () => {
     expect(await read(sent.id, outsider)).toEqual([])
     await asOwner()
     await database.query('UPDATE chat.messages SET retracted_at=now() WHERE id=$1', [sent.id])
-    expect((await read(sent.id))[0]!.file_metadata).toEqual({ status: 'gone' })
+    expect((await read(sent.id))[0]!.file_metadata).toEqual({ status: 'gone', availability: 'unavailable', expired_at: null })
     const ordinary = await commit(owner, (await upload(owner, `deleted-${randomUUID()}`)).key, randomUUID(), group, owner, 'deleted.png')
     await asUser(owner)
     await database.query('SELECT chat.workspace_delete_as($1,$2)', [ordinary.file_item_id, owner])
-    expect((await read(ordinary.id))[0]!.file_metadata).toEqual({ status: 'gone' })
+    expect((await read(ordinary.id))[0]!.file_metadata).toEqual({ status: 'gone', availability: 'unavailable', expired_at: null })
   })
 })
 

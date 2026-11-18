@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 interface DatabaseClient {
   connect(): Promise<void>
@@ -56,7 +57,7 @@ beforeAll(async () => {
   await database.connect()
 })
 afterAll(async () => { await database?.end() })
-beforeEach(async () => { await database.query('BEGIN') })
+beforeEach(async () => { await database.query(BEGIN_READING_REVISIONS) })
 afterEach(async () => { await database.query('RESET role'); await database.query('ROLLBACK') })
 
 describe('personal message deletions in account sync', () => {
@@ -78,7 +79,10 @@ describe('personal message deletions in account sync', () => {
     const last = await say(chat, caller)
     const users = [sender, caller, peer], before = await Promise.all(users.map(cursor))
     await database.query('DELETE FROM realtime.messages WHERE topic=ANY($1::text[])', [users.map((user) => `gugu:user:${user}:events`)])
+    // One call, one commit: defer the flush across the call so it wakes the caller once, as a commit does.
+    await database.query('SET CONSTRAINTS chat.pending_user_revisions_flush DEFERRED')
     await asUser(caller, 'SELECT chat.clear_messages_for_me($1)', [chat])
+    await database.query('SET CONSTRAINTS chat.pending_user_revisions_flush IMMEDIATE')
     expect(await changes(caller, before[1]!)).toEqual([first, last].map((message) => ({ event: 'message_deleted', revision: expect.any(String), payload: { chat_id: chat, entity_id: message.id, tombstone: true } })))
     expect(await changes(sender, before[0]!)).toEqual([])
     expect(await changes(peer, before[2]!)).toEqual([])

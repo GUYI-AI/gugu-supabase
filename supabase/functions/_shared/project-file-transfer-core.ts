@@ -1,5 +1,6 @@
 import { type AttachmentsDeps,call,handleGc,objectStorage,Refusal } from './attachments-core.ts'
 import { fileRef,handleFileDownload } from './file-transfer-core.ts'
+import { ObjectStorageError } from './object-storage.ts'
 
 function text(body:Record<string,unknown>,name:string) {
   if(typeof body[name]!=='string'||!body[name]) throw new Refusal(400,'invalid',name+' is required')
@@ -55,8 +56,10 @@ export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:
   const decision=await call(deps.serviceRpc,'file_temporary_host_for',{p_id:transfer,p_host:user}) as {object_name:string;ciphertext_bytes:number;state:string}
   if(Number(decision.ciphertext_bytes)!==bytes) throw new Refusal(409,'upload_changed','Ciphertext size differs from its reservation')
   if(decision.state!=='ready') {
-    if(!store.inspect) throw new Refusal(503,'not_configured','Streamed object inspection is unavailable')
-    const actual=await store.inspect(decision.object_name,bytes)
+    const actual=await store.inspect(decision.object_name,bytes).catch(error=>{
+      if(error instanceof ObjectStorageError&&error.status===503) throw new Refusal(503,'not_configured',error.message)
+      throw error
+    })
     if(actual.sizeBytes!==bytes||actual.sha256!==sha) throw new Refusal(409,'upload_changed','Ciphertext differs from its commitment')
   }
   await call(deps.serviceRpc,'file_temporary_commit',{p_id:transfer,p_host:user,p_sha:sha,p_size:bytes,p_key:key})
