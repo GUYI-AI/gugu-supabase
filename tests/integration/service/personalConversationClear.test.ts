@@ -17,6 +17,8 @@ beforeEach(async () => {
   for (const id of [owner,reader]) await db.query('INSERT INTO auth.users(id,email) VALUES($1,$2)',[id,id+'@list-hiding.invalid'])
   await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Fixture','fixture','linux')",[device,owner])
   await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Fixture',$2,$3)",[agent,owner,device])
+  // These clear-history controls include later authorized human-DM sends.
+  await db.query("INSERT INTO identity.friendships(user_a_id,user_b_id) VALUES(LEAST($1::text,$2::text),GREATEST($1::text,$2::text))",[owner,reader])
   for (const [id,kind,peer] of [[group,'group',reader],[dm,'dm',reader],[agentDm,'dm',agent]]) {
     await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,$2,'Fixture',$3)",[id,kind,reader])
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')",[id,peer,owner])

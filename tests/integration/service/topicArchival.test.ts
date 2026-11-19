@@ -79,6 +79,8 @@ describe('human topic archival within the source conversation', () => {
     expect(await denied(() => archive(creator))).toContain('Source conversation management required')
   })
   it('allows only the creator in a source DM, without treating a peer as a group manager', async () => {
+    // Create the source message while these two humans are friends.
+    await db.query("INSERT INTO identity.friendships(user_a_id,user_b_id) VALUES(LEAST($1::text,$2::text),GREATEST($1::text,$2::text))", [reader, creator])
     const dm = randomUUID(), anchor = randomUUID()
     await db.query(`INSERT INTO chat.chats(id,kind) VALUES ($1,'dm')`, [dm])
     await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES ($1,$2,'owner'),($1,$3,'member')`, [dm, reader, creator])

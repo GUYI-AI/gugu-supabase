@@ -108,6 +108,28 @@ describe('project chat files kept by the device that sent each version',()=>{
     await user(member)
     expect((await fails('SELECT chat.file_temporary_request($1,$2,$3)',[{item_id:item,version:1},member,randomUUID()])).hint).toBe('file_transfer_denied')
   })
+  it('lets only the holder decline a requested copy; the reader sees the reason at once and a new request asks again',async()=>{
+    await service()
+    await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=chat.file_transfer_limits.settings||EXCLUDED.settings",
+      [{inventory_ready:true,file_max_bytes:1000,upload_permit_seconds:120,sign_window_seconds:60,sign_account_count:100,temporary_group_bytes:10000}])
+    await publish(owner,bound,'root')
+    await user(member)
+    const request=randomUUID(),ask=(id:string)=>db.query('SELECT chat.file_temporary_request($1,$2,$3) AS r',[{item_id:item,version:1},member,id])
+    expect((await ask(request)).rows[0].r).toMatchObject({host_device_id:bound,transfer_status:'requested',transfer_declined:null})
+    // A reader, even one in the chat, cannot retire the holder's request.
+    expect((await fails('SELECT chat.file_temporary_decline($1,$2)',[request,'no'])).hint).toBe('file_transfer_denied')
+    await user(owner)
+    expect((await fails('SELECT chat.file_temporary_decline($1,$2)',[request,''])).hint).toBe('file_transfer_invalid')
+    await db.query('SELECT chat.file_temporary_decline($1,$2)',[request,'Transfer revision changed'])
+    await user(member)
+    expect((await ask(request)).rows[0].r).toMatchObject({transfer_id:request,transfer_status:'retired',transfer_declined:'Transfer revision changed'})
+    const again=(await ask(randomUUID())).rows[0].r
+    expect(again).toMatchObject({transfer_status:'requested',transfer_declined:null})
+    expect(again.transfer_id).not.toBe(request)
+    // A retired request is not declined twice.
+    await user(owner)
+    expect((await fails('SELECT chat.file_temporary_decline($1,$2)',[request,'again'])).hint).toBe('file_transfer_denied')
+  })
   it('lets a released client publish from its own bound device without naming a project',async()=>{
     await user(owner)
     expect((await db.query("SELECT chat.file_project_policy_as($1,$2,'root',false,true,'7d') AS r",[group,bound])).rows[0].r)

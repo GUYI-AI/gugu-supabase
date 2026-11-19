@@ -152,6 +152,8 @@ it('projects a removed historical Agent peer without making it an active member'
 it('preserves old permanent tombstones and maps future legacy calls to temporary hiding',async()=>{
   await db.query('UPDATE chat.chat_members SET conversation_deleted_at=clock_timestamp() WHERE chat_id=$1 AND user_id=$2',[dm,owner])
   const permanent=(await state(dm)).conversation_deleted_at
+  // Keep the later authorized-send control separate from permanent list deletion.
+  await db.query("INSERT INTO identity.friendships(user_a_id,user_b_id) VALUES(LEAST($1::text,$2::text),GREATEST($1::text,$2::text))",[owner,reader])
   await send(dm)
   expect(await listed()).not.toContain(dm)
   expect((await state(dm)).conversation_deleted_at).toEqual(permanent)
