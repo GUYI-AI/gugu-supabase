@@ -43,7 +43,8 @@ afterAll(async () => { await db?.end() })
 beforeEach(async () => {
   await query('BEGIN')
   ;[owner,colleague,stranger,otherOwner,agent,otherAgent,room] = Array.from({ length:7 },() => randomUUID())
-  await query("INSERT INTO identity.users(id,type,display_name) SELECT id,'human','Question fixture' FROM unnest($1::text[]) id",[[owner,colleague,stranger,otherOwner]])
+  await query("INSERT INTO auth.users(id,email) SELECT id::uuid,id||'@question-card.invalid' FROM unnest($1::text[]) id",[[owner,colleague,stranger,otherOwner]])
+  await query("INSERT INTO identity.users(id,type,display_name) SELECT id,'human','Question fixture' FROM unnest($1::text[]) id ON CONFLICT(id) DO UPDATE SET display_name=EXCLUDED.display_name",[[owner,colleague,stranger,otherOwner]])
   for (const [human,bot] of [[owner,agent],[otherOwner,otherAgent]]) {
     await query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Question fixture','fixture','linux')",['device-'+human,human])
     await query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Question fixture',$2,$3)",[bot,human,'device-'+human])
