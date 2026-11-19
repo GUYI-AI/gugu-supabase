@@ -138,6 +138,11 @@ it('allows authoritative cancel after rejected verification but never releases o
   const lease = { ...bound, p_lease_token: claimed.lease_token }
   const rejected = await flow('verification_failed', lease)
   expect(rejected.operation).toMatchObject({ state: 'open', can_release_preparation: false })
+  // If the definitive HTTP rejection was lost, receipt-only recovery still
+  // carries the original confirmation proof; open by itself is insufficient.
+  const recovered = await flow('result', { p_operation_digest: f.p_operation_digest, p_receipt_digest: f.p_receipt_digest })
+  expect(recovered.operation.confirmation).toEqual({ confirmation_id: f.p_confirmation_id,
+    challenge_generation: f.p_generation, state: 'rejected', error_code: 'verification_failed' })
   expect((await db.query('SELECT confirm_started_at FROM account_deletion_private.operations WHERE operation_digest=$1', [f.p_operation_digest])).rows[0].confirm_started_at).toBeNull()
   expect((await flow('verified', lease)).error).toBe('state_conflict')
   await db.query('UPDATE account_deletion_private.operation_access SET enabled=false')

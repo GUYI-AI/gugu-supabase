@@ -120,6 +120,15 @@ describe('closed operation HTTP protocol', () => {
       confirmation: { confirmation_id: confirm.confirmation_id, challenge_generation: confirm.generation, state: 'rejected' } } })
     expect(f.deps.hardDelete).not.toHaveBeenCalled()
   })
+  it('preserves the original rejected confirmation in receipt-only recovery after a lost 422', async () => {
+    const f = fixture(), recovered = { ...operation(), confirmation: { confirmation_id: confirm.confirmation_id,
+      challenge_generation: confirm.generation, state: 'rejected', error_code: 'verification_failed' } }
+    vi.mocked(f.deps.flow).mockResolvedValue({ ok: true, operation: recovered })
+    const response = await f.call('result', proof, false)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ operation: recovered })
+    expect(f.deps.currentUser).not.toHaveBeenCalled(); expect(f.deps.verifyCode).not.toHaveBeenCalled(); expect(f.deps.hardDelete).not.toHaveBeenCalled()
+  })
   it.each(['write_refused', 'write_unknown', 'missing_receipt', 'still_verifying', 'wrong_operation', 'wrong_confirmation', 'wrong_generation'])('preserves unknown verification when rejection acknowledgement is %s', async kind => {
     const f = fixture(), original = f.deps.flow
     vi.mocked(f.deps.verifyCode).mockResolvedValue(null)
