@@ -126,18 +126,18 @@ BEGIN
     WHERE c.kind = 'dm'
       AND c.status = 'active'
       AND EXISTS (
-          SELECT 1 FROM chat.chat_members cm
+          SELECT 1 FROM chat.active_members cm
           WHERE cm.chat_id = c.id
             AND cm.user_id = v_current_user_id
       )
       AND EXISTS (
-          SELECT 1 FROM chat.chat_members cm
+          SELECT 1 FROM chat.active_members cm
           WHERE cm.chat_id = c.id
             AND cm.user_id = v_target_user_id
       )
       AND (
           SELECT COUNT(*)
-          FROM chat.chat_members cm
+          FROM chat.active_members cm
           WHERE cm.chat_id = c.id
       ) = 2
     ORDER BY c.created_at ASC

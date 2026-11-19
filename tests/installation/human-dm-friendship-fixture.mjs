@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
 import pg from 'pg'
 
@@ -130,6 +131,27 @@ export async function installHumanDmFriendshipWithEvidence({ db, query, sql, url
     assert.deepEqual(await snapshot(db, f), before)
     assert.deepEqual((await entryAcl()).rows, aclBefore)
     assert.equal((await db.query("SELECT provolatile FROM pg_proc WHERE oid='chat.attachment_sender_check(text,text)'::regprocedure")).rows[0].provolatile, 'v')
+    const actual = (await db.query("SELECT oid,prosrc,provolatile FROM pg_proc WHERE oid IN ('chat.get_or_create_dm(text)'::regprocedure,'chat.attachment_sender_check(text,text)'::regprocedure) ORDER BY oid")).rows
+    for (const [index, current] of actual.entries()) {
+      const source = current.prosrc
+        .replace('    PERFORM chat_private.require_human_friendship(v_current_user_id, v_target_user_id);\n\n', '')
+        .replace('    PERFORM chat_private.require_dm_friendship(p_chat_id);\n', '')
+      assert.equal(source, definitionsBefore[index].prosrc, 'all prior liveness and ownership checks remain byte-identical')
+    }
+  })
+  await test('operational rollback restores exact predecessor functions, ACLs and retained state without rewriting the ledger', async () => {
+    const ledger = (await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows
+    await db.query('BEGIN')
+    try {
+      const rollback = readFileSync(new URL('../../ops/rollback-human-dm-friendship.sql', import.meta.url), 'utf8')
+        .replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, '')
+      await db.query(rollback)
+      assert.deepEqual((await entryAcl()).rows, aclBefore)
+      assert.deepEqual((await db.query("SELECT oid,prosrc,provolatile FROM pg_proc WHERE oid IN ('chat.get_or_create_dm(text)'::regprocedure,'chat.attachment_sender_check(text,text)'::regprocedure) ORDER BY oid")).rows, definitionsBefore)
+      assert.equal((await db.query("SELECT to_regprocedure('chat_private.require_human_friendship(text,text)') AS helper")).rows[0].helper, null)
+      assert.deepEqual(await snapshot(db, f), before)
+      assert.deepEqual((await db.query('SELECT * FROM gugu_install.releases ORDER BY version')).rows, ledger)
+    } finally { await db.query('ROLLBACK') }
   })
   await test('the new helper and trigger functions are closed to all API roles', async () => {
     for (const role of ['anon', 'authenticated', 'service_role', 'gugu_files']) {
