@@ -126,6 +126,18 @@ it('creates, invites, signs in, disables, restores and confirms member email thr
   ownedUsers.add(member.session.user.id)
   need(member.session.user.id === member.membership.identity_id && member.session.user.id !== founder.session.user.id, 'independent member binding')
   expect(member.session.user.id).not.toBe(originalPersonal.id)
+  const directory = await handle(new Request('https://backend.example.invalid/functions/v1/team-accounts?' + new URLSearchParams({
+    action: 'directory', query: memberEmail.toUpperCase(), limit: '1',
+  }), { headers: { authorization: 'Bearer ' + member.session.access_token } }))
+  expect(directory.status).toBe(200)
+  expect((await directory.json()).data).toMatchObject({ team_id: founder.team.id, total_count: 2, matching_count: 1,
+    next_cursor: null, members: [{ id: member.membership.id, identity_id: member.session.user.id, email: memberEmail, role: 'member' }] })
+  for (const limit of ['0', '101']) {
+    const invalid = await handle(new Request('https://backend.example.invalid/functions/v1/team-accounts?action=directory&limit=' + limit,
+      { headers: { authorization: 'Bearer ' + member.session.access_token } }))
+    expect(invalid.status).toBe(400)
+    expect((await invalid.json()).error.code).toBe('invalid_request')
+  }
   const disabled = await call({ action: 'disable', member_id: member.membership.id, expected_revision: member.membership.revision,
     idempotency_key: randomUUID() }, founder.session.access_token)
   expect(disabled.revocation.state).toBe('complete'); expect(disabled.handoff.state).toBe('pending')
