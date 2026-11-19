@@ -84,6 +84,7 @@ async function fixture(body: (f: Fixture) => Promise<void>) {
     await monitor.query('ROLLBACK')
     await monitor.query('DELETE FROM chat.chats WHERE id=$1', [f.chat])
     await monitor.query('DELETE FROM chat.file_blob_uploads WHERE staging_key=ANY($1::text[])', [f.keys])
+    await monitor.query('DELETE FROM chat.file_transfer_uploads WHERE account_id=$1 AND reservation_id=ANY($2::uuid[])', [f.owner, f.reservations])
     await monitor.query('DELETE FROM chat.file_transfer_reservations WHERE id=ANY($1::uuid[])', [f.reservations])
     await monitor.query('DELETE FROM chat.file_transfer_storage WHERE blob_id=ANY($1::uuid[])', [f.blobs])
     await monitor.query('DELETE FROM chat.file_blobs WHERE id=ANY($1::uuid[])', [f.blobs])
