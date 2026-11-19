@@ -173,6 +173,13 @@ describe('the message is there before its bytes', ()=>{
       expect((await db.query('SELECT chat.file_blob_settle($1,$2,$3,NULL,NULL,NULL) AS r',[sender,send.key,uploadKey])).rows[0].r)
         .toMatchObject({status:'ready',blob_id:first.blob_id,created:false})
       expect((await db.query('SELECT 1 FROM chat.file_blob_uploads WHERE staging_key=$1',[uploadKey])).rowCount).toBe(0)
+      // The resumed key's link to its declaration is what lets this replay answer; without it the replay is refused.
+      expect((await db.query('SELECT publication_key FROM chat.file_staging_publication_sources WHERE staging_key=$1',[uploadKey])).rows)
+        .toEqual([{publication_key:send.key}])
+      await db.query('SAVEPOINT unlinked')
+      await db.query('DELETE FROM chat.file_staging_publication_sources WHERE staging_key=$1',[uploadKey])
+      expect((await reject('SELECT chat.file_blob_settle($1,$2,$3,NULL,NULL,NULL)',[sender,send.key,uploadKey])).hint).toBe('file_transfer_conflict')
+      await db.query('ROLLBACK TO SAVEPOINT unlinked')
     }
     expect(await resolve(send.message)).toMatchObject({status:'ready',sha256:send.digest})
     await service()

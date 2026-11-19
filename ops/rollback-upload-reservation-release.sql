@@ -1,6 +1,9 @@
 -- Roll back 20261119160000: open upload holds count again until an explicit closure, and registration no longer settles.
 -- Kept: chat_private.file_upload_release_backup_20261119, and reservations already settled by a registration or a
 -- confirmed staging removal (their stored bytes are counted as storage, so the ledger stays correct).
+-- Not restored: the committed-staging cleanup worker the migration removed. It was disabled by default and is not
+-- needed to keep the ledger correct (it only ever released holds early); its queue and control rows are kept in
+-- chat_private.file_staging_cleanup_backup_20261119 and _control_backup_20261119, and 20261118130100 holds its code.
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SELECT pg_advisory_xact_lock(hashtextextended('gugu:file-transfer:quota',0));

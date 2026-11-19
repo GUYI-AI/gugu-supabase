@@ -125,8 +125,9 @@ describe('upload reservation release', () => {
     // The confirmed staging deletion keeps the registration as the evidence; the same id stays refused.
     await db.query("SELECT chat.file_managed_upload_closed($1,'staging-absent')", [key])
     expect(await ledger(key)).toEqual({ ...row, staging_deleted: true })
+    const id = (await db.query('SELECT reservation_id FROM chat.file_transfer_uploads WHERE staging_key=$1', [key])).rows[0].reservation_id
     await user(owner)
-    expect((await reject(ISSUE, [(await db.query('SELECT reservation_id FROM chat.file_transfer_uploads WHERE staging_key=$1', [key])).rows[0].reservation_id, group, owner, 60])).hint).toBe('file_transfer_expired')
+    expect((await reject(ISSUE, [id, group, owner, 60])).hint).toBe('file_transfer_expired')
     await service()
   })
 

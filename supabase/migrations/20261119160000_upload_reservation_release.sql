@@ -123,6 +123,39 @@ BEGIN
     UPDATE chat.file_transfer_uploads SET staging_deleted=true,close_evidence=COALESCE(close_evidence,p_evidence) WHERE staging_key=p_key;
 END $$;
 
+-- Registration settles the reservation and the attachments function deletes the staging copy at completion, so the
+-- committed-staging cleanup worker (20261118130100) has no candidate left: it existed only to release a registered
+-- upload's staging hold after operator evidence. Remove it. Physical leftovers are handled by exactly two mechanisms:
+-- attachment_expired_staging (community Storage) and the OSS lifecycle rule. file_staging_publication_sources stays:
+-- the declared finish and its replay read it. Order: unschedule, back up the queue and control, then drop.
+DO $unschedule$
+BEGIN
+    IF EXISTS(SELECT 1 FROM cron.job WHERE jobname='file-staging-cleanup-kick') THEN
+        PERFORM cron.unschedule('file-staging-cleanup-kick');
+    END IF;
+END $unschedule$;
+CREATE TABLE chat_private.file_staging_cleanup_backup_20261119 AS SELECT q.*,now() AS backed_up_at FROM chat.file_staging_cleanup q;
+CREATE TABLE chat_private.file_staging_cleanup_control_backup_20261119 AS SELECT c.*,now() AS backed_up_at FROM chat.file_staging_cleanup_control c;
+REVOKE ALL ON chat_private.file_staging_cleanup_backup_20261119,chat_private.file_staging_cleanup_control_backup_20261119
+    FROM PUBLIC,anon,authenticated,service_role,gugu_files;
+DO $backup$
+BEGIN
+    RAISE NOTICE 'staging cleanup backup: % queue rows (% pending or failed), % control rows',
+        (SELECT count(*) FROM chat_private.file_staging_cleanup_backup_20261119),
+        (SELECT count(*) FROM chat_private.file_staging_cleanup_backup_20261119 WHERE state IN ('pending','failed','running')),
+        (SELECT count(*) FROM chat_private.file_staging_cleanup_control_backup_20261119);
+END $backup$;
+DROP TRIGGER file_staging_cleanup_committed ON chat.file_blob_uploads;
+DROP TRIGGER file_staging_cleanup_registered ON chat.file_transfer_uploads;
+DROP FUNCTION chat.file_staging_cleanup_record_commit(),chat.file_staging_cleanup_record_registered(),
+    chat.file_staging_cleanup_record_publication(text),chat.file_staging_cleanup_status(),
+    chat.file_staging_cleanup_scope_status(text[]),chat.configure_file_staging_cleanup(boolean,boolean,text[]),
+    chat.file_staging_cleanup_evidence(text,uuid,uuid,timestamptz,timestamptz,text,text,timestamptz),
+    chat.file_staging_cleanup_run_begin(),chat.file_staging_cleanup_run_renew(uuid),chat.file_staging_cleanup_claim(uuid),
+    chat.file_staging_cleanup_finish(uuid,text,uuid),chat.file_staging_cleanup_fail(uuid,text,uuid,text),
+    chat.file_staging_cleanup_run_end(uuid),chat.file_staging_cleanup_kick();
+DROP TABLE chat.file_staging_cleanup,chat.file_staging_cleanup_control;
+
 -- Community Storage staging older than a day is collected, except a managed key whose hold still counts (a multipart
 -- permit can be extended up to a day after issue, and its release time follows). OSS uses its bucket lifecycle rule.
 CREATE OR REPLACE FUNCTION chat.attachment_expired_staging(p_bucket text)
