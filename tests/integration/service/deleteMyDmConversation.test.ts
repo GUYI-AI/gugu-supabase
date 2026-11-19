@@ -28,6 +28,8 @@ it('keeps the legacy receipt shape while future calls use reversible list mainte
   expect(receipt).toMatchObject({chat_id:dm,deleted_at:expect.any(String),hidden_at:expect.any(String),already:false})
   expect(receipt.deleted_at).toBe(receipt.hidden_at)
   expect((await db.query('SELECT conversation_deleted_at FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[dm,owner])).rows[0].conversation_deleted_at).toBeNull()
+  // A new peer message restores the reversible list hide only when sending is allowed.
+  await db.query("INSERT INTO identity.friendships(user_a_id,user_b_id) VALUES(LEAST($1::text,$2::text),GREATEST($1::text,$2::text))",[owner,peer])
   await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'returns')",[randomUUID(),dm,peer])
   expect((await db.query('SELECT state.conversation_hidden_at FROM chat.chat_members m LEFT JOIN chat.conversation_list_state state USING(chat_id,user_id) WHERE m.chat_id=$1 AND m.user_id=$2',[dm,owner])).rows[0].conversation_hidden_at).toBeNull()
 })
