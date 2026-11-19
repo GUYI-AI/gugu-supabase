@@ -3,7 +3,8 @@ import { sha256, type DeletionDependencies, type FlowReply } from './account-del
 export type OperationArgs = Record<string, string | number | null> & { p_action: string };
 
 export interface OperationReply extends FlowReply {
-  operation?: { operation_id: string; state: string; revision: number; challenge_generation: number; request_id: string | null; can_retry: boolean };
+  operation?: { operation_id: string; state: string; revision: number; challenge_generation: number; request_id: string | null; can_retry: boolean; can_release_preparation?: boolean;
+    confirmation?: { confirmation_id: string; state: string; challenge_generation: number; error_code?: string | null } | null };
   dispatch_required?: boolean;
   confirmation_state?: string;
   preparation?: Record<string, unknown>;
@@ -41,6 +42,23 @@ async function readBody(req: Request): Promise<Record<string, unknown>> {
 export function createAccountDeletionOperationHandler(deps: OperationDependencies) {
   return async (req: Request): Promise<Response> => {
     const route = new URL(req.url).pathname.replace(/\/+$/, '').split('/').at(-1);
+    if (route === 'status') {
+      if (req.method !== 'GET') return fail('method_not_allowed', 405);
+      try {
+        const token = req.headers.get('authorization')?.match(/^Bearer ([^\s]{1,8192})$/i)?.[1];
+        if (!token) return fail('unauthorized', 401);
+        const user = await deps.currentUser(token);
+        if (!user) return fail('unauthorized', 401);
+        const reply = await deps.flow({ p_action: 'status', p_operation_digest: null, p_receipt_digest: null,
+          p_user_id: user.id, p_session_id: user.sessionId, p_email_digest: await sha256(user.email.toLowerCase()) });
+        if (!reply.ok) return fail(reply.error ?? 'unavailable', reply.status ?? 503);
+        const p = reply.policy;
+        if (!p || p.protocol_version !== 2 || typeof p.available !== 'boolean' || p.deletion !== 'immediate'
+            || p.credit_treatment !== 'forfeit_remaining' || p.consent_version !== consent || p.device_preparation_required !== true) return fail('unavailable', 503);
+        return new Response(JSON.stringify({ policy: { protocol_version: 2, available: p.available, deletion: 'immediate',
+          credit_treatment: 'forfeit_remaining', consent_version: consent, device_preparation_required: true } }), { headers });
+      } catch { return fail('unavailable', 503); }
+    }
     if (!['register', 'challenge', 'confirm', 'result', 'prepare_device', 'read_preparation', 'cancel_preparation', 'cancel'].includes(route ?? '')) return fail('not_found', 404);
     if (req.method !== 'POST') return fail('method_not_allowed', 405);
     let body: Record<string, unknown>;
@@ -103,8 +121,12 @@ export function createAccountDeletionOperationHandler(deps: OperationDependencie
       let verified: { id: string; email: string } | null = null;
       try { verified = await deps.verifyCode(user.email, body.code); } catch { /* safe fixed result below */ }
       if (!verified || verified.id !== user.id || verified.email.toLowerCase() !== user.email.toLowerCase()) {
-        await call('verification_failed', { ...intent, p_lease_token: claimed.lease_token });
-        return fail('verification_failed', 422);
+        const rejected = await call('verification_failed', { ...intent, p_lease_token: claimed.lease_token });
+        const recorded = rejected.operation?.confirmation;
+        if (!rejected.ok || !claimed.operation?.operation_id || rejected.operation?.operation_id !== claimed.operation.operation_id
+            || rejected.operation.state !== 'open' || recorded?.state !== 'rejected'
+            || recorded.confirmation_id !== body.confirmation_id || recorded.challenge_generation !== generation) return fail('unavailable', 503);
+        return new Response(JSON.stringify({ error: 'verification_failed', operation: rejected.operation }), { status: 422, headers });
       }
       const ready = await call('verified', { ...intent, p_lease_token: claimed.lease_token });
       if (!ready.ok) return output(ready);
