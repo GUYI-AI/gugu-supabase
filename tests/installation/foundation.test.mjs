@@ -48,6 +48,23 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     assert.ok(deviceCheckRelease && validationRelease)
     let widgetUpgrade
     const releaseQuery = async (sql) => {
+      const questionCardRelease = releases.find(release => release.version.endsWith('_agent_question_card_settlement'))
+      if (questionCardRelease && sql.includes(questionCardRelease.sql)) {
+        const executionAcl = () => query(`SELECT array_agg(permission::text ORDER BY permission::text) AS acl
+          FROM pg_proc p CROSS JOIN LATERAL unnest(COALESCE(p.proacl,acldefault('f',p.proowner))) AS permissions(permission)
+          WHERE p.oid='chat.sync_since(bigint,integer)'::regprocedure`)
+        const before = await executionAcl()
+        const result = await query(sql)
+        await t.test('question settlement preserves the sync reader ACL and grants only its addressee API', async () => {
+          assert.deepEqual(await executionAcl(), before)
+          const [access] = await query(`SELECT
+            has_function_privilege('authenticated','chat.settle_agent_question_card(text,text,jsonb)','EXECUTE') AS owner,
+            has_function_privilege('anon','chat.settle_agent_question_card(text,text,jsonb)','EXECUTE') AS anonymous,
+            has_function_privilege('service_role','chat.settle_agent_question_card(text,text,jsonb)','EXECUTE') AS service`)
+          assert.deepEqual(access,{ owner:true,anonymous:false,service:false })
+        })
+        return result
+      }
       const humanDmRelease = releases.find(release => release.version === humanDmFriendshipVersion)
       if (humanDmRelease && sql.includes(humanDmRelease.sql)) {
         return installHumanDmFriendshipWithEvidence({ db, query, sql, url: url.href, test: (name, action) => t.test(name, action) })

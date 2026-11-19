@@ -102,9 +102,10 @@ GRANT EXECUTE ON FUNCTION chat.settle_agent_question_card(text,text,jsonb) TO au
 
 -- Carry the current message body in revision replay as well as live wakeups. All pre-existing event meanings stay intact.
 DO $refresh$
-DECLARE definition text;
+DECLARE definition text; acl aclitem[]; permission record;
 BEGIN
-  SELECT pg_get_functiondef('chat.sync_since(bigint,integer)'::regprocedure) INTO definition;
+  SELECT pg_get_functiondef(p.oid),COALESCE(p.proacl,acldefault('f',p.proowner)) INTO definition,acl
+    FROM pg_proc p WHERE p.oid='chat.sync_since(bigint,integer)'::regprocedure;
   IF strpos(definition, 'WHEN selected.event = ''message_created'' THEN COALESCE(') = 0
     OR strpos(definition, 'WHERE v.id::text = selected.resource_key ->> ''entity_id''') = 0 THEN
     RAISE EXCEPTION 'unexpected sync_since predecessor';
@@ -117,6 +118,13 @@ BEGIN
         AND v.deleted_at IS NULL AND v.retracted_at IS NULL AND NOT v.deleted_for_user_ids @> jsonb_build_array(current_user_id)
         AND chat.message_visible_at(chat.history_floor(v.chat_id,current_user_id),v.created_at,v.is_whisper,v.sender_user_id,v.to_user_ids,current_user_id)))');
   EXECUTE definition;
+  -- Replacement also invokes the installed API-close DDL guard. Restore exactly its predecessor ACL.
+  FOR permission IN SELECT grantee,bool_or(is_grantable) AS grantable
+    FROM aclexplode(acl) WHERE privilege_type='EXECUTE' GROUP BY grantee LOOP
+    EXECUTE format('GRANT EXECUTE ON FUNCTION chat.sync_since(bigint,integer) TO %s%s',
+      CASE WHEN permission.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(permission.grantee)) END,
+      CASE WHEN permission.grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+  END LOOP;
 END;
 $refresh$;
 NOTIFY pgrst, 'reload schema';
