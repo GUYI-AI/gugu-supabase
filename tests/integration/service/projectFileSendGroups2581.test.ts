@@ -61,7 +61,8 @@ describe('#2581 native project-file sends', () => {
     for (let index = 0; index < 4; index++) receipts.push((await publish({
       send_group_id: send, send_group_size: 4, to_user_ids: [agent], ...(index === 3 ? { caption: '你看看' } : {}),
     })).message)
-    expect(receipts.map(row => [row.send_group_id, row.send_group_size])).toEqual(Array(4).fill([send, 4]))
+    expect(receipts.map(row => [row.send_group_id, row.send_group_size]),
+      `ALBUM_GROUP_RECEIPTS:${JSON.stringify(receipts.map(row => [row.send_group_id, row.send_group_size]))}`).toEqual(Array(4).fill([send, 4]))
     await asUser(reader)
     const rows = (await db.query<Sent>('SELECT id,content,send_group_id,send_group_size FROM chat.messages_view WHERE chat_id=$1 ORDER BY seq', [group])).rows
     expect(rows.map(row => row.id)).toEqual(receipts.map(row => row.id))
