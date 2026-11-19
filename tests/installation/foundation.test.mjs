@@ -15,6 +15,7 @@ import { assertConnectionManagementGate } from './platform-connection-upgrade-fi
 import { installConnectionCutoverWithEvidence } from './platform-connection-cutover-fixture.mjs'
 import { installConnectionFollowupsWithEvidence } from './platform-connection-followups-fixture.mjs'
 import { installConnectionCatalogWithEvidence, releasedDirectoryRow } from './platform-connection-catalog-fixture.mjs'
+import { humanDmFriendshipVersion, installHumanDmFriendshipWithEvidence } from './human-dm-friendship-fixture.mjs'
 
 // Deliberately requires an empty, disposable Supabase PostgreSQL 17 instance.
 // Never resets schemas, migration history, or user data to make a test pass.
@@ -47,6 +48,10 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     assert.ok(deviceCheckRelease && validationRelease)
     let widgetUpgrade
     const releaseQuery = async (sql) => {
+      const humanDmRelease = releases.find(release => release.version === humanDmFriendshipVersion)
+      if (humanDmRelease && sql.includes(humanDmRelease.sql)) {
+        return installHumanDmFriendshipWithEvidence({ db, query, sql, url: url.href, test: (name, action) => t.test(name, action) })
+      }
       const catalogRelease = releases.find(release => release.version.endsWith('_integration_catalog_metadata'))
       if (catalogRelease && sql.includes(catalogRelease.sql)) {
         return installConnectionCatalogWithEvidence({ db, query, sql, url: url.href, test: (name, action) => t.test(name, action) })

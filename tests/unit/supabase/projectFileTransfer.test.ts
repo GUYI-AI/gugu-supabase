@@ -18,6 +18,16 @@ function fixture() {
   return {deps,objects,userRpc,serviceRpc}
 }
 describe('temporary file HTTP protocol',()=>{
+  it('lets the holder retire its own request with a reason, through the user RPC only',async()=>{
+    const f=fixture()
+    f.userRpc.mockResolvedValueOnce({data:null,error:null})
+    expect(await handleProjectFiles(f.deps,host,'file-decline',{transfer_id:transfer,reason:'Transfer revision changed'})).toEqual({transfer_id:transfer,status:'retired'})
+    expect(f.userRpc).toHaveBeenCalledWith('file_temporary_decline',{p_id:transfer,p_reason:'Transfer revision changed'})
+    await expect(handleProjectFiles(f.deps,host,'file-decline',{transfer_id:transfer})).rejects.toMatchObject({status:400})
+    f.userRpc.mockResolvedValueOnce({data:null,error:{message:'denied',hint:'file_transfer_denied'}})
+    await expect(handleProjectFiles(f.deps,host,'file-decline',{transfer_id:transfer,reason:'x'})).rejects.toMatchObject({status:403})
+    expect(f.serviceRpc).not.toHaveBeenCalled();expect(f.objects.upload).not.toHaveBeenCalled()
+  })
   it('rejects unauthorized acceptance before touching the provider and refuses mismatched provider bounds',async()=>{
     const f=fixture()
     f.userRpc.mockResolvedValueOnce({data:null,error:{message:'denied',hint:'file_transfer_denied'}})
