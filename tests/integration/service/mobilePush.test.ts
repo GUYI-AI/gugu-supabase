@@ -44,6 +44,8 @@ async function fixture(body: (f: Fixture) => Promise<void>, kind = 'dm') {
     await db.query("INSERT INTO identity.agent_runtime_states(agent_user_id,owner_user_id,agent_status,agent_status_detail,runtime_status,last_seen_at) VALUES($1,$2,'idle','plain','online',now())", [f.agent, f.owner])
     await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,$2,'Push fixture',$3)", [f.chat, kind, f.owner])
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [f.chat, f.owner, f.other])
+    // Positive DM notification cases send between current human friends.
+    if (kind === 'dm') await db.query("INSERT INTO identity.friendships(user_a_id,user_b_id) VALUES(LEAST($1::text,$2::text),GREATEST($1::text,$2::text))", [f.owner, f.other])
     await body(f)
   } finally {
     await db.query('ROLLBACK'); await db.query('RESET ROLE')

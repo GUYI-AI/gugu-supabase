@@ -367,6 +367,8 @@ describe('topic authority comes from the source, while settings belong to the pa
     await service()
   })
   it.each(['dm', 'ai'])('retains human creator management inside a %s source without a topic owner role', async (kind) => {
+    // Source-message creation is authorized independently of topic management.
+    if (kind === 'dm') await db.query("INSERT INTO identity.friendships(user_a_id,user_b_id) VALUES(LEAST($1::text,$2::text),GREATEST($1::text,$2::text))", [agentOwner, human])
     const source = randomUUID(), anchor = randomUUID()
     await db.query('INSERT INTO chat.chats(id,kind,creator_user_id) VALUES($1,$2,$3)', [source, kind, agentOwner])
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member'),($1,$3,'member')", [source, agentOwner, human])
