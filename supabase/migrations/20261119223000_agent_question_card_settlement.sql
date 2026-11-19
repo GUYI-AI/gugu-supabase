@@ -43,6 +43,7 @@ BEGIN
   PERFORM chat.lock_chat_revision_recipients(room_id);
   SELECT * INTO original FROM chat.messages m WHERE m.id = p_message_id FOR UPDATE;
   IF original.id IS NULL OR original.content_type <> 'card' OR original.deleted_at IS NOT NULL OR original.retracted_at IS NOT NULL
+    OR original.deleted_for_user_ids @> jsonb_build_array(owner_id)
     OR NOT EXISTS (SELECT 1 FROM identity.users a WHERE a.id = original.sender_user_id AND a.type = 'agent' AND a.owner_user_id = owner_id)
     OR NOT chat.message_visible_at(chat.history_floor(room_id,owner_id), original.created_at,original.is_whisper,original.sender_user_id,original.to_user_ids,owner_id) THEN
     RAISE EXCEPTION 'question card unavailable' USING ERRCODE = '42501';
@@ -87,6 +88,7 @@ BEGIN
     WHERE id = p_message_id;
   FOR recipient IN
     SELECT DISTINCT m.user_id FROM chat.active_members m WHERE m.chat_id = room_id
+      AND NOT original.deleted_for_user_ids @> jsonb_build_array(m.user_id)
       AND chat.message_visible_at(chat.history_floor(room_id,m.user_id),original.created_at,original.is_whisper,original.sender_user_id,original.to_user_ids,m.user_id)
     ORDER BY m.user_id
   LOOP
@@ -112,6 +114,7 @@ BEGIN
   definition := replace(definition, 'WHERE v.id::text = selected.resource_key ->> ''entity_id''',
     'WHERE v.id::text = CASE WHEN selected.event = ''chat_changed'' THEN selected.resource_key ->> ''message_id'' ELSE selected.resource_key ->> ''entity_id'' END
       AND (selected.event <> ''chat_changed'' OR (v.chat_id = selected.resource_key ->> ''chat_id''
+        AND v.deleted_at IS NULL AND v.retracted_at IS NULL AND NOT v.deleted_for_user_ids @> jsonb_build_array(current_user_id)
         AND chat.message_visible_at(chat.history_floor(v.chat_id,current_user_id),v.created_at,v.is_whisper,v.sender_user_id,v.to_user_ids,current_user_id)))');
   EXECUTE definition;
 END;

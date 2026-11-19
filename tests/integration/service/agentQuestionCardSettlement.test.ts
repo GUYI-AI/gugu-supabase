@@ -74,7 +74,7 @@ describe('owner settlement of an agent question card', () => {
     await actor(colleague)
     const page = (await query('SELECT chat.sync_since($1,500) AS page',[head]))[0].page
     expect(page.operations).toHaveLength(1)
-    expect(page.operations[0]).toMatchObject({ event:'chat_changed',payload:{ chat_id:room,message_id:message,message:{ id:message,seq:before.seq,content:after.content } } })
+    expect(page.operations[0]).toMatchObject({ event:'chat_changed',payload:{ chat_id:room,message_id:message,message:{ id:message,seq:Number(before.seq),content:after.content } } })
   })
 
   it.each(['withdrawn','discuss'])('settles %s without inventing answers', async state => {
@@ -129,6 +129,25 @@ describe('owner settlement of an agent question card', () => {
     await actor(owner); await query(sql,[message,'answered','[{"selected":["A"]}]'])
     const operations = await revisions(colleague)
     expect(operations.filter(row => row.payload.message_id===message)).toEqual([])
+  })
+
+  it('does not publish to a member who deleted the card, and cannot settle an owner-hidden card', async () => {
+    await actor(owner,'postgres')
+    await query('UPDATE chat.messages SET deleted_for_user_ids=$2::jsonb WHERE id=$1',[message,JSON.stringify([colleague])])
+    await actor(owner); await query(sql,[message,'answered','[{"selected":["A"]}]'])
+    expect((await revisions(colleague)).filter(row => row.payload.message_id===message)).toEqual([])
+    const hidden = await post()
+    await query('UPDATE chat.messages SET deleted_for_user_ids=$2::jsonb WHERE id=$1',[hidden,JSON.stringify([owner])])
+    await actor(owner); await refused(() => query(sql,[hidden,'withdrawn',null]))
+  })
+
+  it('replay does not disclose a settled body after the recipient loses history access', async () => {
+    await actor(owner); await query(sql,[message,'answered','[{"selected":["A"]}]'])
+    await actor(owner,'postgres')
+    await query("UPDATE chat.chat_members SET hide_history_before=clock_timestamp()+interval '1 second' WHERE chat_id=$1 AND user_id=$2",[room,colleague])
+    const event = (await revisions(colleague)).find(row => row.payload.message_id===message)
+    expect(event).toBeDefined()
+    expect(event!.payload.message).toBeUndefined()
   })
 
   it('supports a topic without creating a receipt or changing its message sequence', async () => {
