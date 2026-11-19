@@ -43,8 +43,25 @@ async function batch(id: string) {
   return (await row('SELECT identity.process_account_audit_redaction($1,1000) result', [id])).result
 }
 async function drain(id: string) {
+  let deferredWaitMs = 0
   for (let i = 0; i < 2000; i++) {
     const result = await batch(id)
+    // The worker also returns retry_wait for a pending job that is not due yet.
+    // Keep real retries/errors visible; only wait for an error-free pending job.
+    if (result.state === 'retry_wait' && !result.error_code && result.blocked !== true) {
+      const pending = await row(`SELECT state,last_error_code,
+        GREATEST(0,ceil(extract(epoch FROM (next_attempt_at-clock_timestamp()))*1000)) wait_ms
+        FROM identity.account_audit_redaction_jobs WHERE id=$1`, [id])
+      if (pending?.state === 'pending' && pending.last_error_code === null) {
+        const waitMs = Math.max(1, Number(pending.wait_ms))
+        if (!Number.isFinite(waitMs) || deferredWaitMs + waitMs > 2000) {
+          throw Error('Pending audit fixture exceeded its bounded deferral wait')
+        }
+        deferredWaitMs += waitMs
+        await new Promise(resolve => setTimeout(resolve, waitMs))
+        continue
+      }
+    }
     if (['waiting_rescan', 'closed', 'manual_review', 'retry_wait'].includes(result.state)) return result
   }
   throw Error('Bounded fixture did not drain')
@@ -153,6 +170,18 @@ it.each([218987, 466000])('deletes through real Auth with %i synthetic audit row
   expect(stored.actor_user_id).toMatch(/^erased:/); expect(stored.effective_actor_id).toBe(stored.actor_user_id)
   expect(stored.requested_message_ids).toEqual([])
 }, 90000)
+
+it('drains a pending job after its next execution time without treating the deferral as failure', async () => {
+  const owner = await create()
+  const removed = await auth('admin/users/' + owner.id, 'DELETE', { should_soft_delete: false })
+  expect(removed.status).toBe(200); await removed.body?.cancel()
+  const job = await jobFor(owner.id)
+  await db.query("UPDATE identity.account_audit_redaction_jobs SET next_attempt_at=clock_timestamp()+interval '500 milliseconds' WHERE id=$1", [job.id])
+  expect(await batch(job.id)).toEqual({ state: 'retry_wait' })
+  expect(await jobFor(owner.id)).toMatchObject({ state: 'pending', last_error_code: null })
+  expect((await drain(job.id)).state).toBe('waiting_rescan')
+  expect((await row('SELECT state FROM identity.account_audit_redaction_receipts WHERE operation_id=$1 AND scan_round=1', [job.id])).state).toBe('redacted')
+})
 
 it.each(['registration', 'core'])('rolls back real Auth and its registration on %s failure', async point => {
   const owner = await create(), peer = await create(), room = randomUUID(), message = randomUUID()
