@@ -86,7 +86,7 @@ $guard$||anchor);
   IF length(definition)-length(replace(definition,anchor,''))<>length(anchor) THEN
     RAISE EXCEPTION 'Unexpected V2 result recovery predecessor';
   END IF;
-  EXECUTE replace(definition,anchor,$result$    RETURN jsonb_build_object('ok',true,'operation',account_deletion_private.operation_view(o))
+  definition:=replace(definition,anchor,$result$    RETURN jsonb_build_object('ok',true,'operation',account_deletion_private.operation_view(o))
       ||COALESCE((SELECT jsonb_build_object('preparation',jsonb_build_object(
         'prepared',p.state='prepared','cancelled',p.state='released',
         'native_generation',p.native_generation,'server_generation',p.server_generation))
@@ -94,6 +94,24 @@ $guard$||anchor);
   END IF;
 
   IF p_action IN ('prepare_device','read_preparation','cancel_preparation') THEN$result$);
+
+  -- A rejected verification is not an unknown DELETE. The original state/
+  -- lease checks and legacy rejection run first. Clear the active-confirmation
+  -- fence only after all verification/execution work is authoritatively absent;
+  -- retain rejected intents so a late old lease cannot become verified.
+  anchor:=$rejected$    UPDATE account_deletion_private.operations SET state=CASE WHEN p_action='verified' THEN 'processing' ELSE 'open' END,
+      revision=revision+1,updated_at=now_at WHERE id=o.id RETURNING * INTO o;$rejected$;
+  IF length(definition)-length(replace(definition,anchor,''))<>length(anchor) THEN
+    RAISE EXCEPTION 'Unexpected V2 rejected-verification predecessor';
+  END IF;
+  EXECUTE replace(definition,anchor,$rejected$    UPDATE account_deletion_private.operations SET state=CASE WHEN p_action='verified' THEN 'processing' ELSE 'open' END,
+      confirm_started_at=CASE WHEN p_action='verification_failed'
+        AND NOT EXISTS(SELECT 1 FROM account_deletion_private.confirmation_intents c
+          WHERE c.operation_id=o.id AND c.state IN ('verifying','processing','deleted'))
+        AND NOT EXISTS(SELECT 1 FROM account_deletion_private.requests r
+          WHERE r.operation_id=o.id AND r.state IN ('verifying','processing','retry_wait'))
+        THEN NULL ELSE confirm_started_at END,
+      revision=revision+1,updated_at=now_at WHERE id=o.id RETURNING * INTO o;$rejected$);
 
   SELECT pg_get_functiondef('public.account_deletion_operation_flow(text,text,text,uuid,uuid,text,text,integer,uuid,uuid,text,text,uuid,uuid)'::regprocedure)
     INTO definition;

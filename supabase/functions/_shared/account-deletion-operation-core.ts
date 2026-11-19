@@ -3,7 +3,7 @@ import { sha256, type DeletionDependencies, type FlowReply } from './account-del
 export type OperationArgs = Record<string, string | number | null> & { p_action: string };
 
 export interface OperationReply extends FlowReply {
-  operation?: { operation_id: string; state: string; revision: number; challenge_generation: number; request_id: string | null; can_retry: boolean };
+  operation?: { operation_id: string; state: string; revision: number; challenge_generation: number; request_id: string | null; can_retry: boolean; can_release_preparation?: boolean };
   dispatch_required?: boolean;
   confirmation_state?: string;
   preparation?: Record<string, unknown>;

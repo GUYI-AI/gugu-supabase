@@ -52,6 +52,15 @@ describe('closed operation HTTP protocol', () => {
     expect((await f.call('cancel', { ...proof, native_generation: confirm.native_generation }, false)).status).toBe(401)
     expect(f.deps.flow).not.toHaveBeenCalled()
   })
+  it.each([null, confirm.server_generation])('preserves the authoritative cancellation ACK at its exact JSON levels (server=%s)', async server => {
+    const f = fixture(), acknowledgement = { operation: { ...operation('closed_before_confirm'), can_release_preparation: true },
+      preparation: { cancelled: true, native_generation: confirm.native_generation, server_generation: server } }
+    vi.mocked(f.deps.flow).mockResolvedValue({ ok: true, ...acknowledgement })
+    const response = await f.call('cancel', { ...proof, native_generation: confirm.native_generation, server_generation: server })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual(acknowledgement)
+    expect(f.deps.sendCode).not.toHaveBeenCalled(); expect(f.deps.verifyCode).not.toHaveBeenCalled(); expect(f.deps.hardDelete).not.toHaveBeenCalled()
+  })
   it('never sends another OTP for an idempotent challenge replay', async () => {
     const f = fixture(); vi.mocked(f.deps.flow).mockResolvedValue({ ok: true, operation: operation(), dispatch_required: false })
     expect((await f.call('challenge', proof)).status).toBe(200)

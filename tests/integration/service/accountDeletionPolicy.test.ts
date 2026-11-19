@@ -123,6 +123,31 @@ it('recovers a committed preparation generation with closed gates without replay
   expect((await flow('result', proof)).preparation).toEqual({ prepared: false, cancelled: true,
     native_generation: f.p_native_generation, server_generation: prepared.preparation.server_generation })
 })
+it('allows authoritative cancel after rejected verification but never releases on open or a late old lease', async () => {
+  const f = await fixture(), device = 'rejected-' + randomUUID()
+  expect((await flow('register', f)).ok).toBe(true)
+  await db.query(`INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform,auth_session_id,capabilities)
+    VALUES($1,$2,'Rejected fixture','Rejected fixture','android',$3,'{"host_kind":"phone"}')`, [device, f.p_user_id, f.p_session_id])
+  const prepared = await flow('prepare_device', { ...f, p_device_id: device })
+  const bound = { ...f, p_server_generation: prepared.preparation.server_generation }
+  const begun = await flow('begin', bound)
+  expect((await flow('sent', { ...bound, p_lease_token: begun.lease_token })).ok).toBe(true)
+  const claimed = await flow('claim_confirmation', bound)
+  expect(claimed.dispatch_required).toBe(true)
+  expect((await flow('cancel_operation', bound)).error).toBe('request_active')
+  const lease = { ...bound, p_lease_token: claimed.lease_token }
+  const rejected = await flow('verification_failed', lease)
+  expect(rejected.operation).toMatchObject({ state: 'open', can_release_preparation: false })
+  expect((await db.query('SELECT confirm_started_at FROM account_deletion_private.operations WHERE operation_digest=$1', [f.p_operation_digest])).rows[0].confirm_started_at).toBeNull()
+  expect((await flow('verified', lease)).error).toBe('state_conflict')
+  await db.query('UPDATE account_deletion_private.operation_access SET enabled=false')
+  await db.query('UPDATE account_deletion_private.device_preparation_access SET enabled=false')
+  const cancelled = await flow('cancel_operation', bound)
+  expect(cancelled.operation).toMatchObject({ state: 'closed_before_confirm', can_release_preparation: true })
+  expect(cancelled.preparation).toEqual({ cancelled: true, native_generation: f.p_native_generation, server_generation: bound.p_server_generation })
+  expect((await db.query('SELECT state FROM account_deletion_private.device_preparations WHERE operation_id=$1', [cancelled.operation.operation_id])).rows[0].state).toBe('released')
+  expect((await db.query('SELECT count(*)::int n FROM auth.users WHERE id=$1', [f.p_user_id])).rows[0].n).toBe(1)
+})
 
 async function committedFixture(run: (f: Args, a: pg.Client, b: pg.Client) => Promise<void>) {
   const a = new pg.Client({ connectionString: database }), b = new pg.Client({ connectionString: database })

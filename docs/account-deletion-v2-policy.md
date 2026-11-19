@@ -24,4 +24,13 @@ The existing V2 POST operations and field names are unchanged. Native custody at
 
 Operation responses remain `{"operation":{...},"preparation":{...}}` with optional preparation. Operation states are `open`, `confirming`, `processing`, `deleted`, `closed_before_confirm`; revision and challenge generation are monotonic. `can_retry` remains false. Processing/unknown is not success. A trusted native receiver validates operation, generation, owner and target before persisting the authoritative result and starting scoped local cleanup. A failed policy fetch or a newly closed gate hides new admission but does not discard an already captured operation or block receipt recovery and safe cancellation.
 
+Cancellation authority is exactly `operation.state === 'closed_before_confirm'` together with `operation.can_release_preparation === true` (inside `operation`, never at the response root). HTTP preserves this server value. A prepared cancellation must also contain `preparation.cancelled === true` and the exact original `preparation.native_generation` / `preparation.server_generation`. An unprepared cancellation instead carries the original native generation and an explicit null server generation. Representative ACKs (other operation fields omitted):
+
+```json
+{"operation":{"state":"closed_before_confirm","can_release_preparation":true},"preparation":{"cancelled":true,"native_generation":"<original UUID>","server_generation":"<original UUID>"}}
+{"operation":{"state":"closed_before_confirm","can_release_preparation":true},"preparation":{"cancelled":true,"native_generation":"<original UUID>","server_generation":null}}
+```
+
+A 422, `open`, `preparation.cancelled` alone or a missing field never releases native custody. After the server has rejected the matching verification, invalidated its old lease and proved there is no active verification/execution, it clears the active-confirmation fence so the original owner may explicitly cancel. Rejected intents and rate/attempt limits remain. An unknown or still-verifying/processing attempt retains the fence and must recover its original result; a delayed old lease cannot become verified after rejection or cancellation.
+
 Source of the existing wire contract: `supabase/functions/_shared/account-deletion-operation-core.ts`; its SQL state machine and cancellation wrapper are forward releases `20261116233000` / `20261116233100` / `20261118153500`. Policy/admission is introduced by `20261119132300`. Clients must not use legacy status, legacy confirm/retry, direct end-user RPC calls, or a renderer assertion as deletion authority.
