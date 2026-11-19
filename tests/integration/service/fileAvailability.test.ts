@@ -66,7 +66,7 @@ beforeEach(async () => {
   const baseline = Number(await value("SELECT chat.file_transfer_usage('upload','global','*') AS v"))
   await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=EXCLUDED.settings", [{
     inventory_ready: true, storage_global_bytes: baseline + 100000, storage_account_bytes: 100000, storage_group_bytes: 100000,
-    download_global_bytes: 100000, download_account_bytes: 100000, download_group_bytes: 100000, upload_permit_seconds: 120,
+    download_global_bytes: 100000, download_account_bytes: 100000, download_group_bytes: 100000, upload_permit_seconds: 120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600,
     sign_window_seconds: 60, sign_account_count: 1000, sign_group_count: 1000, file_max_bytes: 1000, temporary_group_bytes: 100000,
   }])
 })

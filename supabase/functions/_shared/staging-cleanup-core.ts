@@ -6,8 +6,8 @@ const staging = /^staging\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 export class StagingCleanupError extends Error {
   constructor(readonly code: string, readonly uncertain = false) { super(code) }
 }
-type Deps = { claim?: Record<string, unknown>; prepare?: AttachmentObjectStorage['prepareStaging']; serviceRpc: Rpc; objects: Pick<AttachmentObjectStorage, 'remove' | 'exists'>; log(stage: string, counts: Record<string, unknown>): void }
-type Job = { staging_key: string; claim_token: string; attempt_count: number; upload_id: string | null }
+type Deps = { serviceRpc: Rpc; objects: Pick<AttachmentObjectStorage, 'remove' | 'exists'>; log(stage: string, counts: Record<string, unknown>): void }
+type Job = { staging_key: string; claim_token: string; attempt_count: number }
 async function call(rpc: Rpc, fn: string, args: Record<string, unknown> = {}, deadline = Infinity) {
   const remaining = Math.min(5000, deadline - Date.now())
   if (remaining <= 0) throw new StagingCleanupError('run_deadline', true)
@@ -49,11 +49,8 @@ export async function handleStagingCleanup(deps: Deps) {
       throw new StagingCleanupError('run_expired', true)
   }
   try {
-    const data = deps.claim
-      ? await invoke('file_managed_staging_claim', { ...deps.claim, p_run: run })
-      : await invoke('file_staging_cleanup_claim', { p_run: run })
+    const data = await invoke('file_staging_cleanup_claim', { p_run: run })
     if (!Array.isArray(data) || data.length > 5 || data.some((job: Job) => !job || !staging.test(job.staging_key)
-        || (deps.claim && job.upload_id !== null && typeof job.upload_id !== 'string')
         || !uuid.test(job.claim_token) || !Number.isSafeInteger(job.attempt_count) || job.attempt_count < 1)
         || new Set(data.map((job: Job) => job.staging_key)).size !== data.length)
       throw new StagingCleanupError('invalid_claim_receipt', true)
@@ -62,10 +59,6 @@ export async function handleStagingCleanup(deps: Deps) {
     for (const job of jobs) {
       try {
         await renew()
-        if (deps.prepare) {
-          await provider(signal => deps.prepare!(job.staging_key, job.upload_id, signal), deadline)
-          await renew()
-        }
         try { await provider(signal => deps.objects.remove(job.staging_key, signal), deadline) }
         catch (error) { if (!(error instanceof ObjectStorageError && error.status === 404)) throw error }
         await renew()

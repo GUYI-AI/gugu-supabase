@@ -12,7 +12,7 @@ const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
 const settings = {
   inventory_ready:true, storage_global_bytes:100000, storage_account_bytes:100000, storage_group_bytes:100000,
   download_global_bytes:100000, download_account_bytes:100000, download_group_bytes:100000,
-  upload_permit_seconds:120, sign_window_seconds:60, sign_account_count:100, sign_group_count:100, file_max_bytes:10000,
+  upload_permit_seconds:120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600, sign_window_seconds:60, sign_account_count:100, sign_group_count:100, file_max_bytes:10000,
 }
 let db:pg.Client, sender:string, receiver:string, outsider:string, group:string
 async function user(id=sender) {

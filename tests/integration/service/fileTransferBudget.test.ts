@@ -6,7 +6,7 @@ const settings = {
   inventory_ready:true,
   storage_global_bytes: 1000, storage_account_bytes: 800, storage_group_bytes: 700,
   download_global_bytes: 1000, download_account_bytes: 800, download_group_bytes: 700,
-  upload_permit_seconds: 120,
+  upload_permit_seconds: 120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600,
   sign_window_seconds: 60, sign_account_count: 100, sign_group_count: 100,
   file_max_bytes: 600,
 }
@@ -63,32 +63,6 @@ beforeEach(async () => {
 })
 afterEach(async () => { await db.query('ROLLBACK') })
 describe('atomic transfer budgets', () => {
-  it('limits closure to verified physical windows, keeps reports read-only and preserves the first receipt',async()=>{
-    const namespace={provider:'oss',region:'example',bucket:'test',prefix:'one'}
-    const proof={namespace,issued_from:'2000-01-01T00:00:00Z',issued_before:'infinity',upload_inflight_seconds:7200,evidence:'test-provider-bound',terminal_sha256:'a'.repeat(64),periodic:true}
-    const select=async(report:boolean,limit=500)=>(await db.query('SELECT * FROM chat.file_managed_upload_closable($1,$2,$3)',[namespace,limit,report])).rows
-    await db.query(`WITH ids AS (SELECT gen_random_uuid() AS id FROM generate_series(1,501)),
-      reservations AS (INSERT INTO chat.file_transfer_reservations(id,kind,account_id,subject,bytes,state,created_at,expires_at)
-        SELECT id,'upload',$1,'staging/'||$1||'/'||id,2,'issued',now()-interval '4 hours',now()-interval '3 hours' FROM ids
-        RETURNING id,subject)
-      INSERT INTO chat.file_transfer_uploads(staging_key,reservation_id,account_id,actor_id,max_bytes)
-        SELECT subject,id,$1,$1,1 FROM reservations`,[owner])
-    expect(await select(true)).toHaveLength(0)
-    await db.query("UPDATE chat.file_transfer_limits SET settings=settings||$1 WHERE scope='global'",[{upload_closure:proof}])
-    const batch=await select(true)
-    expect(batch).toHaveLength(500)
-    expect((await reject('SELECT * FROM chat.file_managed_upload_closable($1,501)',[namespace])).message).toContain('1 to 500')
-    expect((await db.query('SELECT * FROM chat.file_managed_upload_closable($1,500)',[{...namespace,prefix:'two'}])).rows).toHaveLength(0)
-    expect(await select(false)).toEqual(batch)
-    const next=await select(false,1)
-    expect(next).toEqual(batch.slice(0,1))
-    const key=next[0].staging_key
-    await db.query("SELECT chat.file_managed_upload_closed($1,'first')",[key])
-    await db.query("SELECT chat.file_managed_upload_closed($1,'retry')",[key])
-    expect((await db.query('SELECT close_evidence FROM chat.file_transfer_uploads WHERE staging_key=$1',[key])).rows[0].close_evidence).toBe('first')
-    await db.query("UPDATE chat.file_transfer_reservations SET expires_at=now()-interval '30 minutes' WHERE account_id=$1",[owner])
-    expect(await select(true)).toHaveLength(0)
-  })
   it('keeps ledger usage equal to holds and UTC-month observations through reconciliation and deletion',async()=>{
     const id=randomUUID()
     await reserve(100,'download',owner,group,id,'ledger lifecycle')

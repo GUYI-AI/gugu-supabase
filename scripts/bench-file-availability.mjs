@@ -33,7 +33,7 @@ try {
   await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=EXCLUDED.settings", [{
     inventory_ready: true, storage_global_bytes: 1000000000, storage_account_bytes: 1000000000, storage_group_bytes: 1000000000,
     download_global_bytes: 1000000000, download_account_bytes: 1000000000, download_group_bytes: 1000000000,
-    upload_permit_seconds: 120, sign_window_seconds: 60, sign_account_count: 1000, sign_group_count: 1000,
+    upload_permit_seconds: 120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600, sign_window_seconds: 60, sign_account_count: 1000, sign_group_count: 1000,
     file_max_bytes: 10000, temporary_group_bytes: 1000000,
   }])
   await db.query("INSERT INTO chat.workspace_items(id,chat_id,kind,filename,created_by) VALUES($1,$2,'folder','Availability load',$3)", [folder, group, account])

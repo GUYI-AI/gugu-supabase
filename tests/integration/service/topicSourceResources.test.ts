@@ -284,7 +284,7 @@ describe('topics use one source resource container', () => {
     await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1)", [{
       inventory_ready:true,storage_global_bytes:occupied+1000,storage_account_bytes:1000,storage_group_bytes:1000,
       download_global_bytes:1000,download_account_bytes:1000,download_group_bytes:1000,
-      file_max_bytes:100,upload_permit_seconds:120,read_lease_seconds:120,
+      file_max_bytes:100,upload_permit_seconds:120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600,read_lease_seconds:120,
       sign_window_seconds:60,sign_account_count:100,sign_group_count:100,
     }])
     const download=randomUUID()

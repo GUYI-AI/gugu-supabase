@@ -39,6 +39,7 @@ Downloads do not acquire the installation-wide storage/inventory/GC advisory loc
 | `download_global_bytes`, `download_account_bytes`, `download_group_bytes` | Monthly egress reservations/observations, in bytes |
 | `file_max_bytes` | Public upload permit ceiling |
 | `upload_permit_seconds` | Must equal the selected provider's enforceable policy lifetime |
+| `upload_edge_seconds`, `upload_sign_seconds`, `upload_inflight_seconds` | The three bounds that end an upload hold; see [release time](#upload-release-time). Required before issuing and before migration `20261119160000` |
 | `download_link_bits_per_second` (optional) | Omit for no declared request-rate limit. If present, use 819200–838860800 bit/s; direct OSS signatures bind it. CDN/Storage edge throttles are independently provisioned and are not installed or proved by this value. |
 | `sign_window_seconds`, `sign_account_count`, `sign_group_count` | New download-signature rate window and count limits |
 | `inventory_ready` | Initially absent/false; enable only after a complete trusted physical inventory and scope audit |
@@ -95,39 +96,25 @@ Uploads reserve twice the enforceable maximum while immutable staging and the fi
 
 The existing blob GC remains the single final-object deletion path. It confirms physical deletion before releasing inventory capacity. The idle-expiry extension records that change atomically inside `file_blob_gc_finish`. Do not release an in-progress deletion's capacity.
 
-The service-only `attachments/gc` route reconciles staging through `file_managed_upload_closed`. Its selector matches reservation ID, uploader, subject and staging key. Both registered uploads and abandoned uploads can qualify. Registration receipts, message references, final objects and their actual-byte charges remain available.
+An upload hold ends at its **release time**, without any job or operator proof. An expired permit can never be registered: `file_managed_upload_for` refuses it. After the release time no signed write can land either, so `file_transfer_usage('upload')` stops counting the open reservation. Its state stays `issued`; the ledger keeps every row.
+
+### Upload release time
+
+At issue, every managed upload reservation (`staging/…` subject) gets `release_at = expires_at + upload_edge_seconds + upload_sign_seconds + upload_inflight_seconds`. A multipart part report that extends the permit moves `release_at` forward with it; it never moves back. Issuing refuses with `file_transfer_not_configured` when any of the three is missing. Set each to the largest value across the deployment's actual write paths:
+
+| Key | Bound | Source |
+| --- | --- | --- |
+| `upload_edge_seconds` | Longest Edge invocation that passed the permit check just before expiry and can still re-sign or write (multipart Complete, document snapshot put) | Hosted: "Maximum wall clock duration … Free plan: 150s, Paid plans: 400s" ([Edge Function limits](https://supabase.com/docs/guides/functions/limits)). Self-hosted: `workerTimeoutMs = 400_000` in the edge runtime's `main/index.ts` |
+| `upload_sign_seconds` | How long a signature issued at the last moment before expiry still admits a write | OSS: 900, the 15-minute `x-oss-date` skew ([OSS Signature V4](https://www.alibabacloud.com/help/en/oss/developer-reference/signature-version-4-recommend)); the form policy itself ends at the permit expiry. Community Storage: the deployed signed upload lifetime, 7200 when hosted ([createSignedUploadUrl](https://supabase.com/docs/reference/javascript/storage-from-createsigneduploadurl)); self-hosted reads `UPLOAD_SIGNED_URL_EXPIRATION_TIME` |
+| `upload_inflight_seconds` | How long an accepted provider request may still take to land | **Chosen by the deployment (for example 3600), not provider-enforced.** Neither OSS nor Supabase Storage documents a maximum duration for an accepted request |
+
+The terms are in series (a re-sign can happen at the end of an admitted invocation, and the signature lives from then on), so they add. The one residual comes from the chosen in-flight bound: a request still running after the release time can only write **staging** bytes, at most the permit's `max_bytes`. Those bytes are never registrable and are not counted; the staging lifecycle removes them within a day.
+
+Physical staging bytes are not part of the ledger. Community Storage staging older than a day is collected by `attachments/gc` (`attachment_expired_staging`) unless its managed reservation still counts. OSS staging relies on the bucket lifecycle rule for the staging prefix; verify it once per environment.
+
+Migration `20261119160000` refuses to run on a configured deployment until the three keys are set. Deploy order: set the three keys in the global `file_transfer_limits` settings, then apply the migration. It first copies every open managed upload reservation into `chat_private.file_upload_release_backup_20261119`, prints the row count, held bytes and accounts, then backfills `release_at` from `expires_at` and prints how much stops counting at once. To roll back the accounting, restore the previous `file_transfer_usage` definition; `release_at` is an added column and the backfill changed nothing else.
 
 After cleanup, a repeated finish can answer an existing ready declaration while its original seven-day receipt is valid. It checks the declared key and uploader, the requested upload key and reservation identity, and the registered final blob. A successor must be the recorded source of that exact declaration in `file_staging_publication_sources`. The durable upload ledger survives expiry of a successor's one-hour receipt. Separate sends of identical bytes can share a final blob. Reading the existing result preserves each message, its charges and its retention. Once the original receipt expires or is swept, these keys can no longer confirm the declaration.
-
-### Establishing the closure boundary
-
-By default both physical providers retain the reservation. To enable cleanup, a storage operator records one verified issuance window under `upload_closure` in the global transfer settings. Store the supporting evidence in a protected operations record. The settings contain its short nonsecret reference. Historical deployments sharing logical keys require an independently established mapping to the same origin, bucket and prefix for the entire issuance window, including retries. Keep each window on its verified namespace throughout execution.
-
-| Field | Meaning |
-| --- | --- |
-| `namespace` | OSS uses an object with `provider` = `oss`, `region`, `bucket`, and physical `prefix` (empty string at bucket root). Community Storage uses `provider` = `supabase`, `project` equal to the active public Supabase URL (internal URL when no public URL is configured), and `bucket`. |
-| `issued_from`, `issued_before` | UTC timestamps. The original reservation must start at or after the first timestamp, and its **extended** expiry must precede the second. Extend a window only with evidence of continuous physical ownership. |
-| `evidence` | An immutable operations reference of 1–80 letters, digits, underscores, periods, colons or hyphens. Its record identifies the namespace, coverage, writer inventory and completion guarantee. |
-| `terminal_sha256` | SHA-256 of the independently verified terminal evidence document for this exact namespace and window. Retain it with the report. |
-| `drained_through` | A provider-confirmed cutoff covering **every** write and replay derived from permits expiring before that instant, including writers that signed again or arrived later. This can also be demonstrated by excluding new writers and draining admitted operations on a dedicated origin. |
-| `upload_inflight_seconds` | Alternative to a drain cutoff. Use the sum of three independently sourced upper bounds **from database permit expiry**: the latest Edge dispatch or re-signing, the actual signature admission lifetime from that signing, and accepted upload completion including transit, body transfer and provider-side commit. Record the source for each duration and its coverage of single uploads, parts, Complete and document snapshot writes. Leave any range missing a bound in the report. |
-| `periodic` | Set to JSON `true` only after periodic collection is approved for the window. A report and an explicit batch can operate with this setting absent. |
-
-The OSS form deadline governs admission. A signed UploadPart uses a dated V4 authorization header. The policy deadline, request clock tolerance and socket idle timeout do not establish when an accepted operation finishes. An abort can leave a concurrently uploading part. The collector therefore requires terminal evidence before acting, then checks the exact key and checks for remaining multipart sessions by prefix. Bucket versioning must remain disabled throughout cleanup. [OSS form policy](https://help.aliyun.com/zh/oss/user-guide/0006-00000213), [OSS abort semantics](https://www.alibabacloud.com/help/en/oss/developer-reference/abort-multipart-upload), [OSS multipart listing](https://www.alibabacloud.com/help/en/oss/developer-reference/listmultipartuploads)
-
-Supabase Storage can issue a new signed upload on a retry. Its token lifetime runs from signing. Storage can also return HTTP 400 with an object-specific 404 error, so confirmation uses origin HEAD and typed object metadata. A missing bucket, denied request, generic 404 or unavailable origin leaves the hold intact. Neither adapter ships with a documented universal in-flight upper bound. [Supabase signed upload lifetime](https://supabase.com/docs/reference/javascript/storage-from-createsigneduploadurl), [Storage error codes](https://supabase.com/docs/guides/storage/debugging/error-codes)
-
-### Operating a bounded batch
-
-The staging worker shares one lease and one queue between published uploads and expired uploads without a registration. Each run claims at most five keys in total. Published uploads require their existing publication marker. Operations may import independently verified per-key evidence using the [committed staging controls](committed-staging-cleanup.md). Final-object GC has its own queue and control.
-
-1. Run `ops/report-managed-upload-closure.sql` with psql variables `account` and `namespace`. The repeatable-read report covers all periods. It groups held bytes by proof, publication and recorded multipart ID.
-2. Read the service-only `POST /functions/v1/attachments/staging-cleanup` with `{"mode":"report","ids":[...],"limit":500}`. The response contains exact candidate identities, held bytes and the evidence reference. Keep IDs and credentials in the protected operations record. Retain all uncovered holds.
-3. Choose up to five candidates. Pass their IDs, account, namespace, a new run UUID and evidence reference to `ops/backup-managed-upload-closure.sql`. The backup captures the matching ledger and staging queue state and checks every submitted ID. Keep periodic window cleanup disabled. Read `staging-cleanup-status` and coordinate an exclusive window with other operators. Arm `staging-cleanup-configure` with `enabled:true`, `single_batch:true` and these exact staging keys. Use the same run UUID and evidence reference in `{"mode":"apply","ids":[...],"run":"...","evidence":"..."}` at the report endpoint. A paused or busy worker returns HTTP 409. Verify claimed, deleted, failed and unconfirmed counts against the backed-up IDs and stored receipts. A retry after a lost response first reconciles those same IDs before rearming the worker.
-4. Repeat with another backed-up batch. Compare the decrease in held bytes with the unique reservations settled in the same snapshot. Verify existing actual-byte charges and open the final file as its recipient.
-5. Before enabling periodic operation, verify the deployed `file-staging-cleanup-kick` cron, Vault dispatch and staging control. The kick can dispatch a covered window when `periodic:true`, including when no prior staging job was queued. Enable continuous mode only after reviewing the physical coverage and removing the explicit one-batch restriction. Check staging status and retained amounts after the first dispatch.
-
-To restore, disable the staging control and window proof, wait for any admitted worker to finish, then run `ops/restore-managed-upload-closure.sql` with the backup run UUID. It restores matching ledger flags and queue state, including pre-existing publication evidence. Physical staging deletion is irreversible. Reconcile usage and open the registered final file as its recipient before further cleanup.
 
 ## Operational rollout and validation
 

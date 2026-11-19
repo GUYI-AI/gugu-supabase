@@ -33,7 +33,7 @@ export interface MultipartStorage {
    */
   complete(key: string, uploadId: string): Promise<number | null>
   /** Abandons an unfinished upload and frees its parts. An upload that no longer exists counts as abandoned. */
-  abandon(key: string, uploadId: string, signal?: AbortSignal): Promise<void>
+  abandon(key: string, uploadId: string): Promise<void>
 }
 
 /** Primary blob storage. Database bucket tag "oss" is retained for existing records. */
@@ -45,8 +45,6 @@ export interface AttachmentObjectStorage {
   promote(source: string, destination: string, revision: string, headers: Record<string, string>): Promise<void>
   put(key: string, bytes: Uint8Array): Promise<void>
   exists(key: string, signal?: AbortSignal): Promise<boolean>
-  prepareStaging?(key: string, uploadId: string | null, signal?: AbortSignal): Promise<void>
-  stagingExists?(key: string, signal?: AbortSignal): Promise<boolean>
   remove(key: string, signal?: AbortSignal): Promise<void>
   sign(key: string, image: boolean, now: Date, permit?: DownloadPermit): Promise<{ url: string; thumbUrl: string | null; expiresAt: string; originAvailable?: boolean }>
   invalidate(key: string, image: boolean): Promise<void>

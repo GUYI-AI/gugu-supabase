@@ -3,7 +3,7 @@
 Immutable upload staging and final blob collection have different lifetimes.
 Registering a blob is not publication: a subsequent message/file commit may fail.
 An expired signed upload permit and an absent HEAD response also do not prove that
-an upload accepted earlier cannot complete late. Published uploads require both a committed
+an upload accepted earlier cannot complete late. Cleanup requires both a committed
 publication for that exact staging key and trusted terminal provider evidence.
 
 The publication transaction now records a durable private cleanup marker. Sweeping
@@ -17,8 +17,6 @@ record the marker in either order. A resumed upload is bound to its original
 publication by the verified settle transaction; equal content alone never creates
 that relationship. Existing resumed uploads without this retained relationship
 remain subject to the independent historical evidence requirements below.
-
-The same staging worker also accepts verified physical issuance windows for expired managed uploads. Publication markers, lease, five-key limit, retries and settlement are shared. See [managed upload closure](file-transfer-budgets.md#establishing-the-closure-boundary) for scoped reports, backup and restore.
 
 ## Controls and retries
 

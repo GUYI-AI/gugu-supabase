@@ -30,8 +30,6 @@ import { fileServiceInspector } from '../_shared/file-inspection.ts'
 import { handleDocumentImport, WORKSPACE_TEXT_MAX_BYTES, workspaceUploadKind } from '../_shared/document-import-core.ts'
 import { handleStagingCleanup, handleStagingCleanupControl, StagingCleanupError } from '../_shared/staging-cleanup-core.ts'
 
-import { managedStagingRequest, reportManagedStaging } from '../_shared/upload-closure.ts'
-
 const env = (key: string): string => Deno.env.get(key)?.trim() ?? ''
 
 const CORS = {
@@ -178,13 +176,8 @@ Deno.serve(async (request) => {
       if (!body || typeof body !== 'object' || Array.isArray(body)) return json({ error: 'invalid_evidence' }, 400)
       try {
         if (route === 'staging-cleanup') {
-          const claim = managedStagingRequest(storage, env('GUGU_PUBLIC_SUPABASE_URL') || env('SUPABASE_URL'), body)
-          if (body.mode === 'report') return json(await reportManagedStaging(deps.serviceRpc, claim))
-          const store = deps.objects!
-          if (!store.prepareStaging || !store.stagingExists) throw new StagingCleanupError('storage_unavailable')
-          const result = await handleStagingCleanup({ serviceRpc: deps.serviceRpc, claim, prepare: store.prepareStaging,
-            objects: { remove: store.remove, exists: store.stagingExists }, log })
-          return json(result, body.mode === 'apply' && !result.admitted ? 409 : 200)
+          if (Object.keys(body).length) return json({ error: 'invalid_controls' }, 400)
+          return json(await handleStagingCleanup({ serviceRpc: deps.serviceRpc, objects: deps.objects!, log }))
         }
         return json({ cleanup: await handleStagingCleanupControl(deps.serviceRpc, route, body) })
       } catch (error) {
