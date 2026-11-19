@@ -18,6 +18,39 @@ function fixture() {
   return {deps,objects,userRpc,serviceRpc}
 }
 describe('temporary file HTTP protocol',()=>{
+  it('records a terminal host refusal on the transfer and rethrows it unchanged; transient and denied refusals record nothing',async()=>{
+    const f=fixture(),failed=()=>f.serviceRpc.mock.calls.filter(([fn])=>fn==='file_temporary_refuse').map(([,args])=>args)
+    for(const code of ['account_storage_full','group_storage_full','too_large']) {
+      f.userRpc.mockResolvedValueOnce({data:null,error:{message:code,hint:'file_transfer_'+code}})
+      await expect(handleProjectFiles(f.deps,host,'file-accept',{transfer_id:transfer,ciphertext_bytes:128})).rejects.toMatchObject({code})
+    }
+    expect(failed()).toEqual(['account_storage_full','group_storage_full','too_large'].map(code=>({p_id:transfer,p_host:host,p_code:code})))
+    for(const hint of ['file_transfer_denied','file_transfer_rate_limited','file_transfer_unavailable','file_transfer_conflict']) {
+      f.userRpc.mockResolvedValueOnce({data:null,error:{message:hint,hint}})
+      await expect(handleProjectFiles(f.deps,host,'file-accept',{transfer_id:transfer,ciphertext_bytes:128})).rejects.toMatchObject({code:hint.slice(14)})
+    }
+    // upload_changed is terminal only at commit; at accept it is not raised and would not be recorded.
+    f.objects.inspect.mockResolvedValueOnce({bytes:new Uint8Array(128),sizeBytes:128,sha256:'cd'.repeat(32),revision:'immutable'})
+    await expect(handleProjectFiles(f.deps,host,'file-commit',{transfer_id:transfer,ciphertext_bytes:128,ciphertext_sha256:sha,key})).rejects.toMatchObject({status:409,code:'upload_changed'})
+    expect(failed()).toHaveLength(4)
+    expect(failed()[3]).toEqual({p_id:transfer,p_host:host,p_code:'upload_changed'})
+    expect(f.serviceRpc).not.toHaveBeenCalledWith('file_temporary_commit',expect.anything())
+  })
+  it('still gives the host its own refusal when recording it fails, and logs the unrecorded refusal',async()=>{
+    const f=fixture()
+    f.userRpc.mockResolvedValueOnce({data:null,error:{message:'account_storage_full',hint:'file_transfer_account_storage_full'}})
+    const service=f.serviceRpc.getMockImplementation()!
+    f.serviceRpc.mockImplementation(async(fn,args)=>fn==='file_temporary_refuse'?{data:null,error:{message:'connection reset'}}:service(fn,args))
+    await expect(handleProjectFiles(f.deps,host,'file-accept',{transfer_id:transfer,ciphertext_bytes:128})).rejects.toMatchObject({status:429,code:'account_storage_full'})
+    expect(f.serviceRpc).toHaveBeenCalledWith('file_temporary_refuse',{p_id:transfer,p_host:host,p_code:'account_storage_full'})
+    expect(f.deps.log).toHaveBeenCalledWith('temporary_refusal_unrecorded',expect.objectContaining({transfer_id:transfer,code:'account_storage_full'}))
+  })
+  it('passes the reader the refusal it was retired with, from file-request, with or without a download id',async()=>{
+    const f=fixture(),failed={status:'ready',transfer_id:transfer,transfer_status:'retired',transfer_declined:'account_storage_full'}
+    f.userRpc.mockResolvedValue({data:failed,error:null})
+    expect(await handleProjectFiles(f.deps,host,'file-request',{ref:{item_id:transfer},request_id:transfer})).toEqual(failed)
+    expect(await handleProjectFiles(f.deps,host,'file-request',{ref:{item_id:transfer},request_id:transfer,download_request_id:download})).toEqual({...failed,download:null})
+  })
   it('lets the holder retire its own request with a reason, through the user RPC only',async()=>{
     const f=fixture()
     f.userRpc.mockResolvedValueOnce({data:null,error:null})
