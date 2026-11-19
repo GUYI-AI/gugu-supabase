@@ -74,6 +74,21 @@ CREATE TRIGGER users_01_closed_direct_seats AFTER UPDATE OF session_archived_at,
     OR ((OLD.removed_at IS NULL) IS DISTINCT FROM (NEW.removed_at IS NULL))))
   EXECUTE FUNCTION chat_private.sync_closed_direct_seats();
 
+-- A direct or AI chat that gains a seat while one of its agents is archived (a DM opened with an
+-- archived agent, or any direct seat insert) is closed by the same recompute, never by a second rule.
+CREATE FUNCTION chat_private.close_joined_direct_seat() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+BEGIN
+  IF chat_private.is_direct_chat(NEW.chat_id) THEN
+    PERFORM chat_private.recompute_closed_direct_seats(ARRAY[NEW.chat_id]);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION chat_private.close_joined_direct_seat() FROM PUBLIC, anon, authenticated, service_role, gugu_files;
+CREATE TRIGGER chat_members_closed_direct_seats AFTER INSERT ON chat.chat_members
+  FOR EACH ROW EXECUTE FUNCTION chat_private.close_joined_direct_seat();
+
 -- Agents already archived when this is installed.
 SELECT chat_private.recompute_closed_direct_seats(ARRAY(
   SELECT DISTINCT m.chat_id FROM chat.chat_members m JOIN chat.chats c ON c.id = m.chat_id
@@ -192,7 +207,9 @@ BEGIN
       ('identity.erase_human_account(text,text)'::regprocedure,
        'INTO locked_chat_ids FROM chat.active_members cm', 'INTO locked_chat_ids FROM chat.live_identity_members cm', 1),
       ('identity.erase_human_account(text,text)'::regprocedure,
-       'SELECT 1 FROM chat.active_members live_peer', 'SELECT 1 FROM chat.live_identity_members live_peer', 1)
+       'SELECT 1 FROM chat.active_members live_peer', 'SELECT 1 FROM chat.live_identity_members live_peer', 1),
+      -- Opening a DM finds the one that exists, closed or not, instead of creating a second one.
+      ('chat.get_or_create_dm(text)'::regprocedure, 'FROM chat.active_members cm', 'FROM chat.live_identity_members cm', 3)
     ) AS definitions(signature, prior_sql, replacement_sql, occurrences)
     LOOP
         SELECT pg_get_functiondef(p.oid), COALESCE(p.proacl, acldefault('f', p.proowner))

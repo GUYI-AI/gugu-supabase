@@ -82,7 +82,8 @@ BEGIN
       ('identity.erase_human_account(text,text)'::regprocedure,
        'INTO locked_chat_ids FROM chat.live_identity_members cm', 'INTO locked_chat_ids FROM chat.active_members cm', 1),
       ('identity.erase_human_account(text,text)'::regprocedure,
-       'SELECT 1 FROM chat.live_identity_members live_peer', 'SELECT 1 FROM chat.active_members live_peer', 1)
+       'SELECT 1 FROM chat.live_identity_members live_peer', 'SELECT 1 FROM chat.active_members live_peer', 1),
+      ('chat.get_or_create_dm(text)'::regprocedure, 'FROM chat.live_identity_members cm', 'FROM chat.active_members cm', 3)
     ) AS definitions(signature, prior_sql, replacement_sql, occurrences)
     LOOP
         SELECT pg_get_functiondef(p.oid), COALESCE(p.proacl, acldefault('f', p.proowner))
@@ -100,6 +101,8 @@ BEGIN
     END LOOP;
 END $retained$;
 
+DROP TRIGGER chat_members_closed_direct_seats ON chat.chat_members;
+DROP FUNCTION chat_private.close_joined_direct_seat();
 DROP TRIGGER users_01_closed_direct_seats ON identity.users;
 DROP FUNCTION chat_private.sync_closed_direct_seats();
 DROP FUNCTION chat_private.recompute_closed_direct_seats(text[]);

@@ -603,6 +603,33 @@ describe('an archived agent has left its groups', () => {
     await db.query('RESET ROLE')
   })
 
+  it('opens no second or half-closed DM with an archived agent', async () => {
+    const dm = await directChat()
+    await archive()
+    const open = async (as: string) => {
+      await asUser(as)
+      await db.query('SAVEPOINT open_dm')
+      try {
+        const id = (await db.query('SELECT chat.open_dm($1) AS id', [agent])).rows[0].id
+        await db.query('RELEASE SAVEPOINT open_dm'); return id
+      } catch (error) { await db.query('ROLLBACK TO SAVEPOINT open_dm'); return `refused: ${(error as Error).message}` } finally { await db.query('RESET ROLE') }
+    }
+    // The owner gets the DM that exists, still closed on both sides; nothing new is created.
+    expect(await open(owner)).toBe(dm)
+    expect((await db.query("SELECT count(*)::int AS n FROM chat.chats c JOIN chat.chat_members m ON m.chat_id=c.id WHERE c.kind='dm' AND m.user_id=$1", [agent])).rows[0].n).toBe(1)
+    expect((await db.query('SELECT user_id FROM chat.active_members WHERE chat_id=$1', [dm])).rows).toEqual([])
+    // Someone else cannot open one at all.
+    expect(await open(outsider)).toMatch(/^refused: /)
+    // Any other direct seat that lands while the agent is archived is closed by the same recompute.
+    const late = randomUUID()
+    await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'ai','Late',$2)", [late, owner])
+    await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [late, owner, agent])
+    expect((await db.query('SELECT user_id FROM chat.active_members WHERE chat_id=$1', [late])).rows).toEqual([])
+    await restore()
+    expect((await db.query('SELECT user_id FROM chat.active_members WHERE chat_id=$1 ORDER BY user_id', [late])).rows.map(({ user_id }) => user_id))
+      .toEqual([owner, agent].sort())
+  })
+
   it('reads no removed owned identity in the account snapshot', async () => {
     await db.query('UPDATE identity.users SET removed_at=now() WHERE id=$1', [agent])
     await asUser()
