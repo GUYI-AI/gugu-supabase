@@ -505,7 +505,7 @@ describe('temporary generations reuse managed budgets and private key issuance',
     await user(member)
     expect((await db.query('SELECT * FROM chat.workspace_move_as($1,$2,NULL,$3)',[item,member,'changed.bin'])).rows[0]).toMatchObject({filename:'changed.bin'})
   })
-  it('stops acceptance at the existing storage budget and retains an abandoned unverified upload allowance',async()=>{
+  it('stops acceptance at the existing storage budget and holds an abandoned unverified upload until its release time',async()=>{
     const {transfer_id:id}=await request();await service()
     await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"storage_group_bytes\":127}'")
     await user()
@@ -514,7 +514,10 @@ describe('temporary generations reuse managed budgets and private key issuance',
     await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"storage_group_bytes\":128}'")
     await accept(id);await service()
     await db.query("UPDATE chat.file_transfer_reservations SET expires_at=now()-interval '1 day' WHERE id=$1",[id])
-    expect(Number((await db.query("SELECT chat.file_transfer_usage('upload','group',$1) AS n",[group])).rows[0].n)).toBe(128)
+    const usage=async()=>(await db.query("SELECT chat.file_transfer_usage('upload','group',$1)::int AS storage,chat.file_temporary_usage($1)::int AS temporary",[group])).rows[0]
+    expect(await usage()).toEqual({storage:128,temporary:128})
+    await db.query("UPDATE chat.file_transfer_reservations SET release_at=now()-interval '1 second' WHERE id=$1",[id])
+    expect(await usage()).toEqual({storage:0,temporary:0})
   })
   it('uses the actual issued upload deadline after the holding device accepts, including a delayed acceptance',async()=>{
     const {transfer_id:id}=await request();await service()

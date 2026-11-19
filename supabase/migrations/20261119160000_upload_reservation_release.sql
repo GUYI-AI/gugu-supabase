@@ -8,7 +8,8 @@
 -- The terms are in series, so they add. Each value is a sourced platform or provider limit set by the deployer
 -- (docs/file-transfer-budgets.md lists the sources). After release_at an unregistered permit can never be registered
 -- (file_managed_upload_for refuses expired permits) and no signed write can land, so usage stops counting the hold.
--- No job runs for the ledger; physical staging bytes are left to the staging lifecycle below.
+-- No job runs for the ledger; physical staging bytes are left to the staging lifecycle below. Every upload reservation
+-- gets a release time: managed staging uploads and relay/handoff uploads under temporary/ are signed by the same store.
 SET LOCAL lock_timeout = '5s';
 
 -- A configured deployment must set the three bounds before this migration: issuing would otherwise refuse.
@@ -39,7 +40,7 @@ REVOKE ALL ON FUNCTION chat.file_upload_release_bound() FROM PUBLIC,anon,authent
 -- Back up every hold this migration can stop counting, before any change, and print what it releases.
 CREATE TABLE chat_private.file_upload_release_backup_20261119 AS
 SELECT r.*,now() AS backed_up_at FROM chat.file_transfer_reservations r
- WHERE r.kind='upload' AND r.subject LIKE 'staging/%' AND r.state IN ('reserved','issued');
+ WHERE r.kind='upload' AND r.state IN ('reserved','issued');
 REVOKE ALL ON chat_private.file_upload_release_backup_20261119 FROM PUBLIC,anon,authenticated,service_role,gugu_files;
 
 ALTER TABLE chat.file_transfer_reservations ADD COLUMN release_at timestamptz;
@@ -49,22 +50,20 @@ BEGIN
     SELECT count(*),COALESCE(sum(greatest(0,bytes-actual_bytes)),0),count(DISTINCT account_id)
       INTO held_rows,held,accounts FROM chat_private.file_upload_release_backup_20261119;
     RAISE NOTICE 'upload release backup: % reservations, % held bytes, % accounts',held_rows,held,accounts;
-    IF NOT EXISTS(SELECT 1 FROM chat.file_transfer_reservations WHERE kind='upload' AND subject LIKE 'staging/%') THEN RETURN; END IF;
+    IF NOT EXISTS(SELECT 1 FROM chat.file_transfer_reservations WHERE kind='upload') THEN RETURN; END IF;
     bound:=chat.file_upload_release_bound();
-    UPDATE chat.file_transfer_reservations SET release_at=expires_at+bound
-     WHERE kind='upload' AND subject LIKE 'staging/%';
+    UPDATE chat.file_transfer_reservations SET release_at=expires_at+bound WHERE kind='upload';
     SELECT count(*),COALESCE(sum(greatest(0,bytes-actual_bytes)),0) INTO released_rows,released
-      FROM chat.file_transfer_reservations WHERE kind='upload' AND subject LIKE 'staging/%'
-       AND state IN ('reserved','issued') AND release_at<=now();
+      FROM chat.file_transfer_reservations WHERE kind='upload' AND state IN ('reserved','issued') AND release_at<=now();
     RAISE NOTICE 'upload release backfill: % reservations, % held bytes stop counting now',released_rows,released;
 END $backfill$;
 
--- Every managed upload reservation carries its release time from issue on. An extension of the permit (a multipart
+-- Every upload reservation carries its release time from issue on. An extension of the permit (a multipart
 -- part report) moves it forward with the expiry; it never moves back. A missing bound refuses the issue.
 CREATE FUNCTION chat.file_upload_release_at() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 BEGIN
-    IF NEW.kind='upload' AND NEW.subject LIKE 'staging/%' THEN
+    IF NEW.kind='upload' THEN
         NEW.release_at:=greatest(NEW.release_at,NEW.expires_at+chat.file_upload_release_bound());
     END IF;
     RETURN NEW;
@@ -90,6 +89,15 @@ BEGIN
     EXECUTE replace(definition,step,'AND up.account_id=NEW.account_id AND reservation.state=''issued''
           AND (reservation.release_at IS NULL OR reservation.release_at>now()))');
 END $guard$;
+
+-- The temporary group quota counts a relay/handoff upload hold until the same release time.
+DO $temporary$
+DECLARE definition text; step text:='AND kind=''upload'' AND state IN (''reserved'',''issued'') AND subject LIKE ''temporary/%''';
+BEGIN
+    SELECT pg_get_functiondef('chat.file_temporary_usage(text)'::regprocedure) INTO definition;
+    IF strpos(definition,step)=0 THEN RAISE EXCEPTION 'Unexpected file_temporary_usage predecessor'; END IF;
+    EXECUTE replace(definition,step,step||' AND (release_at IS NULL OR release_at>now())');
+END $temporary$;
 
 -- A completed upload settles its own reservation in the registration transaction (commit, place, non-declared and
 -- declared finish all register here): usage then counts only the stored object. The staging copy is redundant from here
