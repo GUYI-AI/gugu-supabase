@@ -7,7 +7,7 @@ RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE v_actor TEXT := chat.require_group_actor(p_as_user_id);
 BEGIN
     PERFORM 1 FROM chat.chats c
-      JOIN chat.chat_members m ON m.chat_id = c.id
+      JOIN chat.active_members m ON m.chat_id = c.id
       JOIN identity.users u ON u.id = m.user_id
     WHERE c.id = p_chat_id AND c.kind = 'group'
       AND m.user_id = v_actor AND m.role = 'owner' AND u.type = 'human'
