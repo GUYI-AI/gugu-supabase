@@ -100,11 +100,11 @@ REVOKE ALL ON FUNCTION identity.erase_self_only_conversations(text[]) FROM PUBLI
 
 -- The preceding unified release owns the trusted two-argument body and one-argument compatibility
 -- wrapper. Patch only that body after the installed personal-list lock-order
--- release, before its snapshot/prelock prelude and the original
+-- release, after its snapshot and before its prelock prelude and the original
 -- shared-chat/command/identity/storage cleanup; fail closed on an unknown shape.
 DO $upgrade$
 DECLARE definition text;
-    anchor text:='    SELECT COALESCE(array_agg(DISTINCT cm.chat_id ORDER BY cm.chat_id),ARRAY[]::text[])';
+    anchor text:='    PERFORM 1 FROM chat.chats c WHERE c.id=ANY(locked_chat_ids) ORDER BY c.id FOR UPDATE;';
 BEGIN
     SELECT pg_get_functiondef('identity.erase_human_account(text,text)'::regprocedure) INTO definition;
     IF position('identity.enqueue_account_audit_redaction(delete_user_ids,p_auth_email)' IN definition)=0
