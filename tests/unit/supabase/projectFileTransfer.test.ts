@@ -36,6 +36,15 @@ describe('temporary file HTTP protocol',()=>{
     expect(failed()[3]).toEqual({p_id:transfer,p_host:host,p_code:'upload_changed'})
     expect(f.serviceRpc).not.toHaveBeenCalledWith('file_temporary_commit',expect.anything())
   })
+  it('still gives the host its own refusal when recording it fails, and logs the unrecorded refusal',async()=>{
+    const f=fixture()
+    f.userRpc.mockResolvedValueOnce({data:null,error:{message:'account_storage_full',hint:'file_transfer_account_storage_full'}})
+    const service=f.serviceRpc.getMockImplementation()!
+    f.serviceRpc.mockImplementation(async(fn,args)=>fn==='file_temporary_fail'?{data:null,error:{message:'connection reset'}}:service(fn,args))
+    await expect(handleProjectFiles(f.deps,host,'file-accept',{transfer_id:transfer,ciphertext_bytes:128})).rejects.toMatchObject({status:429,code:'account_storage_full'})
+    expect(f.serviceRpc).toHaveBeenCalledWith('file_temporary_fail',{p_id:transfer,p_host:host,p_code:'account_storage_full'})
+    expect(f.deps.log).toHaveBeenCalledWith('temporary_fail_unrecorded',expect.objectContaining({transfer_id:transfer,code:'account_storage_full'}))
+  })
   it('passes the reader its failure code from file-request, with or without a download id',async()=>{
     const f=fixture(),failed={status:'ready',transfer_id:transfer,transfer_status:'failed',failure_code:'account_storage_full'}
     f.userRpc.mockResolvedValue({data:failed,error:null})

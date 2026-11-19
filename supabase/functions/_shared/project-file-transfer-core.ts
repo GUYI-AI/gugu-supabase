@@ -51,8 +51,11 @@ export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:
     // A refusal the same transfer cannot cure is recorded on it (its own transaction: the refused one rolled back), so the
     // reader stops waiting. The host gets the same refusal as before. `denied` is not here: it cannot tell a stranger
     // from a stale permit.
+    // Recording is best effort on top of the refusal: if it fails, the host still gets its own refusal and the reader
+    // waits as before.
     if(error instanceof Refusal&&TERMINAL[route].has(error.code))
       await call(deps.serviceRpc,'file_temporary_fail',{p_id:transfer,p_host:user,p_code:error.code})
+        .catch(failure=>deps.log('temporary_fail_unrecorded',{transfer_id:transfer,code:error.code,error:String(failure)}))
     throw error
   }
 }
