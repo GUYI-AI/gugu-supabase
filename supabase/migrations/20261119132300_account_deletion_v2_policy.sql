@@ -52,6 +52,18 @@ BEGIN
   definition:=replace(definition,anchor,$guard$  IF p_action IN ('register','begin','claim_confirmation','prepare_device','verified','execute') THEN
     DECLARE eligible boolean;
     BEGIN
+      -- Re-read after admission/parent waits: a CD rollback must not be
+      -- bypassed by a caller that observed an open gate before waiting.
+      IF NOT COALESCE((SELECT enabled FROM account_deletion_private.operation_access WHERE singleton),false) THEN
+        RETURN jsonb_build_object('ok',false,'error','operation_unavailable','status',503);
+      END IF;
+      IF NOT COALESCE((SELECT enabled FROM account_deletion_private.device_preparation_access WHERE singleton),false) THEN
+        RETURN jsonb_build_object('ok',false,'error','preparation_unavailable','status',503);
+      END IF;
+      IF NOT EXISTS(SELECT 1 FROM account_deletion_private.access a WHERE a.singleton
+        AND (NOT a.test_only OR a.test_user_id=actor)) THEN
+        RETURN jsonb_build_object('ok',false,'error','rollout_unavailable','status',503);
+      END IF;
       eligible:=account_deletion_private.operation_personal_is_eligible(actor);
       IF eligible IS NULL THEN
         RETURN jsonb_build_object('ok',false,'error','unavailable','status',503);

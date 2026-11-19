@@ -46,6 +46,7 @@ it.each(combinations)('reads both gates, allowlist and personal identity: operat
   expect(result).toEqual({ ok: true, policy: { protocol_version: 2, available: operation && preparation && allowed && personal,
     deletion: 'immediate', credit_treatment: 'forfeit_remaining', consent_version: 'immediate-forfeit-v1', device_preparation_required: true } })
   for (const table of ['operations', 'requests']) expect((await db.query(`SELECT count(*)::int n FROM account_deletion_private.${table} WHERE user_id=$1`, [f.p_user_id])).rows[0].n).toBe(0)
+  if (!operation || !preparation || !allowed || !personal) expect((await flow('register', f)).ok).toBe(false)
 })
 it('requires a current original session and email, including expiry and bans', async () => {
   const f = await fixture()
@@ -120,4 +121,60 @@ it('recovers a committed preparation generation with closed gates without replay
   expect((await flow('cancel_operation', { ...f, p_server_generation: prepared.preparation.server_generation })).operation.can_release_preparation).toBe(true)
   expect((await flow('result', proof)).preparation).toEqual({ prepared: false, cancelled: true,
     native_generation: f.p_native_generation, server_generation: prepared.preparation.server_generation })
+})
+
+async function committedFixture(run: (f: Args, a: pg.Client, b: pg.Client) => Promise<void>) {
+  const a = new pg.Client({ connectionString: database }), b = new pg.Client({ connectionString: database })
+  await a.connect(); await b.connect()
+  let f: Args | undefined
+  const previous = (await a.query(`SELECT o.enabled operation_enabled,d.enabled preparation_enabled,v.test_only,v.test_user_id
+    FROM account_deletion_private.operation_access o CROSS JOIN account_deletion_private.device_preparation_access d CROSS JOIN account_deletion_private.access v`)).rows[0]
+  try {
+    await a.query('BEGIN'); f = await fixture(a); await a.query('COMMIT')
+    await run(f, a, b)
+  } finally {
+    await Promise.allSettled([a.query('ROLLBACK'), b.query('ROLLBACK')])
+    try {
+      await a.query('BEGIN')
+      if (f) {
+        await a.query('DELETE FROM auth.users WHERE id=$1', [f.p_user_id])
+        await a.query('DELETE FROM account_deletion_private.operations WHERE operation_digest=$1', [f.p_operation_digest])
+      }
+      await a.query('UPDATE account_deletion_private.operation_access SET enabled=$1', [previous.operation_enabled])
+      await a.query('UPDATE account_deletion_private.device_preparation_access SET enabled=$1', [previous.preparation_enabled])
+      await a.query('UPDATE account_deletion_private.access SET test_only=$1,test_user_id=$2', [previous.test_only, previous.test_user_id])
+      await a.query('COMMIT')
+    } finally { await Promise.allSettled([a.end(), b.end()]) }
+  }
+}
+it('executes policy reads inside an enforced read-only transaction', async () => {
+  await committedFixture(async (f, _a, b) => {
+    await b.query('BEGIN READ ONLY')
+    expect((await b.query("SELECT current_setting('transaction_read_only') read_only")).rows[0].read_only).toBe('on')
+    expect((await flow('status', f, b)).policy.available).toBe(true)
+    await b.query('ROLLBACK')
+  })
+})
+it.each(['principal', 'operation_gate', 'preparation_gate', 'allowlist'])('rechecks %s changed while waiting for the account lock', async changed => {
+  await committedFixture(async (f, a, b) => {
+    const holder = (await a.query('SELECT pg_backend_pid() pid')).rows[0].pid
+    const waiter = (await b.query('SELECT pg_backend_pid() pid')).rows[0].pid
+    await a.query('BEGIN')
+    await a.query("SELECT pg_advisory_xact_lock(hashtextextended('account-deletion:'||$1::text,0))", [f.p_user_id])
+    await b.query("SET statement_timeout='5s'")
+    const pending = flow('register', f, b)
+    let blocked = false
+    for (let n = 0; n < 200; n++) {
+      if ((await db.query('SELECT $1::int=ANY(pg_blocking_pids($2::int)) blocked', [holder, waiter])).rows[0].blocked) { blocked = true; break }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect(blocked).toBe(true)
+    if (changed === 'principal') await team(f, a)
+    else if (changed === 'allowlist') await a.query('UPDATE account_deletion_private.access SET test_user_id=NULL')
+    else await a.query(`UPDATE account_deletion_private.${changed === 'operation_gate' ? 'operation_access' : 'device_preparation_access'} SET enabled=false`)
+    await a.query('COMMIT')
+    expect(await pending).toMatchObject({ ok: false, error: changed === 'principal' ? 'personal_account_required'
+      : changed === 'allowlist' ? 'rollout_unavailable' : changed === 'operation_gate' ? 'operation_unavailable' : 'preparation_unavailable' })
+    expect((await db.query('SELECT count(*)::int n FROM account_deletion_private.operations WHERE operation_digest=$1', [f.p_operation_digest])).rows[0].n).toBe(0)
+  })
 })
