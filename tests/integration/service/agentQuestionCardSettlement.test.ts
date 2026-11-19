@@ -122,6 +122,34 @@ describe('owner settlement of an agent question card', () => {
     expect(await query("UPDATE chat.messages SET content='arbitrary edit' WHERE id=$1 RETURNING id",[message])).toEqual([])
   })
 
+  it('settles while a sender holds the chat row, then serializes a concurrent second result on the original message', async () => {
+    // The second connection needs committed fixtures, as in the repository's other concurrency suites.
+    await query('COMMIT')
+    const other = new pg.Client({ connectionString:process.env.GUGU_INTEGRATION_DATABASE_URL })
+    await other.connect()
+    try {
+      await other.query('BEGIN')
+      await other.query('SELECT 1 FROM chat.chats WHERE id=$1 FOR UPDATE',[room])
+      await query('BEGIN; SET LOCAL statement_timeout=\'5s\'')
+      await actor(owner)
+      const first = (await query(sql,[message,'answered','[{"selected":["A"]}]']))[0].settled
+      expect(first).toMatchObject({ state:'answered' })
+      await other.query('ROLLBACK; BEGIN; SET LOCAL statement_timeout=\'5s\'; SET LOCAL ROLE authenticated')
+      await other.query("SELECT set_config('request.jwt.claim.sub',$1,true)",[owner])
+      const pid = (await other.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      const competing = other.query(sql,[message,'discuss',null])
+      await expect.poll(async () => (await query('SELECT cardinality(pg_blocking_pids($1)) AS n',[pid]))[0].n).toBeGreaterThan(0)
+      await query('COMMIT')
+      expect((await competing).rows[0].settled).toEqual(first)
+      await other.query('COMMIT')
+    } finally {
+      await query('ROLLBACK')
+      await other.query('ROLLBACK'); await other.end()
+      // Keep only the fixture identities in this disposable database, matching existing concurrency fixtures.
+      await query('DELETE FROM chat.chats WHERE id=$1',[room])
+    }
+  })
+
   it.each([
     ['pending',null],['answered',null],['answered','[]'],['answered','[{"selected":["A"]},{"selected":["B"]}]'],
     ['answered','[{"selected":[],"skipped":false}]'],['answered','[{"selected":["A"],"skipped":true}]'],

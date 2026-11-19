@@ -2,6 +2,24 @@
 -- Body refreshes add data to chat_changed; older clients must not receive an unknown revision event name.
 SET LOCAL lock_timeout = '5s';
 
+-- A terminal result changes no derived chat preview. Avoid taking the chat row again while holding the line lock:
+-- sends take that row before their line lock. Ordinary text, timestamps and deletion retain the existing trigger.
+DO $preview_guard$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='chat.messages'::regclass
+    AND tgname='trg_recompute_chat_last_message_on_update' AND tgfoid='chat.recompute_chat_last_message_on_update()'::regprocedure
+    AND tgqual IS NULL AND tgenabled='O') THEN RAISE EXCEPTION 'unexpected message preview trigger'; END IF;
+END;
+$preview_guard$;
+DROP TRIGGER trg_recompute_chat_last_message_on_update ON chat.messages;
+CREATE TRIGGER trg_recompute_chat_last_message_on_update AFTER UPDATE OF deleted_at,content,created_at ON chat.messages
+FOR EACH ROW WHEN (OLD.deleted_at IS DISTINCT FROM NEW.deleted_at OR OLD.created_at IS DISTINCT FROM NEW.created_at
+  OR (OLD.content IS DISTINCT FROM NEW.content AND NOT COALESCE(
+    OLD.content_type='card' AND NEW.content_type='card'
+    AND OLD.content LIKE '{"v":1,"type":"question","text":%' AND NEW.content LIKE '{"v":1,"type":"question","text":%'
+    AND chat.message_preview(OLD.content,OLD.content_type) IS NOT DISTINCT FROM chat.message_preview(NEW.content,NEW.content_type),false)))
+EXECUTE FUNCTION chat.recompute_chat_last_message_on_update();
+
 CREATE FUNCTION chat.settle_agent_question_card(p_message_id text, p_state text, p_answers jsonb DEFAULT NULL)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE
@@ -39,9 +57,9 @@ BEGIN
 
   SELECT m.chat_id INTO room_id FROM chat.messages m WHERE m.id = p_message_id;
   IF room_id IS NULL THEN RAISE EXCEPTION 'question card unavailable' USING ERRCODE = '42501'; END IF;
-  -- Match the installed line -> message -> deferred account-head ordering, including concurrent sends/deletes.
-  PERFORM chat.lock_chat_revision_recipients(room_id);
+  -- Like deletion, serialize this message before line publication. Settlement-only bodies never rewrite the chat row.
   SELECT * INTO original FROM chat.messages m WHERE m.id = p_message_id FOR UPDATE;
+  PERFORM chat.lock_chat_revision_recipients(room_id);
   IF original.id IS NULL OR original.content_type <> 'card' OR original.deleted_at IS NOT NULL OR original.retracted_at IS NOT NULL
     OR original.deleted_for_user_ids @> jsonb_build_array(owner_id)
     OR NOT EXISTS (SELECT 1 FROM identity.users a WHERE a.id = original.sender_user_id AND a.type = 'agent' AND a.owner_user_id = owner_id)
