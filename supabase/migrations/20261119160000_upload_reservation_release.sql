@@ -91,6 +91,30 @@ BEGIN
           AND (reservation.release_at IS NULL OR reservation.release_at>now()))');
 END $guard$;
 
+-- A completed upload settles its own reservation in the registration transaction (commit, place, non-declared and
+-- declared finish all register here): usage then counts only the stored object. The staging copy is redundant from here
+-- on; the edge deletes it after commit. Replaying a registration changes nothing.
+DO $registered$
+DECLARE definition text; step text:='UPDATE chat.file_transfer_reservations SET actual_bytes=b.size_bytes WHERE id=u.reservation_id;';
+BEGIN
+    SELECT pg_get_functiondef('chat.file_managed_upload_registered(text,text,jsonb)'::regprocedure) INTO definition;
+    IF strpos(definition,step)=0 THEN RAISE EXCEPTION 'Unexpected file_managed_upload_registered predecessor'; END IF;
+    EXECUTE replace(definition,step,'UPDATE chat.file_transfer_reservations SET actual_bytes=b.size_bytes,state=''settled'' WHERE id=u.reservation_id;
+    UPDATE chat.file_transfer_uploads SET close_evidence=''registered:''||b.id::text WHERE staging_key=p_key AND close_evidence IS NULL;');
+END $registered$;
+
+-- Records a confirmed absent staging copy and settles its reservation. The first evidence (a registration) is kept.
+CREATE OR REPLACE FUNCTION chat.file_managed_upload_closed(p_key text,p_evidence text) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+BEGIN
+    IF length(COALESCE(p_evidence,'')) NOT BETWEEN 1 AND 160 THEN RAISE EXCEPTION 'Staging removal evidence is required'; END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('gugu:file-transfer:quota',0));
+    UPDATE chat.file_transfer_reservations r SET state='settled'
+     FROM chat.file_transfer_uploads u WHERE u.staging_key=p_key AND r.id=u.reservation_id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Upload reservation was not found'; END IF;
+    UPDATE chat.file_transfer_uploads SET staging_deleted=true,close_evidence=COALESCE(close_evidence,p_evidence) WHERE staging_key=p_key;
+END $$;
+
 -- Community Storage staging older than a day is collected, except a managed key whose hold still counts (a multipart
 -- permit can be extended up to a day after issue, and its release time follows). OSS uses its bucket lifecycle rule.
 CREATE OR REPLACE FUNCTION chat.attachment_expired_staging(p_bucket text)

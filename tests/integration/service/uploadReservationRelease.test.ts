@@ -1,5 +1,5 @@
 // An upload reservation stops counting at its release time (20261119160000): expiry plus three sourced write bounds.
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
@@ -101,6 +101,42 @@ describe('upload reservation release', () => {
     const before = await usage()
     await db.query("UPDATE chat.file_transfer_reservations SET expires_at=expires_at-interval '1 minute' WHERE id=$1", [id])
     expect((await reservation(id)).release_at).toEqual(extended.release_at)
+    expect(await usage()).toBe(before)
+  })
+
+  async function register(key: string, digest: string, bytes = 60) {
+    await db.query('SELECT * FROM chat.file_blob_register($1,$2,$3,$4,$5)', [owner, key, digest, bytes, 'application/octet-stream'])
+    await db.query('SELECT chat.file_managed_upload_registered($1,$2)', [key, owner])
+  }
+  const ledger = async (key: string) => (await db.query(`SELECT r.state,r.actual_bytes::int,u.close_evidence,u.blob_id,u.staging_deleted
+    FROM chat.file_transfer_uploads u JOIN chat.file_transfer_reservations r ON r.id=u.reservation_id WHERE u.staging_key=$1`, [key])).rows[0]
+
+  it('settles a completed upload in its registration: usage grows by the stored bytes once', async () => {
+    const before = await usage()
+    const { key } = await issue()
+    await register(key, randomBytes(32).toString('hex'), 50)
+    const row = await ledger(key)
+    expect(row).toMatchObject({ state: 'settled', actual_bytes: 50, close_evidence: 'registered:' + row.blob_id, staging_deleted: false })
+    expect(await usage()).toBe(before + 50)
+    // A replayed registration changes nothing.
+    await db.query('SELECT chat.file_managed_upload_registered($1,$2)', [key, owner])
+    expect(await ledger(key)).toEqual(row)
+    expect(await usage()).toBe(before + 50)
+    // The confirmed staging deletion keeps the registration as the evidence; the same id stays refused.
+    await db.query("SELECT chat.file_managed_upload_closed($1,'staging-absent')", [key])
+    expect(await ledger(key)).toEqual({ ...row, staging_deleted: true })
+    await user(owner)
+    expect((await reject(ISSUE, [(await db.query('SELECT reservation_id FROM chat.file_transfer_uploads WHERE staging_key=$1', [key])).rows[0].reservation_id, group, owner, 60])).hint).toBe('file_transfer_expired')
+    await service()
+  })
+
+  it('adds nothing for the same bytes uploaded a second time', async () => {
+    const digest = randomBytes(32).toString('hex')
+    await register((await issue()).key, digest, 40)
+    const before = await usage()
+    const second = await issue()
+    await register(second.key, digest, 40)
+    expect((await ledger(second.key)).state).toBe('settled')
     expect(await usage()).toBe(before)
   })
 

@@ -503,8 +503,20 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
     if (created && !(await objectStorage(deps).exists(finalKey))) await copy()
     if (!settle) await call(deps.serviceRpc,'file_managed_upload_registered',{p_key:stagingKey,p_user:userId,
       p_document:document.kind === 'document' ? {text:document.text,content_type:document.contentType} : null})
-    // Keep staging immutable until the permit closes: an early delete would let the same policy recreate it.
-    // Cleanup retains the reservation until terminal upload evidence and physical deletion are confirmed.
+    // Registration settled the reservation, so the staging copy is redundant. A replay of the still-valid signature can
+    // recreate it uncounted until the staging lifecycle removes it. A failed delete leaves it to that lifecycle.
+    await dropStaging(deps, stagingKey)
+  }
+}
+
+async function dropStaging(deps: AttachmentsDeps, stagingKey: string) {
+  try {
+    const store = objectStorage(deps)
+    await store.remove(stagingKey)
+    if (await store.exists(stagingKey)) throw new Error('staging object still present after delete')
+    await call(deps.serviceRpc, 'file_managed_upload_closed', { p_key: stagingKey, p_evidence: 'staging-absent' })
+  } catch (error) {
+    deps.log('staging_delete_failed', { key: stagingKey, error: String(error) })
   }
 }
 
