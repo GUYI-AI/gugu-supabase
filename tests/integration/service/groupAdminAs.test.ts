@@ -251,18 +251,44 @@ describe('explicit archived project-group recovery', () => {
     await expect(db.query('SELECT chat.restore_group_as($1,$2)', [room, owner])).rejects.toThrow(/permission denied/)
     await db.query('ROLLBACK TO SAVEPOINT anonymous_recovery')
   })
-  it('does not accept a topic as a group or revive archived topics as a side effect', async () => {
+  it('recovers only topics archived with the group, preserving earlier or later individual archives', async () => {
     const anchor = randomUUID()
     await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'Recovery history')", [anchor, room, owner])
-    await asUser(owner)
-    const topic = (await db.query<{ chat_id: string }>('SELECT * FROM chat.create_topic($1,$2,$3,$4)', [room, anchor, 'Retained topic', [human]])).rows[0]!.chat_id
+    const topics: string[] = []
+    for (const name of ['Open topic', 'Already closed']) {
+      await asUser(owner)
+      topics.push((await db.query<{ chat_id: string }>('SELECT * FROM chat.create_topic($1,$2,$3,$4)', [room, anchor, name, [human]])).rows[0]!.chat_id)
+    }
+    await service()
+    await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [topics[1]])
     await rpc('archive_group_as', { p_chat_id: room }, owner)
-    expect(await rejected(() => rpc('restore_group_as', { p_chat_id: topic }, owner))).toContain('human_group_owner_required')
+    await service()
+    expect((await db.query('SELECT id,status FROM chat.chats WHERE id=ANY($1::text[]) ORDER BY id', [topics])).rows)
+      .toEqual(topics.map(id => ({ id, status: 'archived' })).sort((a,b) => a.id.localeCompare(b.id)))
+    expect(await rejected(() => rpc('restore_group_as', { p_chat_id: topics[0] }, owner))).toContain('human_group_owner_required')
     await rpc('restore_group_as', { p_chat_id: room }, owner)
     await service()
-    expect((await db.query<{ status: string }>('SELECT status FROM chat.chats WHERE id=$1', [topic])).rows[0]!.status).toBe('archived')
+    expect((await db.query<{ status: string }>('SELECT status FROM chat.chats WHERE id=$1', [topics[0]])).rows[0]!.status).toBe('active')
+    expect((await db.query<{ status: string }>('SELECT status FROM chat.chats WHERE id=$1', [topics[1]])).rows[0]!.status).toBe('archived')
     expect((await db.query('SELECT id FROM chat.messages WHERE id=$1', [anchor])).rows).toHaveLength(1)
+    await db.query("UPDATE chat.chats SET status='archived' WHERE id=$1", [topics[0]])
+    await rpc('restore_group_as', { p_chat_id: room }, owner)
+    await service()
+    expect((await db.query<{ status: string }>('SELECT status FROM chat.chats WHERE id=$1', [topics[0]])).rows[0]!.status).toBe('archived')
   })
+  it('refuses a partial recovery of a legacy archive without topic evidence', async () => {
+    const anchor = randomUUID()
+    await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'Legacy archive')", [anchor, room, owner])
+    await asUser(owner)
+    await db.query('SELECT * FROM chat.create_topic($1,$2,$3,$4)', [room, anchor, 'Legacy topic', [human]])
+    await rpc('archive_group_as', { p_chat_id: room }, owner)
+    await service()
+    await db.query('DELETE FROM chat.group_archive_recovery_topics WHERE group_id=$1', [room])
+    expect(await rejected(() => rpc('restore_group_as', { p_chat_id: room }, owner))).toContain('group_recovery_requires_topic_evidence')
+    await service()
+    expect((await db.query<{ status: string }>('SELECT status FROM chat.chats WHERE id=$1', [room])).rows[0]!.status).toBe('archived')
+  })
+
 })
 
 describe('topic authority comes from the source, while settings belong to the participant', () => {
