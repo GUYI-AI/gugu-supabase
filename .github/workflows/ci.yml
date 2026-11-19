@@ -155,7 +155,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Test candidate migration checker offline
-        run: node --test tests/ci/migration-versions.test.mjs tests/ci/application-owner-baseline.test.mjs
+        run: node --test tests/ci/migration-versions.test.mjs tests/ci/application-owner-baseline.test.mjs tests/ci/attachment-quota-preservation.test.mjs
       - name: Validate candidate owner snapshot format and policy
         run: node scripts/ci/application-owner-baseline.mjs --snapshot release/production-object-owners.json
       - run: pnpm test
@@ -204,6 +204,15 @@ jobs:
           docker info --format '{{.RegistryConfig.Mirrors}}'
       - run: pnpm test:db:start
       - run: pnpm test:installation
+      - name: Upload actual writer body and ACL comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attachment-quota-359-${{ github.run_attempt }}
+          path: .local/verification/attachment-quota-359.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
       - name: Prove Auth audit fixture isolation with the real cron worker
         env:
           SOURCE_SHA: ${{ github.sha }}
