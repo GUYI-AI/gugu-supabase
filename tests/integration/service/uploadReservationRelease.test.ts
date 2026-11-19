@@ -1,4 +1,4 @@
-// An upload reservation stops counting at its release time (20261119230000): expiry plus three sourced write bounds.
+// An upload reservation stops counting at its release time (20261120000000): expiry plus three sourced write bounds.
 import { randomBytes, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
