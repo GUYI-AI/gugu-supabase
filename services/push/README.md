@@ -1,4 +1,4 @@
-# Optional APNs transport
+# Optional mobile push transports
 
 This worker consumes the community backend's existing account revision stream.
 It does not create identities, messages, task execution or background Agent work.
@@ -250,3 +250,52 @@ acceptance. Production promotion is a separate authorized operation.
 Protocol references: [APNs requests](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns),
 [responses](https://developer.apple.com/documentation/usernotifications/handling-notification-responses-from-apns),
 [token authentication](https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns).
+
+
+## Android channels and FCM
+
+The ten-argument `mobile_push_register` overload adds `p_provider text` before
+`p_token`; the original nine-argument APNs interface remains unchanged.
+Providers are `apns`, `fcm`, `huawei`, `honor`, `xiaomi`, `oppo`, `vivo`.
+Only APNs and FCM have senders in this release. Android uses transport environment
+`production` with topic `app.gugu.chat` or `app.gugu.chat.beta`; it is independent
+of the business database's deployment name. Tokens are opaque, case-sensitive
+visible ASCII (1–4096 bytes); APNs keeps its hexadecimal validation.
+A package/installation still has one registration, including after a provider
+switch. Provider/token/preferences changes rotate its generation.
+
+The worker uses `mobile_push_reserve(environment, providers[], limit)` and only
+consumes cursors of configured providers. The legacy reservation signature
+selects APNs only. Configuration is explicit: absent providers are logged as
+unconfigured; partial APNs credentials or zero configured providers fail startup.
+Set `GUGU_PUSH_ENVIRONMENT` (`sandbox` or `production`), retaining the original
+APNs setting for existing operators if needed. FCM requires `production` and
+`GUGU_FCM_SERVICE_ACCOUNT_PATH`, a read-only service-account JSON mount supplied
+by the operator, never stored in this repository. The account needs the FCM
+send permission for its project. No ADC discovery or token-URI override is used.
+Node signs RS256 JWTs, exchanges them for short-lived OAuth tokens, and sends
+HTTP v1 notification-plus-data messages. OAuth credentials stay in RAM.
+For restricted egress, Node 24's `--use-env-proxy` supports the deployment's
+isolated `HTTPS_PROXY`/`NO_PROXY`; do not change a user's system proxy.
+
+FCM sends generic visible alerts with a package restriction, the existing
+`gugu-alerts` / `gugu-alerts-quiet-v2` channel, a stable notification tag, and
+`app.gugu.chat.OPEN_PUSH` tap action. Foreground FCM notifications use the app's
+existing outlet. Android clients mirror their existing logged-in task watcher as enabled,
+using its existing chat sound preference, alongside the chat switches. FCM cannot deliver after Android
+Force stop until the user opens the app again. Provider acceptance is not proof
+of visible delivery. `UNREGISTERED` removes only the current generation as of
+request start; ambiguous `INVALID_ARGUMENT`, authentication errors and rate
+limits do not remove tokens. No event is retried, even on timeout/disconnect.
+An accepted provider message ID is retained on the existing attempt.
+
+`services/push/Dockerfile` builds a non-root worker using the pinned workspace
+lockfile. No port is exposed. The optional `GUGU_PUSH_HEALTH_PATH` contains only
+a progress timestamp, updated after reservation and each bounded delivery;
+its Docker healthcheck proves recent worker/DB progress, not notification delivery.
+Supervision, secret provisioning and deployment remain the operator's concern.
+FCM and future vendor receipt callbacks are a separate release; this worker
+continues to own all sends.
+
+References: [FCM HTTP v1](https://firebase.google.com/docs/cloud-messaging/send/v1-api),
+[FCM error codes](https://firebase.google.com/docs/cloud-messaging/error-codes).

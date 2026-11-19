@@ -11,7 +11,7 @@ function fixture({ live = true, sendThrows = false, commitThrows = false } = {})
       const rows = reserved ? [] : [{ id: 'notification-fixture' }]; reserved = true; return { rows }
     }
     if (sql.includes('mobile_push_admit')) { const first = !admitted; admitted = true; return { rows: [{ admitted: first }] } }
-    if (sql.includes('mobile_push_prepare')) return { rows: [{ endpoint: live ? { token: 'PRIVATE_TOKEN_CANARY' } : null }] }
+    if (sql.includes('mobile_push_prepare')) return { rows: [{ endpoint: live ? { provider: 'apns', token: 'PRIVATE_TOKEN_CANARY' } : null }] }
     if (sql === 'COMMIT' && commitThrows) throw new Error('PRIVATE_DATABASE_CANARY')
     return { rows: [] }
   } }
@@ -25,20 +25,20 @@ function fixture({ live = true, sendThrows = false, commitThrows = false } = {})
 
 test('commits the admission before transport and holds the preparation transaction through completion', async () => {
   const f = fixture()
-  assert.equal(await runPushBatch(f.db, f.provider, 'production', f.log), 1)
+  assert.equal(await runPushBatch(f.db, { apns: f.provider }, 'production', f.log), 1)
   assert.equal(f.requests(), 1)
   assert.deepEqual(f.commands.map(x => x.sql), [
-    'SELECT identity.mobile_push_reserve($1,20) AS id', 'SELECT identity.mobile_push_admit($1) AS admitted',
+    'SELECT identity.mobile_push_reserve($1,$2::text[],20) AS id', 'SELECT identity.mobile_push_admit($1) AS admitted',
     'BEGIN', 'SELECT identity.mobile_push_prepare($1) AS endpoint',
-    'SELECT identity.mobile_push_finish($1,$2,$3)', 'COMMIT',
+    'SELECT identity.mobile_push_finish($1,$2,$3,$4)', 'COMMIT',
   ])
-  await runPushBatch(f.db, f.provider, 'production', f.log)
+  await runPushBatch(f.db, { apns: f.provider }, 'production', f.log)
   assert.equal(f.requests(), 1)
 })
 
 test('revocation or permission change between reservation and dispatch suppresses transport', async () => {
   const f = fixture({ live: false })
-  await runPushBatch(f.db, f.provider, 'production', f.log)
+  await runPushBatch(f.db, { apns: f.provider }, 'production', f.log)
   assert.equal(f.requests(), 0)
   assert.equal(f.logs[0].outcome, 'suppressed')
 })
@@ -46,8 +46,8 @@ test('revocation or permission change between reservation and dispatch suppresse
 for (const failure of [{ sendThrows: true }, { commitThrows: true }]) {
   test(`does not resend an uncertain side effect: ${Object.keys(failure)[0]}`, async () => {
     const f = fixture(failure)
-    await runPushBatch(f.db, f.provider, 'production', f.log)
-    await runPushBatch(f.db, f.provider, 'production', f.log)
+    await runPushBatch(f.db, { apns: f.provider }, 'production', f.log)
+    await runPushBatch(f.db, { apns: f.provider }, 'production', f.log)
     assert.equal(f.requests(), 1)
     assert.equal(f.logs[0].outcome, 'unknown')
     assert.equal(f.commands.some(x => x.sql === 'ROLLBACK'), true)
@@ -61,6 +61,31 @@ test('duplicate admission is rejected before prepare or send', async () => {
     if (sql.includes('mobile_push_reserve')) return { rows: [{ id: 'same' }, { id: 'same' }] }
     return f.db.query(sql, values)
   } }
-  await runPushBatch(db, f.provider, 'production', f.log)
+  await runPushBatch(db, { apns: f.provider }, 'production', f.log)
   assert.equal(f.requests(), 1)
+})
+
+test('routes by provider and reserves only configured channels', async () => {
+  const f = fixture()
+  const db = { async query(sql, values) {
+    if (sql.includes('mobile_push_prepare')) return { rows: [{ endpoint: { provider: 'fcm', token: 'PRIVATE_TOKEN_CANARY' } }] }
+    return f.db.query(sql, values)
+  } }
+  await runPushBatch(db, { fcm: f.provider }, 'production', f.log)
+  assert.equal(f.requests(), 1)
+  assert.deepEqual(f.commands[0].values, ['production', ['fcm']])
+  assert.doesNotMatch(JSON.stringify(f.logs), /PRIVATE_|token/i)
+})
+test('an unconfigured endpoint cannot fall through to another provider', async () => {
+  const f = fixture()
+  await runPushBatch(f.db, { fcm: f.provider }, 'production', f.log)
+  assert.equal(f.requests(), 0)
+  assert.equal(f.logs[0].outcome, 'unknown')
+})
+
+test('shutdown does not start another network side effect from an already consumed batch', async () => {
+  const f = fixture()
+  await runPushBatch(f.db, { apns: f.provider }, 'production', f.log, async () => {}, () => true)
+  assert.equal(f.requests(), 0)
+  assert.equal(f.commands.length, 1)
 })
