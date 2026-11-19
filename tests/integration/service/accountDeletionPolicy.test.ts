@@ -176,9 +176,9 @@ it('closes an unregistered capture with disabled gates and recovers a lost cance
 it('does not replace another active operation when cancelling a missing capture', async () => {
   const f = await fixture(), registered = await flow('register', f)
   const missing = { ...f, p_operation_digest: hash(randomUUID()), p_receipt_digest: hash(randomUUID()), p_server_generation: null }
-  expect((await flow('cancel_operation', missing)).error).toBe('request_active')
-  expect((await flow('result', f)).operation.operation_id).toBe(registered.operation.operation_id)
-  expect((await db.query('SELECT count(*)::int n FROM account_deletion_private.operations WHERE user_id=$1', [f.p_user_id])).rows[0].n).toBe(1)
+  expect((await flow('cancel_operation', missing)).operation).toMatchObject({ state: 'closed_before_confirm', can_release_preparation: true })
+  expect((await flow('result', f)).operation).toMatchObject({ operation_id: registered.operation.operation_id, state: 'open' })
+  expect((await db.query("SELECT count(*)::int n FROM account_deletion_private.operations WHERE user_id=$1 AND state='open'", [f.p_user_id])).rows[0].n).toBe(1)
 })
 
 async function committedFixture(run: (f: Args, a: pg.Client, b: pg.Client) => Promise<void>) {

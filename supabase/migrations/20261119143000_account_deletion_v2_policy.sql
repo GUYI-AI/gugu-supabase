@@ -133,10 +133,6 @@ $guard$||anchor);
     IF p_server_generation IS NOT NULL THEN
       RETURN jsonb_build_object('ok',false,'error','scope_conflict','status',409);
     END IF;
-    IF EXISTS(SELECT 1 FROM account_deletion_private.operations WHERE user_id=p_user_id
-      AND state NOT IN ('deleted','closed_before_confirm')) THEN
-      RETURN jsonb_build_object('ok',false,'error','request_active','status',409);
-    END IF;
     INSERT INTO account_deletion_private.operations(operation_digest,receipt_digest,user_id,session_id,email_digest,
       consent_version,state,preparation_cancelled,unprepared_native_generation)
       VALUES(p_operation_digest,p_receipt_digest,p_user_id,p_session_id,p_email_digest,
