@@ -88,8 +88,9 @@ describe('multipart upload state',()=>{
     // Limit 2 stands for the gc's 50: the first round's two fail (nothing clears them), the third is next.
     const first=(await claim(2,keys)).map(r=>r.staging_key)
     expect(first).toHaveLength(2)
-    const remaining=keys.filter(key=>!first.includes(key))
-    expect((await claim(1,keys)).map(row=>row.staging_key)).toEqual(remaining)
+    // A single available slot must go to the untried row. UPDATE RETURNING
+    // does not promise the order of rows within a multi-row claimed batch.
+    expect((await claim(1,keys)).map(r=>r.staging_key)).toEqual([keys.find(k=>!first.includes(k))])
   })
   it('a row that keeps failing is tried again in turn, earliest tried first, after the rows never tried',async()=>{
     const [early,late,fresh]=[await permit(),await permit(),await permit()]

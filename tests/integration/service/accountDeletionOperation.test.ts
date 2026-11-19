@@ -161,6 +161,7 @@ async function fixture(client = db) {
   await client.query('INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())', [session, user])
   await client.query('UPDATE account_deletion_private.access SET test_only=true,test_user_id=$1', [user])
   await client.query('UPDATE account_deletion_private.operation_access SET enabled=true')
+  await client.query('UPDATE account_deletion_private.device_preparation_access SET enabled=true')
   return { p_operation_digest: hash(randomUUID()), p_receipt_digest: hash(randomUUID()), p_user_id: user, p_session_id: session,
     p_email_digest: hash(email), p_consent_version: consent, p_generation: 1, p_native_generation: randomUUID(), p_server_generation: randomUUID(), p_confirmation_id: randomUUID() }
 }
