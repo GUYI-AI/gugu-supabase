@@ -58,12 +58,12 @@ const options = {
 const args = process.argv.slice(2)
 const run = (filters) => {
   const excludeAudit = args.length === 0 && filters.includes('--maxWorkers=4')
-    ? ['--exclude', '**/fileStorageAudit.test.ts', '--exclude', '**/unifiedAuthAuditHttp.test.ts'] : []
+    ? ['--exclude', '**/fileStorageAudit.test.ts', '--exclude', '**/unifiedAuthAuditHttp.test.ts', '--exclude', '**/selfOnlyConversationErasure.test.ts'] : []
   return execFileSync(path.join(root, 'node_modules/.bin/vitest'), ['run', '--project', 'integration', ...filters, ...excludeAudit], options)
 }
 if (args.length === 0) {
-  // Audit and predecessor-timing fixtures change shared DDL; finish both before the parallel group.
-  run(['--maxWorkers=1', 'tests/integration/service/fileStorageAudit.test.ts', 'tests/integration/service/unifiedAuthAuditHttp.test.ts'])
+  // Audit and predecessor-timing fixtures change shared DDL; finish all three before the parallel group.
+  run(['--maxWorkers=1', 'tests/integration/service/fileStorageAudit.test.ts', 'tests/integration/service/unifiedAuthAuditHttp.test.ts', 'tests/integration/service/selfOnlyConversationErasure.test.ts'])
   // Quota configuration and next-idle-pass GC assertions share the global quota lock.
   // Keep their suites isolated; the GC race suite still runs its own concurrent transactions.
   run(['--maxWorkers=1','tests/integration/service/fileAvailability.test.ts','tests/integration/service/fileTransferBudget.test.ts','tests/integration/service/stagingCleanup.test.ts','tests/integration/service/largeFileIdleExpiry.test.ts','tests/integration/service/fileTransferConcurrency.test.ts','tests/integration/service/topicSourceResources.test.ts','tests/integration/service/projectFileRevisions.test.ts','tests/integration/service/projectFilesPeer.test.ts','tests/integration/service/projectImageExpiry.test.ts','tests/integration/service/fileStorageClasses.test.ts','tests/integration/service/fileBlobs.test.ts','tests/integration/service/messageFileRefs.test.ts','tests/integration/service/messageFileRefsConcurrency.test.ts'])
