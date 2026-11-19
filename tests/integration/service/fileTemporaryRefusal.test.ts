@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-// A host refusal the same request cannot cure ends its reader's wait: the transfer turns `failed` with the server's code.
+// A host refusal the same request cannot cure ends its reader's wait: the transfer retires with the server's code as its decline.
 const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
 let db: pg.Client, owner: string, member: string, outsider: string, group: string, device: string
 const value = async (sql: string, args: unknown[] = []) => (await db.query(sql, args)).rows[0].v
@@ -39,8 +39,8 @@ async function accept(id: string, size = 128) {
   await admin()
   return error.hint
 }
-const fail = (id: string, code: string, host = owner) => value('SELECT chat.file_temporary_fail($1,$2,$3) AS v', [id, host, code])
-const row = (id: string) => db.query('SELECT state,failure_code FROM chat.file_temporary_transfers WHERE id=$1', [id]).then(r => r.rows[0])
+const refuse = (id: string, code: string, host = owner) => value('SELECT chat.file_temporary_refuse($1,$2,$3) AS v', [id, host, code])
+const row = (id: string) => db.query('SELECT state,declined FROM chat.file_temporary_transfers WHERE id=$1', [id]).then(r => r.rows[0])
 async function pending() {
   await user()
   const rows = (await db.query('SELECT v->>\'id\' AS id FROM chat.file_temporary_pending($1) v', [device])).rows.map(r => r.id)
@@ -71,110 +71,103 @@ beforeEach(async () => {
 })
 afterEach(async () => { await db.query('ROLLBACK') })
 
-describe('a terminal relay refusal reaches the reader', () => {
-  it('fails the reader\'s own row with the code and stops offering it to the host', async () => {
+describe('a terminal relay refusal reaches the reader as a decline', () => {
+  it('retires the reader\'s own row with the code and stops offering it to the host', async () => {
     const item = await local(), id = randomUUID()
-    expect(await request(item, id)).toMatchObject({ transfer_id: id, transfer_status: 'requested', failure_code: null })
+    expect(await request(item, id)).toMatchObject({ transfer_id: id, transfer_status: 'requested', transfer_declined: null })
     expect(await pending()).toEqual([id])
     expect(await accept(id)).toBe('file_transfer_account_storage_full')
-    expect(await row(id)).toEqual({ state: 'requested', failure_code: null })
-    expect(await fail(id, 'account_storage_full')).toBe(true)
-    expect(await request(item, id)).toMatchObject({ status: 'ready', transfer_id: id, transfer_status: 'failed', failure_code: 'account_storage_full' })
+    expect(await row(id)).toEqual({ state: 'requested', declined: null })
+    expect(await refuse(id, 'account_storage_full')).toBe(true)
+    expect(await request(item, id)).toMatchObject({ status: 'ready', transfer_id: id, transfer_status: 'retired', transfer_declined: 'account_storage_full' })
     expect(await pending()).toEqual([])
-    expect(await fail(id, 'account_storage_full')).toBe(false)
+    expect(await refuse(id, 'account_storage_full')).toBe(false)
   })
 
-  it('moves a joined reader to its own generation, which fails again, and a fresh id succeeds once the quota is freed', async () => {
+  it('moves a joined reader to its own generation, which is refused again, and a fresh id succeeds once the quota is freed', async () => {
     const item = await local(), first = randomUUID(), joined = randomUUID()
     expect(await request(item, first)).toMatchObject({ transfer_id: first, transfer_status: 'requested' })
     expect(await request(item, joined)).toMatchObject({ transfer_id: first, transfer_status: 'requested' })
     expect(await accept(first)).toBe('file_transfer_account_storage_full')
-    await fail(first, 'account_storage_full')
-    // The failed generation is not reused: the joined id starts its own, under its own id.
-    expect(await request(item, joined)).toMatchObject({ transfer_id: joined, transfer_status: 'requested', failure_code: null })
+    await refuse(first, 'account_storage_full')
+    // The retired generation is not reused: the joined id starts its own, under its own id.
+    expect(await request(item, joined)).toMatchObject({ transfer_id: joined, transfer_status: 'requested', transfer_declined: null })
     expect(await accept(joined)).toBe('file_transfer_account_storage_full')
-    await fail(joined, 'account_storage_full')
-    expect(await request(item, joined)).toMatchObject({ transfer_id: joined, transfer_status: 'failed', failure_code: 'account_storage_full' })
+    await refuse(joined, 'account_storage_full')
+    expect(await request(item, joined)).toMatchObject({ transfer_id: joined, transfer_status: 'retired', transfer_declined: 'account_storage_full' })
     await limit({ storage_account_bytes: 100000 })
     const fresh = randomUUID()
     expect(await request(item, fresh)).toMatchObject({ transfer_id: fresh, transfer_status: 'requested' })
     await user(); await db.query('SELECT chat.file_temporary_accept($1,128)', [fresh]); await admin()
     await db.query('SELECT chat.file_temporary_commit($1,$2,$3,128,$4)', [fresh, owner, randomBytes(32).toString('hex'), Buffer.alloc(32, 7).toString('base64')])
-    expect(await request(item, fresh)).toMatchObject({ transfer_id: fresh, transfer_status: 'ready', failure_code: null })
+    expect(await request(item, fresh)).toMatchObject({ transfer_id: fresh, transfer_status: 'ready', transfer_declined: null })
   })
 
-  it('lets no one but the row\'s host fail it, and no client role call the recorder', async () => {
+  it('reaches the reader the same way when the holder itself declines with its own words', async () => {
+    const item = await local(), id = randomUUID()
+    await request(item, id)
+    await user(); await db.query('SELECT chat.file_temporary_decline($1,$2)', [id, 'The file moved on this computer']); await admin()
+    expect(await request(item, id)).toMatchObject({ transfer_id: id, transfer_status: 'retired', transfer_declined: 'The file moved on this computer' })
+    expect(await refuse(id, 'account_storage_full')).toBe(false)
+    expect(await row(id)).toEqual({ state: 'retired', declined: 'The file moved on this computer' })
+  })
+
+  it('lets no one but the row\'s host refuse it, and no client role call the recorder', async () => {
     const item = await local(), id = randomUUID()
     await request(item, id)
     await user(member)
     expect((await reject('SELECT chat.file_temporary_accept($1,128)', [id])).hint).toBe('file_transfer_denied')
-    expect((await reject('SELECT chat.file_temporary_fail($1,$2,$3)', [id, member, 'account_storage_full'])).code).toBe('42501')
+    expect((await reject('SELECT chat.file_temporary_refuse($1,$2,$3)', [id, member, 'account_storage_full'])).code).toBe('42501')
     await admin()
-    for (const stranger of [member, outsider]) expect(await fail(id, 'account_storage_full', stranger)).toBe(false)
-    expect(await row(id)).toEqual({ state: 'requested', failure_code: null })
+    for (const stranger of [member, outsider]) expect(await refuse(id, 'account_storage_full', stranger)).toBe(false)
+    expect(await row(id)).toEqual({ state: 'requested', declined: null })
   })
 
   it('refuses transient codes, including denied, and leaves the row alone', async () => {
     const item = await local(), id = randomUUID()
     await request(item, id)
     for (const code of ['denied', 'rate_limited', 'unavailable', 'not_configured', 'paused', 'conflict', 'expired']) {
-      expect((await reject('SELECT chat.file_temporary_fail($1,$2,$3)', [id, owner, code])).hint).toBe('file_transfer_invalid')
+      expect((await reject('SELECT chat.file_temporary_refuse($1,$2,$3)', [id, owner, code])).hint).toBe('file_transfer_invalid')
     }
     // A stale permit is refused with denied; the host retries it as before and nothing is recorded.
     await db.query("UPDATE chat.file_temporary_transfers SET created_at=now()-interval '1 hour' WHERE id=$1", [id])
     expect(await accept(id)).toBe('file_transfer_denied')
-    expect(await row(id)).toEqual({ state: 'requested', failure_code: null })
+    expect(await row(id)).toEqual({ state: 'requested', declined: null })
   })
 
-  it('never lets a late accept-stage failure undo a later state', async () => {
+  it('records a refusal on a stale permit the host still owns, since only the edge\'s terminal codes reach it', async () => {
+    const item = await local(), id = randomUUID()
+    await request(item, id)
+    await db.query("UPDATE chat.file_temporary_transfers SET created_at=now()-interval '1 hour' WHERE id=$1", [id])
+    expect(await refuse(id, 'too_large')).toBe(true)
+    expect(await row(id)).toEqual({ state: 'retired', declined: 'too_large' })
+  })
+
+  it('never lets a late accept-stage refusal undo a later state', async () => {
     const item = await local(), id = randomUUID()
     await limit({ storage_account_bytes: 100000 })
     await request(item, id)
     await user(); await db.query('SELECT chat.file_temporary_accept($1,128)', [id]); await admin()
-    expect(await fail(id, 'account_storage_full')).toBe(false)
-    expect(await row(id)).toEqual({ state: 'uploading', failure_code: null })
+    expect(await refuse(id, 'account_storage_full')).toBe(false)
+    expect(await row(id)).toEqual({ state: 'uploading', declined: null })
     await db.query('SELECT chat.file_temporary_commit($1,$2,$3,128,$4)', [id, owner, randomBytes(32).toString('hex'), Buffer.alloc(32, 7).toString('base64')])
-    for (const code of ['account_storage_full', 'too_large', 'upload_changed']) expect(await fail(id, code)).toBe(false)
-    expect(await row(id)).toEqual({ state: 'ready', failure_code: null })
-    await db.query("UPDATE chat.file_temporary_transfers SET state='retired' WHERE id=$1", [id])
-    for (const code of ['account_storage_full', 'upload_changed']) expect(await fail(id, code)).toBe(false)
-    expect(await row(id)).toEqual({ state: 'retired', failure_code: null })
+    for (const code of ['account_storage_full', 'too_large', 'upload_changed']) expect(await refuse(id, code)).toBe(false)
+    expect(await row(id)).toEqual({ state: 'ready', declined: null })
   })
 
-  it('fails a commit whose ciphertext changed and leaves the ledger byte-identical', async () => {
+  it('retires a commit whose ciphertext changed, leaves the ledger byte-identical and hands the bytes to the collector', async () => {
     const item = await local(), id = randomUUID()
     await limit({ storage_account_bytes: 100000 })
     await request(item, id)
     await user(); await db.query('SELECT chat.file_temporary_accept($1,128)', [id]); await admin()
     const ledger = () => db.query('SELECT to_jsonb(v) AS v FROM chat.file_transfer_reservations v WHERE id=$1 UNION ALL SELECT to_jsonb(u) FROM chat.file_transfer_uploads u WHERE reservation_id=$1 ORDER BY 1', [id]).then(r => r.rows)
-    const before = await ledger()
+    const before = await ledger(), blob = await value('SELECT blob_id AS v FROM chat.file_temporary_transfers WHERE id=$1', [id])
     expect(before.length).toBeGreaterThan(0)
-    expect(await fail(id, 'too_large')).toBe(false)
-    expect(await fail(id, 'upload_changed')).toBe(true)
+    expect(await refuse(id, 'too_large')).toBe(false)
+    expect(await refuse(id, 'upload_changed')).toBe(true)
     expect(await ledger()).toEqual(before)
-    expect(await request(item, id)).toMatchObject({ transfer_status: 'failed', failure_code: 'upload_changed' })
+    expect(await request(item, id)).toMatchObject({ transfer_status: 'retired', transfer_declined: 'upload_changed' })
     expect(await pending()).toEqual([])
-  })
-
-  it('keeps the code through retirement and hands the bytes to the existing collector', async () => {
-    const item = await local(), id = randomUUID()
-    await limit({ storage_account_bytes: 100000 })
-    await request(item, id)
-    await user(); await db.query('SELECT chat.file_temporary_accept($1,128)', [id]); await admin()
-    await fail(id, 'upload_changed')
-    const blob = await value('SELECT blob_id AS v FROM chat.file_temporary_transfers WHERE id=$1', [id])
-    await db.query("UPDATE chat.file_temporary_transfers SET created_at=now()-interval '1 hour' WHERE id=$1", [id])
-    expect(await value('SELECT chat.file_temporary_expire(500) AS v')).toBeGreaterThanOrEqual(1)
-    expect(await row(id)).toEqual({ state: 'retired', failure_code: 'upload_changed' })
     expect(await value('SELECT count(*)::int AS v FROM chat.file_blob_gc WHERE blob_id=$1', [blob])).toBe(1)
-    expect(await request(item, id)).toMatchObject({ transfer_id: id, transfer_status: 'failed', failure_code: 'upload_changed' })
-  })
-
-  it('accepts a failure code only with failed or retired', async () => {
-    const item = await local(), id = randomUUID()
-    await request(item, id)
-    expect((await reject("UPDATE chat.file_temporary_transfers SET failure_code='too_large' WHERE id=$1", [id])).code).toBe('23514')
-    expect((await reject("UPDATE chat.file_temporary_transfers SET state='failed' WHERE id=$1", [id])).code).toBe('23514')
-    expect((await reject("UPDATE chat.file_temporary_transfers SET state='failed',failure_code='denied' WHERE id=$1", [id])).code).toBe('23514')
   })
 })

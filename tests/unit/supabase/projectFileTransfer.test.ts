@@ -19,7 +19,7 @@ function fixture() {
 }
 describe('temporary file HTTP protocol',()=>{
   it('records a terminal host refusal on the transfer and rethrows it unchanged; transient and denied refusals record nothing',async()=>{
-    const f=fixture(),failed=()=>f.serviceRpc.mock.calls.filter(([fn])=>fn==='file_temporary_fail').map(([,args])=>args)
+    const f=fixture(),failed=()=>f.serviceRpc.mock.calls.filter(([fn])=>fn==='file_temporary_refuse').map(([,args])=>args)
     for(const code of ['account_storage_full','group_storage_full','too_large']) {
       f.userRpc.mockResolvedValueOnce({data:null,error:{message:code,hint:'file_transfer_'+code}})
       await expect(handleProjectFiles(f.deps,host,'file-accept',{transfer_id:transfer,ciphertext_bytes:128})).rejects.toMatchObject({code})
@@ -40,13 +40,13 @@ describe('temporary file HTTP protocol',()=>{
     const f=fixture()
     f.userRpc.mockResolvedValueOnce({data:null,error:{message:'account_storage_full',hint:'file_transfer_account_storage_full'}})
     const service=f.serviceRpc.getMockImplementation()!
-    f.serviceRpc.mockImplementation(async(fn,args)=>fn==='file_temporary_fail'?{data:null,error:{message:'connection reset'}}:service(fn,args))
+    f.serviceRpc.mockImplementation(async(fn,args)=>fn==='file_temporary_refuse'?{data:null,error:{message:'connection reset'}}:service(fn,args))
     await expect(handleProjectFiles(f.deps,host,'file-accept',{transfer_id:transfer,ciphertext_bytes:128})).rejects.toMatchObject({status:429,code:'account_storage_full'})
-    expect(f.serviceRpc).toHaveBeenCalledWith('file_temporary_fail',{p_id:transfer,p_host:host,p_code:'account_storage_full'})
-    expect(f.deps.log).toHaveBeenCalledWith('temporary_fail_unrecorded',expect.objectContaining({transfer_id:transfer,code:'account_storage_full'}))
+    expect(f.serviceRpc).toHaveBeenCalledWith('file_temporary_refuse',{p_id:transfer,p_host:host,p_code:'account_storage_full'})
+    expect(f.deps.log).toHaveBeenCalledWith('temporary_refusal_unrecorded',expect.objectContaining({transfer_id:transfer,code:'account_storage_full'}))
   })
-  it('passes the reader its failure code from file-request, with or without a download id',async()=>{
-    const f=fixture(),failed={status:'ready',transfer_id:transfer,transfer_status:'failed',failure_code:'account_storage_full'}
+  it('passes the reader the refusal it was retired with, from file-request, with or without a download id',async()=>{
+    const f=fixture(),failed={status:'ready',transfer_id:transfer,transfer_status:'retired',transfer_declined:'account_storage_full'}
     f.userRpc.mockResolvedValue({data:failed,error:null})
     expect(await handleProjectFiles(f.deps,host,'file-request',{ref:{item_id:transfer},request_id:transfer})).toEqual(failed)
     expect(await handleProjectFiles(f.deps,host,'file-request',{ref:{item_id:transfer},request_id:transfer,download_request_id:download})).toEqual({...failed,download:null})

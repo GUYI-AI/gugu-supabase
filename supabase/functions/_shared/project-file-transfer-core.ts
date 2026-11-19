@@ -54,8 +54,8 @@ export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:
     // Recording is best effort on top of the refusal: if it fails, the host still gets its own refusal and the reader
     // waits as before.
     if(error instanceof Refusal&&TERMINAL[route].has(error.code))
-      await call(deps.serviceRpc,'file_temporary_fail',{p_id:transfer,p_host:user,p_code:error.code})
-        .catch(failure=>deps.log('temporary_fail_unrecorded',{transfer_id:transfer,code:error.code,error:String(failure)}))
+      await call(deps.serviceRpc,'file_temporary_refuse',{p_id:transfer,p_host:user,p_code:error.code})
+        .catch(failure=>deps.log('temporary_refusal_unrecorded',{transfer_id:transfer,code:error.code,error:String(failure)}))
     throw error
   }
 }
