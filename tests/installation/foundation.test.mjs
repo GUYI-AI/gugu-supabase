@@ -17,6 +17,7 @@ import { installConnectionFollowupsWithEvidence } from './platform-connection-fo
 import { installConnectionCatalogWithEvidence, releasedDirectoryRow } from './platform-connection-catalog-fixture.mjs'
 import { humanDmFriendshipVersion, installHumanDmFriendshipWithEvidence } from './human-dm-friendship-fixture.mjs'
 import { accountAuditCronNamesVersion, installAccountAuditCronNames } from './account-audit-cron-fixture.mjs'
+import { quotaLockOrderVersion, installQuotaLockOrderWithEvidence } from './attachment-quota-preservation.mjs'
 
 // Deliberately requires an empty, disposable Supabase PostgreSQL 17 instance.
 // Never resets schemas, migration history, or user data to make a test pass.
@@ -48,7 +49,12 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     const validationRelease = releases.find((release) => release.constraintValidation)
     assert.ok(deviceCheckRelease && validationRelease)
     let widgetUpgrade
+    const quotaRelease = releases.find(release => release.version === quotaLockOrderVersion)
+    assert.ok(quotaRelease, 'quota lock order release and its 24-function preservation audit are required')
     const releaseQuery = async (sql) => {
+      if (sql.includes(quotaRelease.sql)) {
+        return installQuotaLockOrderWithEvidence({ db, query, sql })
+      }
       const questionCardRelease = releases.find(release => release.version.endsWith('_agent_question_card_settlement'))
       if (questionCardRelease && sql.includes(questionCardRelease.sql)) {
         const executionAcl = () => query(`SELECT array_agg(permission::text ORDER BY permission::text) AS acl
