@@ -218,6 +218,11 @@ async function issueUpload(deps: AttachmentsDeps, userId: string, body: Record<s
   }
   const seconds=(Date.parse(permit.expires_at)-Date.parse(permit.signed_at))/1000
   const form=await store.upload(permit.staging_key,new Date(permit.signed_at),{maxBytes:Number(permit.max_bytes),expiresSeconds:seconds})
+    .catch(error => {
+      if (error instanceof ObjectStorageError && error.status === 409 && error.code === 'upload_used')
+        throw new Refusal(409, 'upload_used', error.message)
+      throw new Refusal(502, 'failed', 'The storage provider could not sign the upload')
+    })
   return { staging_key:permit.staging_key,url:form.url,fields:form.fields,...(form.method?{method:form.method}:{}),
     ...(form.headers?{headers:form.headers}:{}),expires_at:form.expiresAt,max_bytes:Number(permit.max_bytes) }
 }
@@ -421,7 +426,14 @@ function stagingOf(body: Record<string, unknown>, userId: string): string {
 
 /** 暂存的字节:算哈希、存进 OSS 的最终位置、登记成 blob(提交和放进文件夹共用)。暂存已经没了 ⇒ 交给库认上一次的登记。 */
 async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey: string, declaredType: string | null, fileName: string, settle?: { pendingKey: string }) {
-  const permit=await call(deps.serviceRpc,'file_managed_upload_for',{p_key:stagingKey,p_user:userId}) as { max_bytes:number }
+  const permit=await call(deps.serviceRpc,'file_managed_upload_for',{p_key:stagingKey,p_user:userId}) as { max_bytes:number; blob_id?:string | null; staging_deleted?:boolean }
+  if (settle && permit.blob_id && permit.staging_deleted) {
+    await call(deps.serviceRpc, 'file_blob_settle', {
+      p_uploader: userId, p_pending_key: settle.pendingKey, p_upload_key: stagingKey,
+      p_sha256: null, p_size_bytes: null, p_content_type: null,
+    })
+    return
+  }
   const store=objectStorage(deps)
   let read: InspectedObject | null = null
   try {
@@ -491,8 +503,20 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
     if (created && !(await objectStorage(deps).exists(finalKey))) await copy()
     if (!settle) await call(deps.serviceRpc,'file_managed_upload_registered',{p_key:stagingKey,p_user:userId,
       p_document:document.kind === 'document' ? {text:document.text,content_type:document.contentType} : null})
-    // Keep staging immutable until the permit closes: an early delete would let the same policy recreate it.
-    // Cleanup retains the reservation until terminal upload evidence and physical deletion are confirmed.
+    // Registration settled the reservation, so the staging copy is redundant. A replay of the still-valid signature can
+    // recreate it uncounted until the staging lifecycle removes it. A failed delete leaves it to that lifecycle.
+    await dropStaging(deps, stagingKey)
+  }
+}
+
+async function dropStaging(deps: AttachmentsDeps, stagingKey: string) {
+  try {
+    const store = objectStorage(deps)
+    await store.remove(stagingKey)
+    if (await store.exists(stagingKey)) throw new Error('staging object still present after delete')
+    await call(deps.serviceRpc, 'file_managed_upload_closed', { p_key: stagingKey, p_evidence: 'staging-absent' })
+  } catch (error) {
+    deps.log('staging_delete_failed', { key: stagingKey, error: String(error) })
   }
 }
 

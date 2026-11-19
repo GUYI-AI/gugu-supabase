@@ -9,7 +9,7 @@ const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
 const settings = {
   inventory_ready: true, storage_global_bytes: 100000, storage_account_bytes: 100000, storage_group_bytes: 100000,
   download_global_bytes: 100000, download_account_bytes: 100000, download_group_bytes: 100000,
-  upload_permit_seconds: 300, sign_window_seconds: 60, sign_account_count: 100, sign_group_count: 100,
+  upload_permit_seconds: 300, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600, sign_window_seconds: 60, sign_account_count: 100, sign_group_count: 100,
   file_max_bytes: 10000, storage_warning_percent: 80, temporary_group_bytes: 10000,
 }
 const PUBLISH = 'SELECT chat.file_device_publish(p_item=>$1,p_chat=>$2,p_device=>$3,p_path=>$4,p_sha=>$5,p_size=>$6,p_filename=>$7,p_type=>$8,p_expected=>$9,p_project=>$10) AS r'

@@ -5,7 +5,7 @@ const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
 const settings = {
   inventory_ready:true, storage_global_bytes:100000, storage_account_bytes:100000, storage_group_bytes:100000,
   download_global_bytes:100000, download_account_bytes:100000, download_group_bytes:100000,
-  upload_permit_seconds:120, sign_window_seconds:60, sign_account_count:100, sign_group_count:100,
+  upload_permit_seconds:120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600, sign_window_seconds:60, sign_account_count:100, sign_group_count:100,
   file_max_bytes:10000,
   large_file_bytes:50, large_file_idle_seconds:30*86400, storage_warning_percent:80,
 }
@@ -285,8 +285,8 @@ describe('non-project idle expiry, not quota eviction',()=>{
     expect((await reject('SELECT * FROM chat.file_transfer_storage_refs')).code).toBe('42501')
     expect((await reject('SELECT chat.file_transfer_group_usage($1,$2)',[group,member])).hint).toBe('file_transfer_denied')
     await user()
-    expect((await db.query('SELECT chat.file_transfer_group_usage($1,$2) AS r',[group,owner])).rows[0].r).toEqual({used_and_reserved_bytes:120,limit_bytes:100000,warning:false,full:false})
-    await service();await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"storage_group_bytes\":120}'")
+    expect((await db.query('SELECT chat.file_transfer_group_usage($1,$2) AS r',[group,owner])).rows[0].r).toEqual({used_and_reserved_bytes:60,limit_bytes:100000,warning:false,full:false})
+    await service();await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"storage_group_bytes\":60}'")
     await user();expect((await db.query('SELECT chat.file_transfer_group_usage($1,$2) AS r',[group,owner])).rows[0].r).toMatchObject({warning:true,full:true})
   })
 })

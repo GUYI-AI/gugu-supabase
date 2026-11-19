@@ -72,7 +72,7 @@ describe('project local metadata and exact references, kept by the device that s
     // prepare reads the global transfer settings first; the transaction rolls this back.
     await service()
     await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=chat.file_transfer_limits.settings||EXCLUDED.settings",
-      [{inventory_ready:true,file_max_bytes:1000,upload_permit_seconds:120}])
+      [{inventory_ready:true,file_max_bytes:1000,upload_permit_seconds:120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600}])
     const PREPARE='SELECT chat.file_managed_upload_prepare($1,$2,$3,$4) AS r'
     for(const actor of [member,owner]) for(const kind of [null,'application/pdf','image/png']) {
       await user(actor)
@@ -82,7 +82,7 @@ describe('project local metadata and exact references, kept by the device that s
   it('refuses an upload over the configured size with that size in bytes',async()=>{
     await service()
     await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=chat.file_transfer_limits.settings||EXCLUDED.settings",
-      [{inventory_ready:true,file_max_bytes:1000,upload_permit_seconds:120}])
+      [{inventory_ready:true,file_max_bytes:1000,upload_permit_seconds:120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600}])
     await user(member)
     const refused=await fails('SELECT chat.file_managed_upload_prepare($1,$2,$3,$4)',[group,member,1001,null])
     expect([refused.message,refused.hint]).toEqual(['File exceeds configured upload size of 1000 bytes','file_transfer_too_large'])
@@ -387,7 +387,7 @@ describe('temporary generations reuse managed budgets and private key issuance',
   const COMMIT='SELECT chat.file_temporary_commit($1,$2,$3,$4,$5)'
   const cfg={inventory_ready:true,storage_global_bytes:10000,storage_account_bytes:10000,storage_group_bytes:10000,
     download_global_bytes:10000,download_account_bytes:10000,download_group_bytes:10000,
-    upload_permit_seconds:120,sign_window_seconds:60,sign_account_count:100,sign_group_count:100,file_max_bytes:1000,temporary_group_bytes:10000}
+    upload_permit_seconds:120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600,sign_window_seconds:60,sign_account_count:100,sign_group_count:100,file_max_bytes:1000,temporary_group_bytes:10000}
   beforeEach(async()=>{
     await publish();await service()
     const baseline=Number((await db.query("SELECT chat.file_transfer_usage('upload','global','*') AS n")).rows[0].n)
@@ -505,7 +505,7 @@ describe('temporary generations reuse managed budgets and private key issuance',
     await user(member)
     expect((await db.query('SELECT * FROM chat.workspace_move_as($1,$2,NULL,$3)',[item,member,'changed.bin'])).rows[0]).toMatchObject({filename:'changed.bin'})
   })
-  it('stops acceptance at the existing storage budget and retains an abandoned unverified upload allowance',async()=>{
+  it('stops acceptance at the existing storage budget and holds an abandoned unverified upload until its release time',async()=>{
     const {transfer_id:id}=await request();await service()
     await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"storage_group_bytes\":127}'")
     await user()
@@ -514,7 +514,10 @@ describe('temporary generations reuse managed budgets and private key issuance',
     await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"storage_group_bytes\":128}'")
     await accept(id);await service()
     await db.query("UPDATE chat.file_transfer_reservations SET expires_at=now()-interval '1 day' WHERE id=$1",[id])
-    expect(Number((await db.query("SELECT chat.file_transfer_usage('upload','group',$1) AS n",[group])).rows[0].n)).toBe(128)
+    const usage=async()=>(await db.query("SELECT chat.file_transfer_usage('upload','group',$1)::int AS storage,chat.file_temporary_usage($1)::int AS temporary",[group])).rows[0]
+    expect(await usage()).toEqual({storage:128,temporary:128})
+    await db.query("UPDATE chat.file_transfer_reservations SET release_at=now()-interval '1 second' WHERE id=$1",[id])
+    expect(await usage()).toEqual({storage:0,temporary:0})
   })
   it('uses the actual issued upload deadline after the holding device accepts, including a delayed acceptance',async()=>{
     const {transfer_id:id}=await request();await service()

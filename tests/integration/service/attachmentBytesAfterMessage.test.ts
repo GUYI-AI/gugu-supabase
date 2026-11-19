@@ -12,7 +12,7 @@ const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
 const settings = {
   inventory_ready:true, storage_global_bytes:100000, storage_account_bytes:100000, storage_group_bytes:100000,
   download_global_bytes:100000, download_account_bytes:100000, download_group_bytes:100000,
-  upload_permit_seconds:120, sign_window_seconds:60, sign_account_count:100, sign_group_count:100, file_max_bytes:10000,
+  upload_permit_seconds:120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600, sign_window_seconds:60, sign_account_count:100, sign_group_count:100, file_max_bytes:10000,
 }
 let db:pg.Client, sender:string, receiver:string, outsider:string, group:string
 async function user(id=sender) {
@@ -157,7 +157,7 @@ describe('the message is there before its bytes', ()=>{
       [sender,send.key,send.digest,'image/png'])).rows[0].r
     if (registered) await db.query('SELECT chat.file_managed_upload_registered($1,$2)',[send.key,sender])
     const revisions=(await db.query("SELECT count(*)::int AS n FROM chat.account_revisions WHERE event='message_file_changed' AND resource_key->>'entity_id'=$1",[send.message])).rows[0].n
-    // The client has no successful answer and resumes from its local copy, with a new key on every attempt.
+    // Older clients may resume a lost response with a new key on each attempt.
     for (let attempt=0;attempt<3;attempt++) {
       const uploadKey=await permit()
       expect(await settle(send.key,send.digest,60,uploadKey)).toMatchObject({status:'ready',blob_id:first.blob_id,created:false})
@@ -166,17 +166,59 @@ describe('the message is there before its bytes', ()=>{
         .toEqual({blob_id:first.blob_id,receipt_blob:first.blob_id,actual_bytes:'60',keep:'temporary'})
       expect(await retention(send.message,'temporary')).toBe(true)
       expect(await settle(send.key,send.digest,60,uploadKey), 'the resumed finish itself is repeatable').toMatchObject({status:'ready',blob_id:first.blob_id})
+      await db.query("SELECT chat.file_managed_upload_closed($1,'isolated-cleanup')",[uploadKey])
+      await db.query("UPDATE chat.file_blob_uploads SET expires_at=now()-interval '1 second' WHERE staging_key=$1",[uploadKey])
+      await db.query('SELECT chat.file_blob_sweep()')
+      expect((await db.query('SELECT 1 FROM chat.file_blob_uploads WHERE staging_key=$1',[uploadKey])).rowCount).toBe(0)
+      expect((await db.query('SELECT chat.file_blob_settle($1,$2,$3,NULL,NULL,NULL) AS r',[sender,send.key,uploadKey])).rows[0].r)
+        .toMatchObject({status:'ready',blob_id:first.blob_id,created:false})
+      expect((await db.query('SELECT 1 FROM chat.file_blob_uploads WHERE staging_key=$1',[uploadKey])).rowCount).toBe(0)
+      // The resumed key's link to its declaration is what lets this replay answer; without it the replay is refused.
+      expect((await db.query('SELECT publication_key FROM chat.file_staging_publication_sources WHERE staging_key=$1',[uploadKey])).rows)
+        .toEqual([{publication_key:send.key}])
+      await db.query('SAVEPOINT unlinked')
+      await db.query('DELETE FROM chat.file_staging_publication_sources WHERE staging_key=$1',[uploadKey])
+      expect((await reject('SELECT chat.file_blob_settle($1,$2,$3,NULL,NULL,NULL)',[sender,send.key,uploadKey])).hint).toBe('file_transfer_conflict')
+      await db.query('ROLLBACK TO SAVEPOINT unlinked')
     }
     expect(await resolve(send.message)).toMatchObject({status:'ready',sha256:send.digest})
     await service()
     expect((await db.query('SELECT count(*)::int AS n FROM chat.file_transfer_storage WHERE blob_id=$1',[first.blob_id])).rows[0].n).toBe(1)
     expect((await db.query("SELECT count(*)::int AS n FROM chat.account_revisions WHERE event='message_file_changed' AND resource_key->>'entity_id'=$1",[send.message])).rows[0].n).toBe(revisions)
   })
+  it('reads a settled declaration for deduplicated bytes only while its own receipt is valid', async()=>{
+    const first=await declaredSend(), second=await declaredSend(first.digest)
+    const blob=(await settle(first.key,first.digest)).blob_id
+    expect((await settle(second.key,second.digest)).blob_id).toBe(blob)
+    await service()
+    const replay='SELECT chat.file_blob_settle($1,$2,$3,NULL,NULL,NULL) AS r', args=[sender,first.key,first.key]
+    expect((await reject(replay,args)).hint).toBe('file_transfer_conflict')
+    for (const key of [first.key,second.key]) await db.query("SELECT chat.file_managed_upload_closed($1,'isolated-cleanup')",[key])
+    const snapshot=async()=>(await db.query(`SELECT
+      (SELECT jsonb_agg(r ORDER BY r.id) FROM chat.file_transfer_reservations r WHERE r.subject=ANY($1)) AS reservations,
+      (SELECT jsonb_agg(u ORDER BY u.staging_key) FROM chat.file_transfer_uploads u WHERE u.staging_key=ANY($1)) AS uploads,
+      (SELECT jsonb_agg(b ORDER BY b.staging_key) FROM chat.file_blob_uploads b WHERE b.staging_key=ANY($1)) AS receipts,
+      (SELECT jsonb_agg(f ORDER BY to_jsonb(f)) FROM chat.file_transfer_storage_refs f
+       JOIN chat.file_transfer_storage s ON s.id=f.storage_id WHERE s.blob_id=$2) AS storage_refs`,
+    [[first.key,second.key],blob])).rows[0]
+    const before=await snapshot()
+    expect((await db.query(replay,args)).rows[0].r).toMatchObject({status:'ready',blob_id:blob})
+    expect((await reject(replay,[sender,first.key,second.key])).hint).toBe('file_transfer_conflict')
+    expect((await reject(replay,[outsider,first.key,second.key])).hint).toBe('file_transfer_conflict')
+    expect(await snapshot()).toEqual(before)
+    for (const message of [first.message,second.message]) expect(await resolve(message)).toMatchObject({status:'ready',sha256:first.digest})
+    await service()
+    await db.query("UPDATE chat.file_blob_uploads SET expires_at=now()-interval '1 second' WHERE staging_key=$1",[first.key])
+    expect((await reject(replay,args)).hint).toBe('file_transfer_conflict')
+    await db.query('SELECT chat.file_blob_sweep()')
+    expect((await reject(replay,args)).hint).toBe('file_transfer_conflict')
+  })
   it('a settled retry refuses different bytes and a key already registered for another file', async()=>{
     const first=await declaredSend(), other=await declaredSend()
     await settle(first.key,first.digest); await settle(other.key,other.digest)
     await service()
-    for (const [key,digest,size] of [[first.key,sha(),60],[first.key,first.digest,61],[other.key,first.digest,60]]) {
+    await db.query("SELECT chat.file_managed_upload_closed($1,'isolated-cleanup')",[other.key])
+    for (const [key,digest,size] of [[first.key,sha(),60],[first.key,first.digest,61],[other.key,first.digest,60],[other.key,null,null]]) {
       expect((await reject('SELECT chat.file_blob_settle($1,$2,$3,$4,$5,$6)',[sender,first.key,key,digest,size,'image/png'])).hint).toBe('file_transfer_conflict')
     }
     expect(await resolve(other.message)).toMatchObject({status:'ready',sha256:other.digest})

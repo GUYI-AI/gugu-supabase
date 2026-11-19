@@ -6,7 +6,7 @@ let db:pg.Client,owner:string,group:string,prior:unknown,ids:string[],globalStor
 const items:string[]=[],blobs:string[]=[]
 const settings={inventory_ready:true,storage_global_bytes:100,storage_account_bytes:100,storage_group_bytes:100,
   download_global_bytes:100,download_account_bytes:100,download_group_bytes:100,
-  upload_permit_seconds:120,sign_window_seconds:60,sign_account_count:100,sign_group_count:100}
+  upload_permit_seconds:120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600,sign_window_seconds:60,sign_account_count:100,sign_group_count:100}
 beforeAll(async()=>{
   if (!['127.0.0.1','localhost','[::1]'].includes(new URL(url).hostname)) throw new Error('Concurrency contracts require an isolated loopback database')
   db=new pg.Client({connectionString:url});await db.connect()

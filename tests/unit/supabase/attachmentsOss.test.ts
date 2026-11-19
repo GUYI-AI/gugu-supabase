@@ -28,6 +28,7 @@ import {
   handleShare,
   handleGc,
   handleUpload,
+  objectStorage,
   handleUrls,
   Refusal,
   refusalFromDb,
@@ -314,7 +315,7 @@ function fakes(opts: {
       if (fn === 'file_blob_gc_run_begin') return { data: { acquired: true, token: '11111111-1111-4111-8111-111111111111', batch_limit: 50, concurrency: 1 }, error: null }
       if (fn === 'file_blob_gc_run_renew' || fn === 'file_blob_gc_run_end') return { data: true, error: null }
       if (fn==='file_managed_upload_for') {controls.push({as:'service',fn,args});return {data:{max_bytes:MAX_ATTACHMENT_BYTES},error:null}}
-      if (fn==='file_managed_upload_registered'||fn==='file_transfer_expire'||fn==='file_temporary_expire'||fn==='file_managed_upload_parts_claim') {controls.push({as:'service',fn,args});return {data:null,error:null}}
+      if (fn==='file_managed_upload_registered'||fn==='file_managed_upload_closed'||fn==='file_transfer_expire'||fn==='file_temporary_expire'||fn==='file_managed_upload_parts_claim') {controls.push({as:'service',fn,args});return {data:null,error:null}}
       if (fn==='file_transfer_settings') {controls.push({as:'service',fn,args});return {data:{},error:null}}
       rpcs.push({ as: 'service', fn, args })
       if (fn === 'file_blob_register') {
@@ -338,16 +339,19 @@ function fakes(opts: {
   }
   return { deps, calls, rpcs, controls, logs, events, removed, bucket, order }
 }
-/** The quota/actor guard must precede every byte read. Staging remains immutable and charged. */
+/** The quota/actor guard must precede every byte read. Registration settles the reservation; the staging copy is then
+ *  deleted and recorded as gone only after the provider confirms it is absent. */
 function expectManagedCommit(f: ReturnType<typeof fakes>, publication: string, start = 0) {
   if (start) expect(f.order.slice(0, start)).toEqual(['user:file_managed_upload_prepare','object:GET','user:file_managed_upload_as'])
   expect(f.order.slice(start, start + 3)).toEqual(['user:file_managed_upload_scope', 'service:file_managed_upload_for', 'object:GET'])
   const registered = f.order.indexOf('service:file_managed_upload_registered')
   expect(registered).toBeGreaterThan(f.order.indexOf('service:file_blob_register'))
   expect(f.order.indexOf('user:' + publication)).toBeGreaterThan(registered)
-  expect(f.controls.some(r => r.fn === 'file_managed_upload_closed')).toBe(false)
-  expect(f.calls.some(c => c.method === 'DELETE' && c.url.includes('/staging/'))).toBe(false)
-  expect(f.bucket.staging).not.toBeNull()
+  const closed = f.order.indexOf('service:file_managed_upload_closed')
+  expect(closed).toBeGreaterThan(registered)
+  expect(f.controls.find(r => r.fn === 'file_managed_upload_closed')?.args).toEqual({ p_key: expect.stringMatching(/^staging\//), p_evidence: 'staging-absent' })
+  expect(f.calls.some(c => c.method === 'DELETE' && c.url.includes('/staging/'))).toBe(true)
+  expect(f.bucket.staging).toBeNull()
 }
 const pngBytes = () => {
   const b = new Uint8Array(64)
@@ -365,13 +369,23 @@ describe('managed authorization before bytes or signatures', () => {
     expect(f.controls).toEqual([])
     expect(f.calls).toEqual([])
   })
+  it.each([
+    [400, null, 502, 'failed'], [403, null, 502, 'failed'], [409, null, 502, 'failed'],
+    [409, 'upload_used', 409, 'upload_used'],
+  ] as const)('reports signer failure %s %s at the upload boundary', async (status, code, outwardStatus, outwardCode) => {
+    const f = fakes()
+    f.deps.objects = objectStorage(f.deps)
+    f.deps.objects.uploadBounds = async (bytes, seconds) => ({ maxBytes: bytes, expiresSeconds: seconds })
+    f.deps.objects.upload = async () => { throw new ObjectStorageError(status, code, 'signing failed') }
+    await expect(handleUpload(f.deps, USER, { size_bytes: 5 })).rejects.toMatchObject({ status: outwardStatus, code: outwardCode })
+  })
   it('refuses a provider lifetime mismatch before issuing an upload reservation or URL',async()=>{
     const f=fakes()
     const store=await import('../../../supabase/functions/_shared/attachment-object-storage')
     let signed=false
     f.deps.objects=store.supabaseObjectStorage({url:'https://db.example',serviceKey:'fixture',bucket:'attachments',
-      fetch:async()=>new Response(JSON.stringify({file_size_limit:MAX_ATTACHMENT_BYTES})),
-      signUpload:async()=>{signed=true;return 'https://db.example/scoped'},signDownload:async()=>'',
+      fetch:async(url)=>{ signed ||= url.includes('/object/upload/sign/'); return Response.json({file_size_limit:MAX_ATTACHMENT_BYTES}) },
+      signDownload:async()=>'',
     })
     await expect(handleUpload(f.deps,USER,{size_bytes:5})).rejects.toMatchObject({status:503,code:'not_configured'})
     expect(signed).toBe(false)
@@ -384,8 +398,8 @@ describe('managed authorization before bytes or signatures', () => {
       ?{data:{max_bytes:MAX_ATTACHMENT_BYTES,permit_seconds:7200},error:null}:original(fn,args)
     let signed=false
     f.deps.objects=store.supabaseObjectStorage({url:'https://db.example',serviceKey:'fixture',bucket:'attachments',
-      fetch:async()=>new Response(JSON.stringify({file_size_limit:MAX_ATTACHMENT_BYTES+1})),
-      signUpload:async()=>{signed=true;return 'https://db.example/scoped'},signDownload:async()=>'',
+      fetch:async(url)=>{ signed ||= url.includes('/object/upload/sign/'); return Response.json({file_size_limit:MAX_ATTACHMENT_BYTES+1}) },
+      signDownload:async()=>'',
     })
     await expect(handleUpload(f.deps,USER,{size_bytes:5})).rejects.toMatchObject({status:503,code:'not_configured'})
     expect(signed).toBe(false)
@@ -439,16 +453,16 @@ describe('提交', () => {
     expect(rpcs[0]!.args).toMatchObject({ p_sha256: createHash('sha256').update(bytes).digest('hex'), p_size_bytes: size })
   })
 
-  it('读暂存(内网)→ 自己算 sha256 → 复制到 <aa>/<sha256>(图片类型、一年 immutable)→ 登记 → 保留暂存及额度 → 以调用者身份发消息', async () => {
+  it('读暂存(内网)→ 自己算 sha256 → 复制到 <aa>/<sha256>(图片类型、一年 immutable)→ 登记 → 删掉暂存、预留已结清 → 以调用者身份发消息', async () => {
     const bytes = pngBytes()
     const f = fakes({ object: bytes })
     const { deps, calls, rpcs } = f
     const message = await handleCommit(deps, USER, commitBody({ content_type: 'text/html' }))
     expectManagedCommit(f, 'attachment_commit')
-    expect(f.bucket.staging?.bytes).toEqual(bytes)
     expect(message).toEqual({ id: 'm1', file_version: 1 })
     const sha = createHash('sha256').update(bytes).digest('hex')
-    expect(calls.map((c) => `${c.method} ${c.url.replace(/\?.*$/, '')}`)).toEqual([
+    expect(calls.slice(3).map((c) => `${c.method} ${new URL(c.url).pathname}`)).toEqual([`DELETE /${STAGING}`, `HEAD /${STAGING}`])
+    expect(calls.slice(0, 3).map((c) => `${c.method} ${c.url.replace(/\?.*$/, '')}`)).toEqual([
       `GET https://gugu-files-test.oss-cn-wulanchabu-internal.aliyuncs.com/${STAGING}`,
       `PUT https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/${sha.slice(0, 2)}/${sha}`,
       `HEAD https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/${sha.slice(0, 2)}/${sha}`,
@@ -517,13 +531,23 @@ describe('提交', () => {
     const raced = fakes({ object: bytes, afterRegister: (b) => void b.finals.clear() })
     await handleCommit(raced.deps, USER, commitBody())
     expectManagedCommit(raced, 'attachment_commit')
-    expect(raced.calls.map((c) => c.method)).toEqual(['GET', 'PUT', 'HEAD', 'PUT'])
+    expect(raced.calls.map((c) => c.method)).toEqual(['GET', 'PUT', 'HEAD', 'PUT', 'DELETE', 'HEAD'])
     expect(raced.bucket.finals.get(final)).toEqual(bytes)
-    expect(raced.bucket.staging?.bytes).toEqual(bytes)
+    expect(raced.bucket.staging).toBeNull()
     const reused = fakes({ object: bytes, registerCreated: false })
     await handleCommit(reused.deps, USER, commitBody())
     expectManagedCommit(reused, 'attachment_commit')
-    expect(reused.calls.map((c) => c.method)).toEqual(['GET', 'PUT'])
+    expect(reused.calls.map((c) => c.method)).toEqual(['GET', 'PUT', 'DELETE', 'HEAD'])
+  })
+
+  it('a staging copy that cannot be deleted leaves the commit successful and is not recorded as gone', async () => {
+    const f = fakes({ object: pngBytes() })
+    const fetch = f.deps.fetch
+    f.deps.fetch = (url, init) => init?.method === 'DELETE' ? Promise.resolve(new Response('', { status: 500 })) : fetch(url, init)
+    expect(await handleCommit(f.deps, USER, commitBody())).toEqual({ id: 'm1', file_version: 1 })
+    expect(f.logs).toContain('staging_delete_failed')
+    expect(f.controls.some(r => r.fn === 'file_managed_upload_closed')).toBe(false)
+    expect(f.bucket.staging).not.toBeNull()
   })
 
   it('暂存没了(上一次已经登记、删了暂存):不复制不登记,交给库认那次登记;超过许可的 25 MiB:413,什么都不登记;暂存不是自己的:400', async () => {
