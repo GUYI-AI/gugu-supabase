@@ -1,4 +1,4 @@
--- Roll back 20261119220000: open upload holds count again until an explicit closure, and registration no longer settles.
+-- Roll back 20261119230000: open upload holds count again until an explicit closure, and registration no longer settles.
 -- Kept: file_private.upload_release_backup_20261119, and reservations already settled by a registration or a
 -- confirmed staging removal (their stored bytes are counted as storage, so the ledger stays correct).
 -- Not restored: the committed-staging cleanup worker the migration removed. It was disabled by default and is not
