@@ -50,11 +50,13 @@ async function ownerOnlyGroup(): Promise<string> {
   await database.query(`SELECT chat.create_gugu_group($1,'Project',$2,'[]'::jsonb)`, [id, owner])
   return id
 }
-async function provision(groupChatId: string, agentId = randomUUID(), caller = owner) {
+async function provision(groupChatId: string, agentId = randomUUID(), caller = owner,
+  options: { newGroupId?: string | null; withSerial?: boolean } = {}) {
   await asUser(caller)
   const row = (await database.query<{ group_chat_id: string; prior_group_state: string; group_created: boolean }>(
-    'SELECT * FROM identity.provision_taskpage_agent($1,$2,$3,$4,$5,NULL,$6,$7,$8)',
-    [agentId, 'Claude', 'serial', 'claude-code', `dev-${caller}`, groupChatId, randomUUID(), 'Project'],
+    `SELECT * FROM identity.provision_taskpage_agent($1,$2,$3,$4,$5,NULL,$6,$7,$8${options.withSerial ? ',$9' : ''})`,
+    [agentId, 'Claude', 'serial', 'claude-code', `dev-${caller}`, groupChatId,
+      options.newGroupId === undefined ? randomUUID() : options.newGroupId, 'Project', ...(options.withSerial ? ['Claude'] : [])],
   )).rows[0]!
   return { agentId, row }
 }
@@ -137,6 +139,47 @@ describe('任务 agent 进群', () => {
     expect(await joinNotices(group)).toEqual([])
   })
 
+  it.each([false, true])('archived project retains its group and identity until explicit restoration (serial overload: %s)', async (withSerial) => {
+    const group = await ownerOnlyGroup()
+    const existing = await provision(group)
+    await asUser(owner)
+    await database.query('SELECT chat.set_agent_listen_mode_as($1,$2,$3,$4)', [group, existing.agentId, 'passive', owner])
+    await database.query('SELECT chat.archive_group_as($1,$2)', [group, owner])
+    const agentId = randomUUID()
+    const replacement = randomUUID()
+    const attempt = await provision(group, agentId, owner, { newGroupId: replacement, withSerial })
+    expect(attempt.row).toMatchObject({ group_chat_id: '', group_created: false, prior_group_state: 'join_failed:group_archived' })
+    // The fresh identity survives the refused enrollment; no new project group or
+    // membership is produced, including on retries without a replacement ID.
+    const retry = await provision(group, agentId, owner, { newGroupId: null, withSerial })
+    expect(retry.row).toEqual(attempt.row)
+    await asUser(owner)
+    const identity = (await database.query<{ id: string; display_name: string }>(
+      'SELECT id,display_name FROM identity.users WHERE id=$1 AND owner_user_id=auth.uid()::text', [agentId],
+    )).rows[0]
+    expect(identity?.id).toBe(agentId)
+    expect(await seat(group, agentId)).toBeUndefined()
+    expect(await seat(group, existing.agentId)).toEqual({ listen_mode: 'passive' })
+    expect(await memberCount(group)).toBe(2)
+    await asService()
+    expect((await database.query('SELECT id FROM chat.chats WHERE id=$1', [replacement])).rows).toEqual([])
+    expect((await database.query('SELECT status FROM chat.chats WHERE id=$1', [group])).rows).toEqual([{ status: 'archived' }])
+    expect((await database.query('SELECT id FROM chat.group_join_requests WHERE chat_id=$1 AND requester_user_id=$2', [group, agentId])).rows).toEqual([])
+
+    await asUser(owner)
+    await database.query('SELECT chat.restore_group_as($1,$2)', [group, owner])
+    const restored = await provision(group, agentId, owner, { newGroupId: replacement, withSerial })
+    expect(restored.row).toMatchObject({ group_chat_id: group, group_created: false, prior_group_state: 'active' })
+    expect(await seat(group, agentId)).toEqual({ listen_mode: 'active' })
+    expect(await seat(group, existing.agentId)).toEqual({ listen_mode: 'passive' })
+    expect(await memberCount(group)).toBe(3)
+    await asUser(owner)
+    expect((await database.query('SELECT id,display_name FROM identity.users WHERE id=$1', [agentId])).rows).toEqual([identity])
+    await asService()
+    expect((await database.query('SELECT id FROM chat.chats WHERE id=$1', [replacement])).rows).toEqual([])
+    expect(await joinNotices(group)).toEqual([])
+  })
+
   it('rolls back a newly created group after a seat insert error, keeping the identity usable', async () => {
     const group = randomUUID()
     const agentId = randomUUID()
@@ -180,18 +223,19 @@ describe('任务 agent 进群', () => {
     await database.query('SET CONSTRAINTS ALL IMMEDIATE')
   })
 
-  it('leaves successful RPC transactions checked immediately; failed enrollment restores the caller mode', async () => {
+  it('checks only the chat invariants immediately; failed enrollment restores the caller mode', async () => {
     await asService()
     await database.query(`CREATE TEMP TABLE mode_parent(id integer PRIMARY KEY);
       CREATE TEMP TABLE mode_child(id integer REFERENCES mode_parent(id) DEFERRABLE INITIALLY DEFERRED);
       GRANT ALL ON mode_parent, mode_child TO authenticated`)
     const group = await ownerOnlyGroup()
-    // A normal PostgREST call ends its transaction after this RPC. A direct SQL
-    // caller continuing the same transaction explicitly opts back into deferral.
+    // The RPC makes the two chat invariants immediate, not ALL: ALL would also run the account revision
+    // flush mid-transaction. A caller's own deferred constraint stays deferred.
     await provision(group)
-    await database.query('SAVEPOINT immediate_mode')
-    await expect(database.query('INSERT INTO mode_child VALUES (1)')).rejects.toMatchObject({ code: '23503' })
-    await database.query('ROLLBACK TO SAVEPOINT immediate_mode')
+    await database.query('SAVEPOINT deferred_mode')
+    await database.query('INSERT INTO mode_child VALUES (1)')
+    await expect(database.query('SET CONSTRAINTS ALL IMMEDIATE')).rejects.toMatchObject({ code: '23503' })
+    await database.query('ROLLBACK TO SAVEPOINT deferred_mode')
     await database.query('SET CONSTRAINTS ALL DEFERRED')
     await asService()
     await database.query(`CREATE FUNCTION pg_temp.reject_mode_seat() RETURNS trigger LANGUAGE plpgsql AS $$

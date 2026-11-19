@@ -12,7 +12,7 @@ function fixture() {
   const serviceRpc=vi.fn<AttachmentsDeps['serviceRpc']>(async(fn)=>({data:fn==='file_temporary_host_for'
     ?{object_name:object,ciphertext_bytes:128,state:'uploading'}:fn==='file_temporary_key_for'?key:{},error:null}))
   const objects={uploadBounds:vi.fn(async()=>({maxBytes:128,expiresSeconds:120})),upload:vi.fn(async()=>({url:'https://origin.test',fields:{key:object},expiresAt:'2026-10-24T00:02:00Z'})),
-    inspect:vi.fn(async()=>({bytes:new Uint8Array(128),sizeBytes:128,sha256:sha,etag:'immutable'})),read:vi.fn(),promote:vi.fn(),put:vi.fn(),exists:vi.fn(),remove:vi.fn(),
+    inspect:vi.fn(async()=>({bytes:new Uint8Array(128),sizeBytes:128,sha256:sha,revision:'immutable'})),promote:vi.fn(),put:vi.fn(),exists:vi.fn(),remove:vi.fn(),
     sign:vi.fn(async()=>({url:'https://origin.test/cipher',thumbUrl:null,expiresAt:'2026-10-24T00:01:00Z'})),invalidate:vi.fn()}
   const deps:AttachmentsDeps={objects,userRpc,serviceRpc,fetch:vi.fn(),storageSignedUrl:vi.fn(),storageRemove:vi.fn(),now:()=>new Date('2026-10-24T00:00:00Z'),uuid:()=>download,log:vi.fn()}
   return {deps,objects,userRpc,serviceRpc}
@@ -49,7 +49,9 @@ describe('temporary file HTTP protocol',()=>{
     const f=fixture(),order:string[]=[]
     f.serviceRpc.mockImplementation(async(fn)=>{
       order.push(fn)
-      return {data:fn==='file_temporary_expire'?(order.length===1?1:0):fn==='file_blob_gc_claim'
+      if(fn==='file_blob_gc_run_begin') return {data:{acquired:true,token:download,batch_limit:5,concurrency:1},error:null}
+      if(fn==='file_blob_gc_run_renew'||fn==='file_blob_gc_run_end') return {data:true,error:null}
+      return {data:fn==='file_temporary_expire'?(order.length===1?1:0):fn==='file_blob_gc_run_claim'
         ?[{blob_id:'old',claim_token:'claim',bucket_id:'temporary',object_name:'temporary/old',content_type:'application/octet-stream'}]:null,error:null}
     })
     const accept=f.userRpc.getMockImplementation()!
@@ -59,12 +61,26 @@ describe('temporary file HTTP protocol',()=>{
     expect(f.objects.remove).toHaveBeenCalledWith('temporary/old')
     expect(f.objects.invalidate).not.toHaveBeenCalled()
     expect(order.indexOf('file_blob_gc_finish')).toBeLessThan(order.indexOf('file_temporary_accept'))
+    expect(f.deps.log).toHaveBeenCalledExactlyOnceWith('gc_result', { entry: 'file-accept',
+      at: '2026-10-24T00:00:00.000Z', day: '2026-10-24', claimed: 1, deleted: 1, finished: 1, failed: 0, outcome: 'completed' })
+  })
+  it('continues file-accept permission issuance when the GC summary logger throws', async () => {
+    const f=fixture(), loggingError=new Error('summary logger unavailable')
+    f.serviceRpc.mockImplementation(async(fn)=>({data:fn==='file_blob_gc_run_begin'?{acquired:true,token:download,batch_limit:5,concurrency:1}:fn==='file_blob_gc_run_renew'||fn==='file_blob_gc_run_end'?true:fn==='file_temporary_expire'?1:fn==='file_blob_gc_run_claim'?[]:null,error:null}))
+    f.deps.log=()=>{throw loggingError}
+    const stderr=vi.spyOn(console,'error').mockImplementation(()=>{})
+    try {
+      expect(await handleProjectFiles(f.deps,host,'file-accept',{transfer_id:transfer,ciphertext_bytes:128})).toMatchObject({transfer_id:transfer,max_bytes:128})
+      expect(f.userRpc).toHaveBeenCalledWith('file_temporary_accept',{p_id:transfer,p_size:128})
+      expect(f.objects.upload).toHaveBeenCalled()
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({fn:'attachments',stage:'gc_result_log_failed',entry:'file-accept',error_type:'object',message:'GC summary logging failed'}))
+    } finally {stderr.mockRestore()}
   })
   it('refuses modified ciphertext and malformed key material before publication',async()=>{
     const f=fixture(),body={transfer_id:transfer,ciphertext_bytes:128,ciphertext_sha256:sha,key}
-    f.objects.inspect.mockResolvedValueOnce({bytes:new Uint8Array(),sizeBytes:127,sha256:sha,etag:'etag'})
+    f.objects.inspect.mockResolvedValueOnce({bytes:new Uint8Array(),sizeBytes:127,sha256:sha,revision:'etag'})
     await expect(handleProjectFiles(f.deps,host,'file-commit',body)).rejects.toMatchObject({status:409})
-    f.objects.inspect.mockResolvedValueOnce({bytes:new Uint8Array(),sizeBytes:128,sha256:'cd'.repeat(32),etag:'etag'})
+    f.objects.inspect.mockResolvedValueOnce({bytes:new Uint8Array(),sizeBytes:128,sha256:'cd'.repeat(32),revision:'etag'})
     await expect(handleProjectFiles(f.deps,host,'file-commit',body)).rejects.toMatchObject({status:409})
     await expect(handleProjectFiles(f.deps,host,'file-commit',{...body,key:'bad'})).rejects.toMatchObject({status:400})
     expect(f.serviceRpc.mock.calls.every(([fn])=>fn!=='file_temporary_commit')).toBe(true)
@@ -91,5 +107,34 @@ describe('temporary file HTTP protocol',()=>{
       expect(await handleProjectFiles(f.deps,host,'file-download',body)).toEqual({status})
     }
     expect(f.objects.sign).not.toHaveBeenCalled()
+  })
+  it('signs a ready copy in the request when the reader names its download, and only then',async()=>{
+    const f=fixture(),ref={item_id:transfer,version:1},lease={status:'ready',bucket_id:'temporary',object_name:object,transfer_id:transfer,download_id:download,
+      signed_at:'2026-10-24T00:00:00Z',expires_at:'2026-10-24T00:01:00Z',content_type:'application/octet-stream'}
+    f.userRpc.mockResolvedValueOnce({data:{status:'ready',transfer_status:'ready'},error:null})
+    expect(await handleProjectFiles(f.deps,host,'file-request',{ref,request_id:transfer})).toEqual({status:'ready',transfer_status:'ready'})
+    expect(f.userRpc).toHaveBeenCalledTimes(1)
+    f.userRpc.mockResolvedValueOnce({data:{status:'ready',transfer_status:'requested'},error:null})
+    expect(await handleProjectFiles(f.deps,host,'file-request',{ref,request_id:transfer,download_request_id:download})).toEqual({status:'ready',transfer_status:'requested',download:null})
+    expect(f.objects.sign).not.toHaveBeenCalled()
+    f.userRpc.mockResolvedValueOnce({data:{status:'ready',transfer_status:'ready'},error:null}).mockResolvedValueOnce({data:lease,error:null})
+    const state=await handleProjectFiles(f.deps,host,'file-request',{ref,request_id:transfer,download_request_id:download}) as {download:Record<string,unknown>}
+    expect(state.download).toMatchObject({codec:'secretstream-v1',key,url:'https://origin.test/cipher'})
+    expect(f.userRpc).toHaveBeenLastCalledWith('file_transfer_download_as',{p_ref:ref,p_as:host,p_id:download})
+    await expect(handleProjectFiles(f.deps,host,'file-request',{ref,request_id:transfer,download_request_id:'nope'})).rejects.toMatchObject({status:400})
+  })
+  it('acknowledges a read with expect only while the version is still the one read, and returns what it resolved',async()=>{
+    const f=fixture(),ref={item_id:transfer,version:1},expect_={sha256:sha,size_bytes:128}
+    f.userRpc.mockResolvedValueOnce({data:{status:'ready',sha256:sha,size_bytes:128},error:null})
+    expect(await handleProjectFiles(f.deps,host,'file-read-complete',{download_id:download,ref,expect:expect_})).toEqual({acknowledged:true,current:{status:'ready',sha256:sha,size_bytes:128}})
+    expect(f.userRpc.mock.calls.map(([fn])=>fn)).toEqual(['file_resolve_as','file_temporary_read_complete'])
+    f.userRpc.mockClear()
+    f.userRpc.mockResolvedValueOnce({data:{status:'ready',sha256:'cd'.repeat(32),size_bytes:128},error:null})
+    expect(await handleProjectFiles(f.deps,host,'file-read-complete',{download_id:download,ref,expect:expect_})).toMatchObject({acknowledged:false})
+    expect(f.userRpc.mock.calls.map(([fn])=>fn)).toEqual(['file_resolve_as'])
+    f.userRpc.mockClear()
+    expect(await handleProjectFiles(f.deps,host,'file-read-complete',{download_id:download})).toEqual({acknowledged:true})
+    expect(f.userRpc.mock.calls.map(([fn])=>fn)).toEqual(['file_temporary_read_complete'])
+    await expect(handleProjectFiles(f.deps,host,'file-read-complete',{download_id:download,ref,expect:{sha256:sha}})).rejects.toMatchObject({status:400})
   })
 })

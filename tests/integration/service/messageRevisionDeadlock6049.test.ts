@@ -121,9 +121,9 @@ describe('message revision lock order #6049', () => {
         const topicPid = (await topic.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid
         await source.query('BEGIN')
         await topic.query('BEGIN')
-        // Stop the source fan-out immediately after its first recipient. The
-        // messages themselves use the ordinary, unmodified INSERT path.
-        await source.query('SELECT 1 FROM chat.account_revision_heads WHERE user_id=$1 FOR NO KEY UPDATE', [f.low])
+        // Hold the source line the way a source fan-out does (chat.lock_lines), so the topic send
+        // parks on it. The messages themselves use the ordinary, unmodified INSERT path.
+        await source.query('SELECT chat.lock_lines(ARRAY[$1])', [f.group])
         const topicSend = send(topic, f.topic, firstJoin === 'sender' ? f.middle : f.high, firstJoin === 'mention' ? [f.middle] : null, true)
         try {
           await waitUntilBlocked(topicPid, sourcePid)
@@ -173,7 +173,7 @@ describe('message revision lock order #6049', () => {
         FROM chat.account_revisions WHERE event='message_created' AND resource_key->>'entity_id'=$1 ORDER BY user_id`, [id])
       expect(rows).toEqual([{ user_id: f.middle }, { user_id: f.high }])
       const acl = await admin.query<{ allowed: boolean }>(`SELECT has_function_privilege(role,
-        'chat.lock_chat_revision_recipients(text,text)', 'EXECUTE') AS allowed
+        'chat.lock_chat_revision_recipients(text,text[])', 'EXECUTE') AS allowed
         FROM unnest(ARRAY['anon','authenticated','service_role']) AS role`)
       expect(acl.rows).toEqual([{ allowed: false }, { allowed: false }, { allowed: true }])
     })

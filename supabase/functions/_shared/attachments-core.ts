@@ -2,17 +2,19 @@
 // gugu-supabase 20261016104500_file_blobs、20261016105500_message_file_refs)。依赖从外面传进来(OSS 配置、fetch、
 // 以调用者身份和以 service_role 调库、Supabase 存储),所以单元测试在 Node 里用假的 OSS 和库跑同一份代码。
 //
-//   POST upload   → 一张直传 OSS 的 PostObject 表单:key = staging/<调用者>/<uuid>,25 MiB 由 OSS 管。
-//   POST commit   → 读暂存对象(内网)、自己算 sha256 和类型 → 服务端复制到 <aa>/<sha256>(只复制读到的那一份)
-//                   → 登记(service_role)→ 删暂存 → 以调用者的身份 attachment_commit(放进「附件」、发消息,一个事务;
-//                   带 item_id + expected_version 就是那个文件的下一版)。
+//   POST upload   → A quota-scoped immutable staging upload permit with provider-enforced size and lifetime bounds.
+//   POST commit   → With sha256: declare the pending file and its keep, then attachment_commit sends its message before the bytes.
+//                   Without sha256: hash, promote and register staged bytes before attachment_commit.
+//   POST finish   → Hash and promote bytes, settle the declaration with its receipt/quota and declared keep atomically.
+//                   Staging stays immutable until permit cleanup; declared settle includes registration in its transaction.
 //   POST forward  → 以调用者的身份 attachment_forward。
 //   POST share    → 群文件夹里的文件按引用发:文本文件先定成带字节的一版(attachment_document_snapshot),再 attachment_share。
 //   POST urls     → 以调用者的身份 file_urls_as(条目的某一版,或悄悄话附件那条消息),再签:OSS 的走 CDN 鉴权 A(图片另给缩略图链接),老对象走存储的签名链接。
 //   POST gc       → 只认 service_role(pg_cron + pg_net 每 10 分钟叫一次):领一批该回收的,删对象、清 CDN、报完成 / 失败。
 
 import { ossObjectStorage } from './attachment-object-storage.ts'
-import { type AttachmentObjectStorage, ObjectStorageError, type InspectedObject } from './object-storage.ts'
+import { type AttachmentObjectStorage, type MultipartStorage, ObjectStorageError, type InspectedObject } from './object-storage.ts'
+import type { Inspector } from './file-inspection.ts'
 import { hasThumbnail, objectHeaders, sniff } from './blob-sniff.ts'
 import { fileRef, handleFileDownload } from './file-transfer-core.ts'
 import {
@@ -20,7 +22,6 @@ import {
   type CdnConfig,
   type FetchLike,
   IMMUTABLE,
-  MAX_ATTACHMENT_BYTES,
   type OssConfig,
 } from './oss.ts'
 
@@ -28,8 +29,11 @@ export interface DbError {
   message: string
   hint?: string | null
   code?: string | null
+  details?: string | null
+  /** The HTTP status PostgREST answered with; 0 when the request never reached it. */
+  status?: number
 }
-export type Rpc = (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: DbError | null }>
+export type Rpc = (fn: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<{ data: unknown; error: DbError | null }>
 
 export interface AttachmentsDeps {
   /** The same classifier used for local files and App data, pinned by the Edge entry point. */
@@ -41,6 +45,8 @@ export interface AttachmentsDeps {
   objects?: AttachmentObjectStorage
   oss?: OssConfig
   cdn?: CdnConfig
+  /** With oss/cdn: who reads staged bytes (the file service). */
+  inspector?: Inspector
   fetch: FetchLike
   /** 以调用者自己的令牌调 chat 里的函数(群规、成员、RLS 全照调用者)。 */
   userRpc: Rpc
@@ -62,13 +68,13 @@ export interface AttachmentsDeps {
 
 export function objectStorage(deps: AttachmentsDeps): AttachmentObjectStorage {
   if (deps.objects) return deps.objects
-  if (!deps.oss || !deps.cdn) throw new Error('Attachment object storage is not configured')
-  return ossObjectStorage({ oss: deps.oss, cdn: deps.cdn, fetch: deps.fetch })
+  if (!deps.oss || !deps.cdn || !deps.inspector) throw new Error('Attachment object storage is not configured')
+  return ossObjectStorage({ oss: deps.oss, cdn: deps.cdn, fetch: deps.fetch, inspector: deps.inspector })
 }
 
 /** 说给调用者听的拒绝:HTTP 状态 + 机读的 code + 一句话。 */
 export class Refusal extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) {
+  constructor(readonly status: number, readonly code: string, message: string, readonly details?: string) {
     super(message)
   }
 }
@@ -104,6 +110,11 @@ export function refusalFromDb(error: DbError): Refusal {
     attachment_forward_needs_bytes: [400, 'needs_bytes'],
     workspace_version_conflict: [409, 'version_conflict'],
   }
+  // #2383: a recipient that never sat in the chat. A permanent refusal (400, never retried); details carries
+  // the offending ids from the database, comma-separated, so the caller can name them.
+  if (error.hint === 'recipient_not_member') {
+    return new Refusal(400, 'recipient_not_member', error.message, error.details ?? undefined)
+  }
   const hit = error.hint ? byHint[error.hint] : undefined
   if (hit) return new Refusal(hit[0], hit[1], error.message)
   if (error.hint?.startsWith('workspace_')) return new Refusal(400, error.hint, error.message)
@@ -113,6 +124,17 @@ export function refusalFromDb(error: DbError): Refusal {
   if (error.code === 'PT429') return new Refusal(429, 'rate_limited', error.message)
   if (error.code === '23505' || error.code === 'check_violation' || error.code === '23514') return new Refusal(400, 'invalid', error.message)
   return new Refusal(500, 'failed', error.message)
+}
+
+/**
+ * Who is calling (chat.attachments_principal): the id, or the refusal to answer with. Only PostgREST's 401 (no, bad or expired
+ * token) and a null principal (deleted, banned, session gone) mean signed out; anything else is the service failing.
+ */
+export async function principalOf(rpc: Rpc): Promise<string> {
+  const { data, error } = await rpc('attachments_principal', {})
+  if (error && error.status !== 401) throw new Refusal(503, 'unavailable', 'could not check your sign-in; try again')
+  if (error || typeof data !== 'string') throw new Refusal(401, 'denied', 'sign in first')
+  return data
 }
 
 export async function call(rpc: Rpc, fn: string, args: Record<string, unknown>): Promise<unknown> {
@@ -187,6 +209,13 @@ async function issueUpload(deps: AttachmentsDeps, userId: string, body: Record<s
   const permit=await call(deps.userRpc,'file_managed_upload_as',{
     p_id:id,p_chat:chat,p_as:actor,p_bytes:bounds.maxBytes,p_content_type:contentType,
   }) as { staging_key:string; signed_at:string; expires_at:string; max_bytes:number }
+  // A client that sends parts gets a multipart upload when the store signs parts and the file is more than one part:
+  // a single part interrupted is sent again whole, so splitting it would change nothing.
+  if (body.parts===true&&store.parts&&Number(permit.max_bytes)===declared&&declared>UPLOAD_PART_BYTES) {
+    await openParts(deps,store.parts,userId,permit.staging_key)
+    return { staging_key:permit.staging_key,max_bytes:declared,expires_at:permit.expires_at,
+      parts:{ part_bytes:UPLOAD_PART_BYTES,count:Math.ceil(declared/UPLOAD_PART_BYTES) } }
+  }
   const seconds=(Date.parse(permit.expires_at)-Date.parse(permit.signed_at))/1000
   const form=await store.upload(permit.staging_key,new Date(permit.signed_at),{maxBytes:Number(permit.max_bytes),expiresSeconds:seconds})
   return { staging_key:permit.staging_key,url:form.url,fields:form.fields,...(form.method?{method:form.method}:{}),
@@ -195,6 +224,64 @@ async function issueUpload(deps: AttachmentsDeps, userId: string, body: Record<s
 
 export async function handleUpload(deps: AttachmentsDeps,userId:string,body:Record<string,unknown> = {}) {
   return await issueUpload(deps,userId,body)
+}
+
+// ── multipart upload ─────────────────────────────────────────────────────────────
+/** Parts of a multipart upload; OSS takes 100 KB to 5 GB a part and at most 10000 parts (256 MiB is 32). */
+export const UPLOAD_PART_BYTES=8*1024*1024
+/** Parts signed per `upload-parts` answer: a few at a time, so a slow upload asks again with fresh signatures. */
+const PARTS_PER_ANSWER=6
+type PartsState={ upload_id:string|null; parts_done:number[] }
+
+/** The staging key's multipart upload: the recorded one, or a new one. Of two concurrent openers the loser abandons its own. */
+async function openParts(deps:AttachmentsDeps,parts:MultipartStorage,userId:string,key:string) {
+  const known=await call(deps.serviceRpc,'file_managed_upload_parts',{p_key:key,p_user:userId,p_upload_id:null,p_done:[]}) as PartsState
+  if (known.upload_id) return known.upload_id
+  const opened=await parts.open(key)
+  const kept=await call(deps.serviceRpc,'file_managed_upload_parts',{p_key:key,p_user:userId,p_upload_id:opened,p_done:[]}) as PartsState
+  if (kept.upload_id!==opened) await parts.abandon(key,opened)
+  return kept.upload_id!
+}
+
+/** The caller's own multipart upload under a live permit: its parts, and the number and size of each. */
+async function partsOf(deps:AttachmentsDeps,userId:string,body:Record<string,unknown>) {
+  const key=stagingOf(body,userId)
+  const parts=objectStorage(deps).parts
+  if (!parts) throw new Refusal(400,'invalid','This storage uploads a file in one request')
+  const permit=await call(deps.serviceRpc,'file_managed_upload_for',{p_key:key,p_user:userId}) as { max_bytes:number; blob_id:string|null }
+  if (permit.blob_id) throw new Refusal(410,'expired','This upload was already sent; start a new one')
+  const size=Number(permit.max_bytes),count=Math.ceil(size/UPLOAD_PART_BYTES)
+  const bytes=(n:number)=>n<count?UPLOAD_PART_BYTES:size-(count-1)*UPLOAD_PART_BYTES
+  return { key,parts,size,count,bytes }
+}
+
+/** Records the parts the client just sent and answers the parts still to send, signed. */
+export async function handleUploadParts(deps:AttachmentsDeps,userId:string,body:Record<string,unknown>) {
+  const { key,parts,count,bytes }=await partsOf(deps,userId,body)
+  const done=body.done===undefined||body.done===null?[]:body.done
+  if (!Array.isArray(done)||done.some(n=>!Number.isSafeInteger(n)||n<1||n>count)) throw new Refusal(400,'invalid',`done must be part numbers from 1 to ${count}`)
+  const state=await call(deps.serviceRpc,'file_managed_upload_parts',{p_key:key,p_user:userId,p_upload_id:null,p_done:done}) as PartsState
+  if (!state.upload_id) throw new Refusal(409,'upload_incomplete','This upload has no parts yet; ask upload for it again')
+  const todo=Array.from({length:count},(_,i)=>i+1).filter(n=>!state.parts_done.includes(n)).slice(0,PARTS_PER_ANSWER)
+  return { done:state.parts_done,todo:await parts.sign(key,state.upload_id,todo.map(n=>({n,bytes:bytes(n)}))) }
+}
+
+/**
+ * Joins the parts into the staging object once every part is reported. The object must be exactly the declared size;
+ * otherwise it is removed and the upload starts again. Asked again after success, it answers success again.
+ */
+export async function handleUploadComplete(deps:AttachmentsDeps,userId:string,body:Record<string,unknown>) {
+  const { key,parts,size,count }=await partsOf(deps,userId,body)
+  const state=await call(deps.serviceRpc,'file_managed_upload_parts',{p_key:key,p_user:userId,p_upload_id:null,p_done:[]}) as PartsState
+  if (!state.upload_id) throw new Refusal(409,'upload_incomplete','This upload has no parts yet; ask upload for it again')
+  const missing=Array.from({length:count},(_,i)=>i+1).filter(n=>!state.parts_done.includes(n))
+  if (missing.length) throw new Refusal(409,'upload_incomplete',`Parts not sent yet: ${missing.join(', ')}`,missing.join(','))
+  const joined=await parts.complete(key,state.upload_id)
+  if (joined===size) return { staging_key:key,size_bytes:size }
+  // A part reported but not sent, or bytes that are not this file (or the store gave up the upload after a day).
+  if (joined!==null) await objectStorage(deps).remove(key)
+  await call(deps.serviceRpc,'file_managed_upload_parts_clear',{p_key:key,p_user:userId,p_upload_id:state.upload_id})
+  throw new Refusal(409,'upload_changed',`The parts make ${joined ?? 0} bytes, not ${size}; upload the file again`)
 }
 
 // ── commit ───────────────────────────────────────────────────────────────────────
@@ -226,6 +313,7 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
   }
   const caption = str(body, 'caption', false)
   const itemId = str(body, 'item_id', false)
+  const sendGroupId = str(body, 'send_group_id', false)
   const commitArgs = {
     p_staging_key: stagingKey,
     p_message_id: str(body, 'message_id'),
@@ -243,17 +331,45 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
     ...(caption != null ? { p_caption: caption } : {}),
     // 这份字节是群文件夹里一个文件的下一版(item_id + 它基于的 expected_version);同上,不给就不带这两个键。
     ...(itemId != null ? { p_item_id: itemId, p_expected_version: int(body, 'expected_version') } : {}),
+    // 一次发出的几个文件(gugu#2581):同一个 send_group_id + 这次一共几个;同上,不给就不带这两个键。
+    ...(sendGroupId != null ? { p_send_group_id: sendGroupId, p_send_group_size: int(body, 'send_group_size') } : {}),
   }
-  await registerStaged(deps, userId, stagingKey, str(body, 'content_type', false), str(body, 'file_name')!)
+  // Declared (sha256 + size): the message goes now and its bytes follow (finish); otherwise the bytes are up already.
+  const declared = str(body, 'sha256', false)
+  if (declared) {
+    // An image's width and height ride along, so the place its readers draw while the bytes come is already its size.
+    const width = int(body, 'width'), height = int(body, 'height')
+    await call(deps.userRpc, 'attachment_declare', { p_staging_key: stagingKey, p_sha256: declared, p_size_bytes: int(body, 'size_bytes'), p_content_type: str(body, 'content_type', false),
+      ...(width != null && height != null ? { p_width: width, p_height: height } : {}), ...(keep ? { p_keep: keep } : {}) })
+  }
+  else await registerStaged(deps, userId, stagingKey, str(body, 'content_type', false), str(body, 'file_name')!)
   const rows = (await writeFile(deps, 'attachment_commit', commitArgs)) as unknown[]
   const message = rows[0] as { id?: string } | undefined
-  if (message?.id) await keepAs(deps, keep, { message_id: message.id }, commitArgs.p_sender_user_id)
+  if (!declared && message?.id) await keepAs(deps, keep, { message_id: message.id }, commitArgs.p_sender_user_id)
   return message ?? null
 }
 
 /**
+ * A declared attachment's bytes are up (under its own staging key, or `upload_key` when the sender resumed with a new
+ * upload): hashed, checked against the declaration, and every reference moves to them. Answers {status: 'ready'}; bytes
+ * that are not the declared file are refused (upload_mismatch) and the attachment reads failed.
+ */
+export async function handleFinish(deps: AttachmentsDeps, userId: string, body: Record<string, unknown>) {
+  const pendingKey = stagingOf(body, userId)
+  const uploadKey = body.upload_key == null ? pendingKey : stagingOf({ staging_key: body.upload_key }, userId)
+  // Released clients still send keep here; the declaration already owns it.
+  await registerStaged(deps, userId, uploadKey, str(body, 'content_type', false), str(body, 'file_name', false) ?? '', { pendingKey })
+  return { status: 'ready' }
+}
+
+/** The caller's declared attachments still waiting for their bytes: a restarted sender resumes each it still holds. */
+export async function handlePending(deps: AttachmentsDeps) {
+  return { uploads: await call(deps.userRpc, 'attachment_pending_mine', {}) }
+}
+
+/**
  * How long the copy that just joined a chat stays (the uploader's 「临时 / 保留」): the same mark the person makes later, applied
- * as they upload. Not given: unchanged. A failure is the request's: the commit is idempotent, so the retry marks it again.
+ * after a legacy upload-first commit or folder placement. Declared sends apply it during registration instead.
  */
 async function keepAs(deps: AttachmentsDeps, keep: Keep, ref: { message_id: string } | { item_id: string }, as: string | null) {
   if (keep) await call(deps.userRpc, 'file_storage_mark_as', { p_refs: [ref], p_action: keep, p_as: as })
@@ -304,20 +420,23 @@ function stagingOf(body: Record<string, unknown>, userId: string): string {
 }
 
 /** 暂存的字节:算哈希、存进 OSS 的最终位置、登记成 blob(提交和放进文件夹共用)。暂存已经没了 ⇒ 交给库认上一次的登记。 */
-async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey: string, declaredType: string | null, fileName: string) {
+async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey: string, declaredType: string | null, fileName: string, settle?: { pendingKey: string }) {
   const permit=await call(deps.serviceRpc,'file_managed_upload_for',{p_key:stagingKey,p_user:userId}) as { max_bytes:number }
   const store=objectStorage(deps)
   let read: InspectedObject | null = null
   try {
-    if (!store.inspect) throw new Refusal(503,'not_configured','Object inspection is not configured')
     read=await store.inspect(stagingKey,Number(permit.max_bytes),deps.textFiles.maxBytes + 1)
   } catch (error) {
     if (error instanceof ObjectStorageError && error.status === 413) throw new Refusal(413, 'too_large', 'file exceeds its upload reservation')
+    if (error instanceof ObjectStorageError && error.status === 503) throw new Refusal(503, 'not_configured', error.message)
+    if (error instanceof ObjectStorageError && error.status === 412) throw new Refusal(409, 'upload_changed', 'the upload changed while it was being committed; upload it again')
     // 暂存对象没了:要么没传上来,要么上一次已经登记过、删了暂存(重试)—— 交给库认那次登记。
     if (!(error instanceof ObjectStorageError && error.status === 404)) throw error
   }
+  // A declared attachment settles only on bytes hashed here: no staged object, nothing to settle it with.
+  if (!read && settle) throw new Refusal(409, 'upload_missing', 'the upload is not there; upload the file again')
   if (read) {
-    const { bytes, etag, sizeBytes } = read
+    const { bytes, revision, sizeBytes } = read
     if (sizeBytes === 0) throw new Refusal(400, 'invalid', 'an attachment has at least one byte')
     if (bytes.length < Math.min(sizeBytes, deps.textFiles.maxBytes + 1)) {
       throw new Refusal(503, 'not_configured', 'Object inspection did not retain the complete bounded text')
@@ -329,7 +448,7 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
     const headers = objectHeaders(type, IMMUTABLE)
     const copy = async () => {
       try {
-        await objectStorage(deps).promote(stagingKey, finalKey, { bytes, etag }, headers)
+        await objectStorage(deps).promote(stagingKey, finalKey, revision, headers)
       } catch (error) {
         // 暂存对象在读完之后换了内容:算的哈希不是它的了,不能拿这个名字存。
         if (error instanceof ObjectStorageError && error.status === 412) throw new Refusal(409, 'upload_changed', 'the upload changed while it was being committed; upload it again')
@@ -341,26 +460,36 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
     let created = false
     for (let attempt = 1; ; attempt++) {
       await copy()
-      const { data, error } = await deps.serviceRpc('file_blob_register', {
-        p_uploader: userId,
-        p_staging_key: stagingKey,
-        p_sha256: sha,
-        p_size_bytes: sizeBytes,
-        p_content_type: type.contentType,
-        p_width: type.width,
-        p_height: type.height,
-      })
+      const { data, error } = settle
+        ? await deps.serviceRpc('file_blob_settle', {
+          p_uploader: userId, p_pending_key: settle.pendingKey, p_upload_key: stagingKey, p_sha256: sha, p_size_bytes: sizeBytes,
+          p_content_type: type.contentType, p_width: type.width, p_height: type.height,
+          p_document: document.kind === 'document' ? { text: document.text, content_type: document.contentType } : null,
+        })
+        : await deps.serviceRpc('file_blob_register', {
+          p_uploader: userId,
+          p_staging_key: stagingKey,
+          p_sha256: sha,
+          p_size_bytes: sizeBytes,
+          p_content_type: type.contentType,
+          p_width: type.width,
+          p_height: type.height,
+        })
+      if (!error && settle && (data as { status?: string } | null)?.status === 'failed') {
+        throw new Refusal(409, 'upload_mismatch', 'the uploaded bytes are not the file this message declared')
+      }
       if (!error) {
-        created = ((data as { created?: boolean }[] | null)?.[0]?.created) === true
+        created = settle ? (data as { created?: boolean }).created === true : ((data as { created?: boolean }[] | null)?.[0]?.created) === true
         break
       }
       if (error.hint !== 'file_blob_deleting' || attempt >= 5) throw refusalFromDb(error)
       await new Promise((r) => setTimeout(r, deps.retryDelayMs ?? 1000))
     }
     // 新建的一行:复制和登记之间,回收可能把同一个 sha 的旧 blob 整个收完(连对象一起删了)。这时上传登记已经引用着
-    // 新的一行,回收领不走它 —— 删暂存之前看一眼,对象不在就再复制一次。
+    // 新的一行,回收领不走它 —— 返回之前看一眼,对象不在就再复制一次。
+    // Settle already made the storage ready: a repair copy can briefly answer 404, which retryFileDownload retries.
     if (created && !(await objectStorage(deps).exists(finalKey))) await copy()
-    await call(deps.serviceRpc,'file_managed_upload_registered',{p_key:stagingKey,p_user:userId,
+    if (!settle) await call(deps.serviceRpc,'file_managed_upload_registered',{p_key:stagingKey,p_user:userId,
       p_document:document.kind === 'document' ? {text:document.text,content_type:document.contentType} : null})
     // Keep staging immutable until the permit closes: an early delete would let the same policy recreate it.
     // Cleanup retains the reservation until terminal upload evidence and physical deletion are confirmed.
@@ -368,54 +497,20 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
 }
 
 // ── forward ──────────────────────────────────────────────────────────────────────
-/** 老式附件的字节所在的桶(Supabase 存储,只读);它的一条消息由 chat.attachment_legacy_source 说出对象名。 */
-const LEGACY_BUCKET = 'chat-media'
-interface LegacySource { object_name: string; file_name: string; content_type: string | null }
-
-export async function handleForward(deps: AttachmentsDeps, userId: string, body: Record<string, unknown>) {
-  const sourceId = str(body, 'source_message_id')!
-  const messageId = str(body, 'message_id')!
-  const forward = (stagingKey: string | null) => call(deps.userRpc, 'attachment_forward', {
-    p_source_message_id: sourceId,
-    p_message_id: messageId,
+export async function handleForward(deps: AttachmentsDeps, _userId: string, body: Record<string, unknown>) {
+  const forwardGroup = str(body, 'send_group_id', false)
+  const rows = await call(deps.userRpc, 'attachment_forward', {
+    p_source_message_id: str(body, 'source_message_id'),
+    p_message_id: str(body, 'message_id'),
     p_chat_id: str(body, 'chat_id'),
     p_sender_user_id: str(body, 'sender_user_id'),
     p_to_user_ids: strings(body, 'to_user_ids'),
     p_thread_root_id: str(body, 'thread_root_id', false),
     p_is_thread_root: bool(body, 'is_thread_root'),
     p_is_whisper: bool(body, 'is_whisper'),
-    ...(stagingKey ? { p_staging_key: stagingKey } : {}),
-  }) as Promise<unknown[]>
-  let rows: unknown[]
-  try {
-    rows = await forward(null)
-  } catch (error) {
-    if (!(error instanceof Refusal && error.code === 'needs_bytes')) throw error
-    // 老式附件(字节在 chat-media,只读):库说出它的对象(以调用者的身份读,对象名只从那一行来),把字节读出来放进暂存,
-    // 登记成 blob —— 和提交同一步(registerStaged),再转一次、带上这次上传。暂存按这条新消息起名:重试同一条转发,
-    // 登记和放进「附件」都回上一次的结果。新式的一次就转完,不多问一次库。
-    const legacy = ((await call(deps.userRpc, 'attachment_legacy_source', { p_source_message_id: sourceId })) as LegacySource[])[0]
-    if (!legacy) throw error
-    const stagingKey = `staging/${userId}/${messageId}`
-    if (!STAGING.test(stagingKey)) throw new Refusal(400, 'invalid', 'message_id is a uuid')
-    const download=await handleFileDownload(deps,userId,{ref:{message_id:sourceId},as:str(body,'sender_user_id'),request_id:deps.uuid()}) as {
-      status:string;url?:string;size_bytes?:number
-    }
-    if (download.status!=='ready'||!download.url) throw new Refusal(410,'source_gone','The source file is no longer available')
-    if (!Number.isSafeInteger(Number(download.size_bytes))||Number(download.size_bytes)>MAX_ATTACHMENT_BYTES) {
-      throw new Refusal(413,'too_large','Historical attachment exceeds the promotion limit')
-    }
-    const res = await deps.fetch(download.url)
-    if (res.status === 400 || res.status === 404) throw new Refusal(410, 'source_gone', `the file of message ${sourceId} is not in ${LEGACY_BUCKET} any more`)
-    if (!res.ok) throw new Error(`reading ${LEGACY_BUCKET}/${legacy.object_name}: ${res.status}`)
-    const bytes = new Uint8Array(await res.arrayBuffer())
-    if (bytes.length > MAX_ATTACHMENT_BYTES) throw new Refusal(413, 'too_large', 'an attachment is at most 25 MiB')
-    await call(deps.userRpc,'file_managed_upload_as',{p_id:messageId,p_chat:str(body,'chat_id'),
-      p_as:str(body,'sender_user_id'),p_bytes:bytes.length})
-    await objectStorage(deps).put(stagingKey, bytes)
-    await registerStaged(deps, userId, stagingKey, legacy.content_type, legacy.file_name)
-    rows = await forward(stagingKey)
-  }
+    // Files forwarded together stay one send where they land (gugu#2581); not given, the key is not sent (older database).
+    ...(forwardGroup != null ? { p_send_group_id: forwardGroup, p_send_group_size: int(body, 'send_group_size') } : {}),
+  }) as unknown[]
   return rows[0] ?? null
 }
 
@@ -467,7 +562,7 @@ async function documentSnapshot(deps: AttachmentsDeps, userId: string, sender: s
   } catch (error) {
     if (!(error instanceof Refusal && error.code === 'needs_bytes')) throw error
   }
-  // As a legacy attachment's forward does: the bytes go into staging named by the new message, registered as any upload.
+  // The bytes go into staging named by the new message, registered as any upload.
   const stagingKey = `staging/${userId}/${messageId}`
   if (!STAGING.test(stagingKey)) throw new Refusal(400, 'invalid', 'message_id is a uuid')
   const bytes = new TextEncoder().encode(text)
@@ -494,32 +589,102 @@ interface Claimed {
   content_type: string
 }
 
-export async function handleGc(deps: AttachmentsDeps) {
-  await call(deps.serviceRpc, 'file_temporary_expire', { p_limit: 500 })
-  await call(deps.serviceRpc, 'file_transfer_expire', { p_limit: 500 })
-  const claimed = ((await call(deps.serviceRpc, 'file_blob_gc_claim', { p_limit: 50, p_stale_seconds: 600 })) ?? []) as Claimed[]
-  let deleted = 0
-  let failed = 0
-  for (const job of claimed) {
+/** Multipart uploads whose permit expired are abandoned in the store, then forgotten; a failure is tried again in a later round. */
+async function abandonExpiredParts(deps: AttachmentsDeps, remaining: number, guard: () => Promise<void>) {
+  if (remaining === 0) return 0
+  const parts = objectStorage(deps).parts
+  if (!parts) return 0
+  await guard()
+  const stale = ((await call(deps.serviceRpc, 'file_managed_upload_parts_claim', { p_limit: remaining })) ?? []) as Array<{ staging_key: string; account_id: string; upload_id: string }>
+  if (!Array.isArray(stale) || stale.length > remaining) throw new Refusal(503, 'not_configured', 'Multipart GC claim exceeds its bound')
+  for (const row of stale) {
+    await guard()
     try {
-      if (job.bucket_id === 'oss' || job.bucket_id === 'temporary') {
-        await objectStorage(deps).remove(job.object_name)
-        // 清边缘缓存只是清理(见 refreshCdn):失败了记一行,不挡回收。
-        if (job.bucket_id === 'oss') await objectStorage(deps).invalidate(job.object_name, hasThumbnail(job.content_type))
-          .catch((error) => deps.log('cdn_refresh_failed', { blob: job.blob_id, error: String(error) }))
-      } else {
-        await deps.storageRemove(job.bucket_id, job.object_name)
-      }
-      await call(deps.serviceRpc, 'file_blob_gc_finish', { p_blob_id: job.blob_id, p_claim_token: job.claim_token })
-      deleted++
+      await parts.abandon(row.staging_key, row.upload_id)
+      await call(deps.serviceRpc, 'file_managed_upload_parts_clear', { p_key: row.staging_key, p_user: row.account_id, p_upload_id: row.upload_id })
     } catch (error) {
-      failed++
-      deps.log('gc_failed', { blob: job.blob_id, error: String(error) })
-      await call(deps.serviceRpc, 'file_blob_gc_fail', { p_blob_id: job.blob_id, p_claim_token: job.claim_token, p_error: String(error).slice(0, 500) })
-        .catch((e) => deps.log('gc_fail_report_failed', { blob: job.blob_id, error: String(e) }))
+      deps.log('gc_abandon_failed', { key: row.staging_key, error: String(error) })
     }
   }
-  return { claimed: claimed.length, deleted, failed }
+  return stale.length
+}
+
+export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-accept' = 'kick',
+  sweepStaging?: (remaining: number, guard: () => Promise<void>) => Promise<void>) {
+  const result = { claimed: 0, deleted: 0, failed: 0 }
+  let claimedCount: number | null = null
+  let removed = 0
+  let completed = false
+  let token: string | null = null
+  try {
+    const run = await call(deps.serviceRpc, 'file_blob_gc_run_begin', {}) as
+      { acquired: boolean; token?: string; batch_limit: number; concurrency: number }
+    if (!run || typeof run.acquired !== 'boolean' || ![5, 50].includes(run.batch_limit) || run.concurrency !== 1) {
+      throw new Refusal(503, 'not_configured', 'Attachment GC control is unavailable')
+    }
+    if (!run.acquired) { claimedCount = 0; completed = true; return result }
+    if (typeof run.token !== 'string' || !UUID.test(run.token)) throw new Refusal(503, 'not_configured', 'Invalid GC consumer receipt')
+    token = run.token
+    const guard = async () => {
+      if (await call(deps.serviceRpc, 'file_blob_gc_run_renew', { p_token: token }) !== true) {
+        throw new Refusal(503, 'not_configured', 'Attachment GC consumer is no longer permitted')
+      }
+    }
+    await call(deps.serviceRpc, 'file_temporary_expire', { p_limit: 500 })
+    await call(deps.serviceRpc, 'file_transfer_expire', { p_limit: 500 })
+    const claimed = ((await call(deps.serviceRpc, 'file_blob_gc_run_claim', { p_token: token })) ?? []) as Claimed[]
+    if (!Array.isArray(claimed) || claimed.length > run.batch_limit) throw new Refusal(503, 'not_configured', 'Attachment GC claim exceeds its bound')
+    result.claimed = claimed.length
+    claimedCount = claimed.length
+    for (const job of claimed) {
+      await guard()
+      try {
+        // A declaration whose bytes never came (pending): its staging object, if any, is the provider's to expire.
+        if (job.bucket_id === 'pending') {
+          // nothing stored under its name
+        } else if (job.bucket_id === 'oss' || job.bucket_id === 'temporary') {
+          await objectStorage(deps).remove(job.object_name)
+          removed++
+          // 清边缘缓存只是清理(见 refreshCdn):失败了记一行,不挡回收。
+          if (job.bucket_id === 'oss') await objectStorage(deps).invalidate(job.object_name, hasThumbnail(job.content_type))
+            .catch((error) => deps.log('cdn_refresh_failed', { blob: job.blob_id, error: String(error) }))
+        } else {
+          await deps.storageRemove(job.bucket_id, job.object_name)
+          removed++
+        }
+        await call(deps.serviceRpc, 'file_blob_gc_finish', { p_blob_id: job.blob_id, p_claim_token: job.claim_token })
+        result.deleted++
+      } catch (error) {
+        result.failed++
+        deps.log('gc_failed', { blob: job.blob_id, error: String(error) })
+        await call(deps.serviceRpc, 'file_blob_gc_fail', { p_blob_id: job.blob_id, p_claim_token: job.claim_token, p_error: String(error).slice(0, 500) })
+          .catch((e) => deps.log('gc_fail_report_failed', { blob: job.blob_id, error: String(e) }))
+      }
+    }
+    // Staging cleanup shares the same lease and remaining server-side budget.
+    // A disabled or busy collector cannot delete via this second path either.
+    const remaining = run.batch_limit - claimed.length
+    const abandoned = await abandonExpiredParts(deps, remaining, guard)
+    if (sweepStaging && remaining > abandoned) await sweepStaging(remaining - abandoned, guard)
+    completed = true
+    return result
+  } finally {
+    if (token) {
+      try { await call(deps.serviceRpc, 'file_blob_gc_run_end', { p_token: token }) }
+      catch { try { deps.log('gc_release_failed', { entry }) } catch { /* Keep the original outcome. */ } }
+    }
+    try {
+      const at = deps.now().toISOString()
+      // Removal may succeed even when its database confirmation fails. Keep both counts without changing the API result.
+      deps.log('gc_result', { entry, at, day: at.slice(0, 10), claimed: claimedCount, deleted: removed,
+        finished: result.deleted, failed: result.failed, outcome: completed ? 'completed' : 'error' })
+    } catch (error) {
+      try {
+        console.error(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry,
+          error_type: typeof error, message: 'GC summary logging failed' }))
+      } catch { /* Even unavailable stderr must not replace the GC result or original exception. */ }
+    }
+  }
 }
 
 

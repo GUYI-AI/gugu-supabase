@@ -11,7 +11,7 @@ export function assertNoRuntimeSourceRewriting(sql) {
 }
 
 export async function assertAllocatedProjectPublisher(query) {
-  const signature = 'file_private.publish_revision(uuid,text,text,text,text,text,bigint,text,text,integer,uuid)'
+  const signature = 'file_private.publish_revision(uuid,text,text,text,text,text,bigint,text,text,integer,uuid,integer,integer)'
   const [publisher] = await query(`SELECT prosrc AS body,prosecdef AS definer,
     has_function_privilege('anon',oid,'EXECUTE') AS anon
     FROM pg_proc WHERE oid='${signature}'::regprocedure`)

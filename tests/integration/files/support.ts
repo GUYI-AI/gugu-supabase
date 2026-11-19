@@ -211,6 +211,7 @@ export function filesConfig(dbUrl: string, jwksUrl: string, overrides: Partial<F
     jwksUrl,
     jwtSecret: null,
     jwtIssuer: null,
+    inspectSecret: null,
     timeoutMs: 30_000,
     debounceMs: 1_000,
     maxDebounceMs: 5_000,
@@ -283,7 +284,8 @@ export async function childService(dbUrl: string, jwksUrl: string, env: Record<s
           FILES_LOG_LEVEL: 'warn',
           ...env,
         },
-        stdio: ['ignore', 'ignore', 'inherit'],
+        // The service logs to stdout (warn and above here): keep it, so a failure in CI shows the service's side.
+        stdio: ['ignore', 'inherit', 'inherit'],
       })
       const ms = await waitFor(async () => {
         try {

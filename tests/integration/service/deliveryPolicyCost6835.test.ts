@@ -199,7 +199,7 @@ describe('#6835 message_deliveries policy: one check per row read, the same answ
         .map((r) => r['QUERY PLAN']).join('\n')
       expect(plan).not.toMatch(/hashed SubPlan/i)
       expect(plan).toMatch(/Index Cond: \(message_id = ANY/)
-      expect(plan).toMatch(/Filter: chat\.can_see_delivery_of\(message_id\)/)
+      expect(plan).toMatch(/Filter: .*chat\.can_see_delivery_of\(message_id\)/)
     })
   })
 

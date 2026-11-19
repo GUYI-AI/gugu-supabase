@@ -36,11 +36,19 @@ describe('streamed file inspection',()=>{
 })
 describe('download input and signed throttles',()=>{
   it('preserves an explicit missing object in individual and batched metadata without signing',async()=>{
-    const missing={status:'missing',code:'object_not_found',sha256:null}
+    const missing={status:'missing',code:'object_not_found',sha256:null,availability:'unavailable',expired_at:null}
     const deps={userRpc:vi.fn(async()=>({data:missing,error:null}))} as unknown as AttachmentsDeps
     const ref={message_id:'missing'}
     expect(await handleFileResolve(deps,'reader',{ref})).toEqual(missing)
     expect(await handleFileResolve(deps,'reader',{refs:[ref]})).toEqual({files:[{...missing,ref}]})
+  })
+  it('passes overall availability and actual expiry through single and batched metadata',async()=>{
+    const expired={status:'expired',availability:'expired',expired_at:'2026-11-01T00:00:00.000000Z'}
+    const local={status:'ready',source:'local',host_online:false,availability:'available',expired_at:null}
+    const deps={userRpc:vi.fn<AttachmentsDeps['userRpc']>(async(_name,args)=>({data:(args.p_ref as Record<string,unknown>).item_id?local:expired,error:null}))} as unknown as AttachmentsDeps
+    const refs=[{message_id:'expired'},{item_id:'11111111-1111-4111-8111-111111111111'}]
+    expect(await handleFileResolve(deps,'reader',{ref:refs[0]})).toEqual(expired)
+    expect(await handleFileResolve(deps,'reader',{refs})).toEqual({files:[{...expired,ref:refs[0]},{...local,ref:refs[1]}]})
   })
   it('metadata display calls only the read-only RPC and never invokes a provider or signing RPC',async()=>{
     const calls:string[]=[]
@@ -142,6 +150,20 @@ describe('one download contract with optional provider throttling',()=>{
     const result=await handleFileDownload(f.deps,'reader',{ref:{message_id:'m'},request_id:request})
     expect(f.sign.mock.calls[0]?.[1]).toBe(thumbnail)
     expect(result).toHaveProperty('thumb_url')
+    expect('thumb_url'in result&&result.thumb_url!==null).toBe(thumbnail)
+    expect(result).toHaveProperty('url','https://bytes.example/file')
+  })
+  it.each([
+    {label:'ordinary photo',width:4032,height:3024,thumbnail:true},
+    {label:'long screenshot',width:1170,height:40000,thumbnail:true},
+    {label:'narrow strip',width:100,height:65000,thumbnail:true},
+    {label:'pixels at the documented limit',width:15625,height:16000,thumbnail:true},
+    {label:'pixels above the documented limit',width:20000,height:20000,thumbnail:false},
+    {label:'unknown dimensions',width:null,height:null,thumbnail:true},
+  ])('limits thumbnails by source dimensions for a small-byte $label',async({width,height,thumbnail})=>{
+    const f=fixture('oss',{}, {content_type:'image/png',size_bytes:48_685,width,height})
+    const result=await handleFileDownload(f.deps,'reader',{ref:{message_id:'m'},request_id:request})
+    expect(f.sign.mock.calls[0]?.[1]).toBe(thumbnail)
     expect('thumb_url'in result&&result.thumb_url!==null).toBe(thumbnail)
     expect(result).toHaveProperty('url','https://bytes.example/file')
   })

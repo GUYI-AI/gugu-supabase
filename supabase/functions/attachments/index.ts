@@ -1,9 +1,10 @@
 // Community attachments: bytes in the project's Supabase Storage by default, or Alibaba Cloud OSS + CDN when every OSS
-// variable is set (see ../_shared/attachment-storage-config.ts). User/RLS and GC authorization are enforced below.
+// variable is set (see ../_shared/attachment-storage-config.ts). With OSS, the file service hashes staged bytes
+// (GUGU_FILES_INSPECT_URL / GUGU_FILES_INSPECT_SECRET). User/RLS and GC authorization are enforced below.
 import { createClient } from 'npm:@supabase/supabase-js@2.110.9'
 import {
   type AttachmentsDeps,
-  handleCommit,
+  handleCommit, handleFinish, handlePending,
   handleSessionCommit,
   handleSessionUrls,
   handleSessionRevoke,
@@ -12,7 +13,10 @@ import {
   handleShare,
   handleGc,
   handleUpload,
+  handleUploadComplete,
+  handleUploadParts,
   handleUrls,
+  principalOf,
   Refusal,
 } from '../_shared/attachments-core.ts'
 
@@ -20,8 +24,11 @@ import { ossObjectStorage, supabaseObjectStorage } from '../_shared/attachment-o
 import { type AttachmentStorageConfig, attachmentStorageConfig, StorageConfigError } from '../_shared/attachment-storage-config.ts'
 import { handleUsageImport,handleStorageInventory,handleFileResolve } from '../_shared/file-transfer-core.ts'
 import { handleProjectFiles } from '../_shared/project-file-transfer-core.ts'
+import { configureAttachmentGc } from '../_shared/attachment-gc-config.ts'
 import { ossDirectSigner } from '../_shared/oss-direct-url.ts'
+import { fileServiceInspector } from '../_shared/file-inspection.ts'
 import { handleDocumentImport, WORKSPACE_TEXT_MAX_BYTES, workspaceUploadKind } from '../_shared/document-import-core.ts'
+import { handleStagingCleanup, handleStagingCleanupControl, StagingCleanupError } from '../_shared/staging-cleanup-core.ts'
 
 const env = (key: string): string => Deno.env.get(key)?.trim() ?? ''
 
@@ -93,7 +100,8 @@ function depsFor(authorization: string, storage: AttachmentStorageConfig): Attac
     },
     textFiles: { maxBytes: WORKSPACE_TEXT_MAX_BYTES, classify: workspaceUploadKind },
     objects: storage.kind === 'oss'
-      ? ossObjectStorage({ oss: storage.oss, cdn: storage.cdn, directSign:ossDirectSigner(storage.oss),fetch: (input, init) => fetch(input, init) })
+      ? ossObjectStorage({ oss: storage.oss, cdn: storage.cdn, directSign:ossDirectSigner(storage.oss),fetch: (input, init) => fetch(input, init),
+        inspector: fileServiceInspector({ url: env('GUGU_FILES_INSPECT_URL'), secret: env('GUGU_FILES_INSPECT_SECRET'), fetch: (input, init) => fetch(input, init) }) })
       : supabaseObjectStorage({
         url, serviceKey: env('SUPABASE_SERVICE_ROLE_KEY'), bucket: storage.bucket,
         fetch: (input, init) => fetch(input, init),
@@ -106,12 +114,13 @@ function depsFor(authorization: string, storage: AttachmentStorageConfig): Attac
       }),
     fetch: (input, init) => fetch(input, init),
     userRpc: async (fn, args) => {
-      const { data, error } = await asUser.rpc(fn, args)
-      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code } : null }
+      const { data, error, status } = await asUser.rpc(fn, args)
+      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code, status } : null }
     },
-    serviceRpc: async (fn, args) => {
-      const { data, error } = await asService.rpc(fn, args)
-      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code } : null }
+    serviceRpc: async (fn, args, signal) => {
+      const query = asService.rpc(fn, args)
+      const { data, error, status } = await (signal ? query.abortSignal(signal) : query)
+      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code, status } : null }
     },
     storageSignedUrl:signStorage,
     storageRemove: async (bucket, object) => {
@@ -144,6 +153,18 @@ Deno.serve(async (request) => {
   const authorization = request.headers.get('Authorization') ?? ''
   try {
     const deps = depsFor(authorization, storage)
+    if (route === 'gc-configure' || route === 'gc-status') {
+      if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY'))) {
+        return json({ error: 'denied', message: 'GC configuration is restricted to the service' }, 401)
+      }
+      if (route === 'gc-configure') {
+        return json({ gc: await configureAttachmentGc(deps.serviceRpc, env('SUPABASE_URL'),
+          env('SUPABASE_SERVICE_ROLE_KEY'), await request.json()) })
+      }
+      const { data, error } = await deps.serviceRpc('file_blob_gc_control_status', {})
+      if (error) throw new Refusal(500, 'failed', 'Attachment GC status is unavailable')
+      return json({ gc: data })
+    }
     if (route === 'usage-import'||route==='storage-inventory'||route==='document-import') {
       if (!sameSecret(authorization.replace(/^Bearer\s+/i,''),env('SUPABASE_SERVICE_ROLE_KEY'))) {
         return json({error:'denied',message:'Usage ingestion is restricted to the service'},401)
@@ -152,30 +173,45 @@ Deno.serve(async (request) => {
       if (route==='document-import') return json(await handleDocumentImport(deps,body))
       return json(await (route==='usage-import'?handleUsageImport(deps.serviceRpc,body):handleStorageInventory(deps.serviceRpc,body)))
     }
+    if (['staging-cleanup', 'staging-cleanup-status', 'staging-cleanup-configure', 'staging-cleanup-evidence'].includes(route)) {
+      if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY')))
+        return json({ error: 'denied', message: 'Staging cleanup is restricted to the service' }, 401)
+      const body = await request.json().catch(() => null)
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return json({ error: 'invalid_evidence' }, 400)
+      try {
+        if (route === 'staging-cleanup') {
+          if (Object.keys(body).length) return json({ error: 'invalid_controls' }, 400)
+          return json(await handleStagingCleanup({ serviceRpc: deps.serviceRpc, objects: deps.objects!, log }))
+        }
+        return json({ cleanup: await handleStagingCleanupControl(deps.serviceRpc, route, body) })
+      } catch (error) {
+        const code = error instanceof StagingCleanupError ? error.code : 'staging_cleanup_failed'
+        return json({ error: code }, code.startsWith('invalid_') && !(error instanceof StagingCleanupError && error.uncertain) ? 400 : 503)
+      }
+    }
     if (route === 'gc') {
       if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY'))) {
         return json({ error: 'denied', message: 'gc is the server\'s own job' }, 401)
       }
-      const result = await handleGc(deps)
-      // OSS expires abandoned staging uploads with its own lifecycle rule; only the Supabase bucket needs this sweep.
-      if (storage.kind === 'oss') return json({ ...result, staging_deleted: 0 })
-      const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })
-      const bucket = storage.bucket
-      const { data: expired, error: expiredError } = await service.rpc('attachment_expired_staging', { p_bucket: bucket })
-      if (expiredError) throw new Error('Could not list expired staging uploads')
-      const names = ((expired ?? []) as Array<{ name: string }>).map((row) => row.name)
-      if (names.length) {
-        const { error } = await service.storage.from(bucket).remove(names)
-        if (error) throw new Error('Could not remove expired staging uploads')
-      }
-      return json({ ...result, staging_deleted: names.length })
+      let stagingDeleted = 0
+      const result = await handleGc(deps, 'kick', async (remaining, guard) => {
+        // Committed staging uses the separate evidence-gated entry; this bounded sweep covers legacy bucket staging only.
+        if (storage.kind === 'oss') return
+        const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })
+        const { data: expired, error } = await service.rpc('attachment_expired_staging', { p_bucket: storage.bucket })
+        if (error) throw new Error('Could not list expired staging uploads')
+        for (const row of ((expired ?? []) as Array<{ name: string }>).slice(0, remaining)) {
+          await guard()
+          const { error } = await service.storage.from(storage.bucket).remove([row.name])
+          if (error) throw new Error('Could not remove expired staging uploads')
+          stagingDeleted++
+        }
+      })
+      return json({ ...result, staging_deleted: stagingDeleted })
     }
-    const asUser = createClient(env('SUPABASE_URL'), env('SUPABASE_ANON_KEY'), {
-      global: { headers: { Authorization: authorization } },
-      auth: { persistSession: false, autoRefreshToken: false },
-    })
-    const { data: who, error: whoError } = await asUser.auth.getUser()
-    if (whoError || !who?.user?.id) return json({ error: 'denied', message: 'sign in first' }, 401)
+    // PostgREST checks the JWT's signature and expiry; the RPC checks that its session still exists and the account is
+    // neither banned nor deleted. That is what Auth's getUser answered, without a second server round trip per call.
+    const who = { user: { id: await principalOf(deps.userRpc) } }
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
     if(route.startsWith('file-')&&route!=='file-resolve') return json(await handleProjectFiles(deps,who.user.id,route,body))
     switch (route) {
@@ -183,6 +219,10 @@ Deno.serve(async (request) => {
         return json(await handleFileResolve(deps,who.user.id,body))
       case 'upload':
         return json(await handleUpload(deps, who.user.id,body))
+      case 'upload-parts':
+        return json(await handleUploadParts(deps, who.user.id, body))
+      case 'upload-complete':
+        return json(await handleUploadComplete(deps, who.user.id, body))
       case 'session-commit':
         return json({ attachment: await handleSessionCommit(deps, who.user.id, body) })
       case 'session-revoke':
@@ -191,6 +231,10 @@ Deno.serve(async (request) => {
         return json(await handleSessionUrls(deps, who.user.id, body))
       case 'commit':
         return json({ message: await handleCommit(deps, who.user.id, body) })
+      case 'finish':
+        return json(await handleFinish(deps, who.user.id, body))
+      case 'pending':
+        return json(await handlePending(deps))
       case 'place':
         return json({ item: await handlePlace(deps, who.user.id, body) })
       case 'forward':
@@ -203,7 +247,9 @@ Deno.serve(async (request) => {
         return json({ error: 'invalid', message: `no route ${route}` }, 404)
     }
   } catch (error) {
-    if (error instanceof Refusal) return json({ error: error.code, message: error.message }, error.status)
+    if (error instanceof Refusal) {
+      return json({ error: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) }, error.status)
+    }
     log('failed', { route, error_type:error instanceof Error?error.name:'unknown' })
     return json({ error: 'failed', message: 'attachments failed; try again' }, 500)
   }

@@ -1,5 +1,6 @@
 import { type AttachmentsDeps,call,handleGc,objectStorage,Refusal } from './attachments-core.ts'
 import { fileRef,handleFileDownload } from './file-transfer-core.ts'
+import { ObjectStorageError } from './object-storage.ts'
 
 function text(body:Record<string,unknown>,name:string) {
   if(typeof body[name]!=='string'||!body[name]) throw new Refusal(400,'invalid',name+' is required')
@@ -13,11 +14,28 @@ function id(body:Record<string,unknown>,name:string) {
 export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:string,body:Record<string,unknown>) {
   const actor=typeof body.as==='string'?body.as:user
   if(route==='file-download') return handleFileDownload(deps,user,body)
-  if(route==='file-request') return call(deps.userRpc,'file_temporary_request',{p_ref:fileRef(body.ref),p_as:actor,p_id:id(body,'request_id')})
+  if(route==='file-request') {
+    const state=await call(deps.userRpc,'file_temporary_request',{p_ref:fileRef(body.ref),p_as:actor,p_id:id(body,'request_id')}) as Record<string,unknown>
+    if(body.download_request_id===undefined) return state
+    // A reader that names its download gets the lease in this same call once the copy is ready: one round trip, not two.
+    const download=id(body,'download_request_id')
+    return {...state,download:state.status==='ready'&&state.transfer_status==='ready'?await handleFileDownload(deps,user,{ref:body.ref,as:body.as,request_id:download}):null}
+  }
   if(route==='file-pending') return {transfers:await call(deps.userRpc,'file_temporary_pending',{p_device:text(body,'device_id')})}
   if(route==='file-read-complete') {
-    await call(deps.userRpc,'file_temporary_read_complete',{p_download:id(body,'download_id'),p_as:actor})
-    return {acknowledged:true}
+    const download=id(body,'download_id')
+    if(body.expect===undefined) {
+      await call(deps.userRpc,'file_temporary_read_complete',{p_download:download,p_as:actor})
+      return {acknowledged:true}
+    }
+    // With `expect`, the version is re-resolved first and the read acknowledged only if it is still the one read: the
+    // order a reader keeps with a separate file-resolve, and `current` lets it make its own checks without that call.
+    const expect=body.expect as Record<string,unknown>
+    if(!expect||typeof expect!=='object'||typeof expect.sha256!=='string'||typeof expect.size_bytes!=='number') throw new Refusal(400,'invalid','expect needs sha256 and size_bytes')
+    const current=await call(deps.userRpc,'file_resolve_as',{p_ref:fileRef(body.ref),p_as:actor}) as Record<string,unknown>
+    const same=current.status==='ready'&&current.sha256===expect.sha256&&current.size_bytes===expect.size_bytes
+    if(same) await call(deps.userRpc,'file_temporary_read_complete',{p_download:download,p_as:actor})
+    return {acknowledged:same,current}
   }
   // The holder could not send this copy: the reader is told why on its next poll instead of waiting out its bound.
   if(route==='file-decline') {
@@ -29,7 +47,7 @@ export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:
   const store=objectStorage(deps)
   if(route==='file-accept') {
     const retired=await call(deps.serviceRpc,'file_temporary_expire',{p_limit:500,p_request:transfer,p_host:user,p_needed:bytes})
-    if(Number(retired)>0) await handleGc(deps)
+    if(Number(retired)>0) await handleGc(deps,'file-accept')
     const permit=await call(deps.userRpc,'file_temporary_accept',{p_id:transfer,p_size:bytes}) as {staging_key:string;signed_at:string;expires_at:string;max_bytes:number}
     const seconds=(Date.parse(permit.expires_at)-Date.parse(permit.signed_at))/1000
     const bounds=await store.uploadBounds(bytes,seconds)
@@ -43,8 +61,10 @@ export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:
   const decision=await call(deps.serviceRpc,'file_temporary_host_for',{p_id:transfer,p_host:user}) as {object_name:string;ciphertext_bytes:number;state:string}
   if(Number(decision.ciphertext_bytes)!==bytes) throw new Refusal(409,'upload_changed','Ciphertext size differs from its reservation')
   if(decision.state!=='ready') {
-    if(!store.inspect) throw new Refusal(503,'not_configured','Streamed object inspection is unavailable')
-    const actual=await store.inspect(decision.object_name,bytes)
+    const actual=await store.inspect(decision.object_name,bytes).catch(error=>{
+      if(error instanceof ObjectStorageError&&error.status===503) throw new Refusal(503,'not_configured',error.message)
+      throw error
+    })
     if(actual.sizeBytes!==bytes||actual.sha256!==sha) throw new Refusal(409,'upload_changed','Ciphertext differs from its commitment')
   }
   await call(deps.serviceRpc,'file_temporary_commit',{p_id:transfer,p_host:user,p_sha:sha,p_size:bytes,p_key:key})

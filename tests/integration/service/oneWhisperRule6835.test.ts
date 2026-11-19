@@ -258,7 +258,7 @@ describe('#6835 one whisper rule: every entry reads the same answer sheet', () =
     await inRollback(async () => {
       const clientCalled = [
         'chat.can_read_message(text,text)',
-        'chat.list_topics_of_chat(text,text)',
+        'chat.list_topics_of_chat(text,text,text)',
         'chat.message_history_as(text,text,text,bigint,integer)',
         'chat.message_reply_preview_for(text,text)',
         'chat.message_search_as(text,text,text,bigint,integer)',

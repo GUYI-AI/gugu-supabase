@@ -2,7 +2,7 @@
 // 签名对官方文档的样例;其余是这份代码在 OSS / CDN 实测里跑通的那些(gugu-base evidence/2026-10-16-oss-cdn-probe/),
 // 用假的 OSS 与库判逻辑:先复制再登记、撞上正在回收重来、暂存没了交给库认登记、签名链接、回收。
 import { createHash } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { md5Hex } from '../../../supabase/functions/_shared/md5'
 import {
   cdnAuthKey,
@@ -19,6 +19,8 @@ import { hasThumbnail, objectHeaders, sniff } from '../../../supabase/functions/
 import {
   type AttachmentsDeps,
   handleCommit,
+  handleFinish,
+  handlePending,
   handleSessionCommit,
   handleSessionUrls,
   handleForward,
@@ -30,6 +32,8 @@ import {
   Refusal,
   refusalFromDb,
 } from '../../../supabase/functions/_shared/attachments-core'
+import { ObjectStorageError } from '../../../supabase/functions/_shared/object-storage'
+import { inspectSource } from '../../../services/files/src/inspect.mjs'
 
 const OSS: OssConfig = {
   region: 'cn-wulanchabu', bucket: 'gugu-files-test', endpointInternal: 'oss-cn-wulanchabu-internal.aliyuncs.com',
@@ -49,6 +53,26 @@ describe('签名', () => {
     const bytes = new Uint8Array(1000).map((_, i) => (i * 37) & 0xff)
     expect(md5Hex(bytes)).toBe(createHash('md5').update(bytes).digest('hex'))
   })
+
+  it('the thumbnail fits a box OSS can encode, so long screenshots and narrow strips are bounded on both sides', () => {
+    // OSS: resize output side ≥ 16384 → ZoomSizeInvalid; webp side ≥ 16383 → WebpExceedRange (both 400 on devdb).
+    const box = Object.fromEntries(THUMB_PROCESS.split('/')[1]!.split(',').slice(1).map(part => part.split('_') as [string, string]))
+    expect(box.m).toBe('lfit')
+    expect(Number(box.w)).toBe(560)
+    expect(Number(box.h)).toBeLessThan(16383)
+    expect(THUMB_PROCESS.endsWith('/format,webp')).toBe(true)
+  })
+
+  // The sources that came back 400 (ZoomSizeInvalid / WebpExceedRange) on devdb with `resize,w_560`: fitted into
+  // THUMB_PROCESS's box the way OSS's m_lfit does (keep aspect, fit inside, never enlarge), every side stays encodable.
+  it.each([[1170, 40000], [560, 16383], [8, 30001], [100, 31000], [100, 65000], [4032, 3024], [40000, 100]])(
+    'a %i × %i source fits the thumbnail box below OSS limits', (width, height) => {
+      const box = Object.fromEntries(THUMB_PROCESS.split('/')[1]!.split(',').slice(1).map(part => part.split('_') as [string, string]))
+      const scale = Math.min(Number(box.w) / width, Number(box.h) / height, 1)
+      const [w, h] = [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))]
+      expect(w).toBeLessThanOrEqual(560)
+      expect(Math.max(w, h)).toBeLessThan(16383)
+    })
 
   it('CDN 鉴权 A 对阿里云文档的样例;签名链接只签路径,缩略图在同一个签名后面加 x-oss-process,有效期 1800 s', () => {
     expect(cdnAuthKey('/video/standard/test.mp4', 'aliyuncdnexp1234', { ts: 1444435200, rand: '0', uid: '0' }))
@@ -106,6 +130,23 @@ describe('字节是什么(看文件头)', () => {
     // JPEG:SOI、一个 APP0、SOF0(高 480、宽 640)
     const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8, 0x01, 0xe0, 0x02, 0x80, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     expect(sniff(jpeg)).toEqual({ contentType: 'image/jpeg', image: true, width: 640, height: 480 })
+    // A camera JPEG names its orientation in EXIF (APP1, IFD0 tag 0x0112); 5–8 are shown turned a quarter, so the size is
+    // the shown one. Both TIFF byte orders.
+    const exif = (orientation: number, le: boolean) => {
+      const u16 = (v: number) => (le ? [v & 0xff, v >> 8] : [v >> 8, v & 0xff])
+      const tiff = [...(le ? [0x49, 0x49, 0x2a, 0] : [0x4d, 0x4d, 0, 0x2a]), ...(le ? [8, 0, 0, 0] : [0, 0, 0, 8]),
+        ...u16(1), ...u16(0x0112), ...u16(3), ...(le ? [1, 0, 0, 0] : [0, 0, 0, 1]), ...u16(orientation), 0, 0, 0, 0, 0, 0]
+      const payload = [...new TextEncoder().encode('Exif'), 0, 0, ...tiff]
+      return new Uint8Array([0xff, 0xd8, 0xff, 0xe1, ...u16be(payload.length + 2), ...payload, ...jpeg.subarray(2)])
+    }
+    const u16be = (v: number) => [v >> 8, v & 0xff]
+    for (const le of [true, false]) for (let o = 1; o <= 8; o++) {
+      expect(sniff(exif(o, le))).toEqual({ contentType: 'image/jpeg', image: true, ...(o >= 5 ? { width: 480, height: 640 } : { width: 640, height: 480 }) })
+    }
+    // A real JPEG (Pillow) of 37×11 pixels with EXIF orientation 6 followed by an XMP packet, also APP1: only the EXIF one
+    // names the orientation. Cut right after its frame header.
+    const exifThenXmp = Uint8Array.from(atob('/9j/4AAQSkZJRgABAQAAAQABAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAYAAAAAAAD/4QDsaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wLwA8eDp4bXBtZXRhIHhtbG5zOng9ImFkb2JlOm5zOm1ldGEvIj48cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPjxyZGY6RGVzY3JpcHRpb24geG1sbnM6dGlmZj0iaHR0cDovL25zLmFkb2JlLmNvbS90aWZmLzEuMC8iIHRpZmY6T3JpZW50YXRpb249IjYiLz48L3JkZjpSREY+PC94OnhtcG1ldGE+/9sAQwAIBgYHBgUIBwcHCQkICgwUDQwLCwwZEhMPFB0aHx4dGhwcICQuJyAiLCMcHCg3KSwwMTQ0NB8nOT04MjwuMzQy/9sAQwEJCQkMCwwYDQ0YMiEcITIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy/8AAEQgACwAlAwEiAAIRAQMRAQ=='), (c) => c.charCodeAt(0))
+    expect(sniff(exifThenXmp)).toEqual({ contentType: 'image/jpeg', image: true, width: 11, height: 37 })
     const gif = new Uint8Array([...new TextEncoder().encode('GIF89a'), 0x20, 0x00, 0x10, 0x00, 0, 0])
     expect(sniff(gif)).toEqual({ contentType: 'image/gif', image: true, width: 32, height: 16 })
     const webp = new Uint8Array(30)
@@ -145,8 +186,8 @@ function fakes(opts: {
   afterGet?: (bucket: Bucket) => void
   /** 登记成功之后。 */
   afterRegister?: (bucket: Bucket) => void
-  /** 转发的原消息是老式附件:库说的那一行,和 chat-media 里那个对象的字节(null = 对象没了)。 */
-  legacy?: { row: { object_name: string; file_name: string; content_type: string | null }; bytes: Uint8Array | null }
+  /** file_blob_settle's answer for a declared attachment's bytes ('ready' unless told). */
+  settle?: 'ready' | 'failed'
   /** 按引用发的是文本文件:它此刻的正文,和库里最新一版已经带着字节的正文(null = 没有带字节的一版)。 */
   document?: { text: string; snapshotted: string | null }
 } = {}) {
@@ -156,6 +197,7 @@ function fakes(opts: {
   const order: string[] = []
   const rpcs: { as: 'user' | 'service'; fn: string; args: Record<string, unknown> }[] = []
   const logs: string[] = []
+  const events: Record<string, unknown>[] = []
   const removed: string[] = []
   const registerErrors = [...(opts.registerErrors ?? [])]
   const controls: {as:'user'|'service';fn:string;args:Record<string,unknown>}[]=[]
@@ -163,15 +205,22 @@ function fakes(opts: {
     textFiles: { maxBytes: 1024 * 1024, classify: () => ({ kind: 'file', why: 'binary fixture' }) },
     oss: OSS,
     cdn: CDN,
+    // The file service's own inspection over this fake OSS; its HTTP refusals map as fileServiceInspector maps them.
+    inspector: async (source, limit, retain) => {
+      try {
+        const r = await inspectSource({ source, limit, retain }, { fetch: deps.fetch as typeof fetch })
+        return { bytes: new Uint8Array(r.prefix), sizeBytes: r.sizeBytes, sha256: r.sha256, etag: r.etag }
+      } catch (error) {
+        const status = (error as { status?: number }).status
+        if (status === 404 || status === 413) throw new ObjectStorageError(status, status === 413 ? 'too_large' : null, String(error))
+        throw error
+      }
+    },
     fetch: async (url, init) => {
       order.push('object:' + (init?.method ?? 'GET'))
       const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>))
       calls.push({ method: init?.method ?? 'GET', url, headers })
       if ((init?.method ?? 'GET') === 'GET' && new URL(url).searchParams.has('versioning')) return new Response('<VersioningConfiguration/>',{status:200})
-      if ((init?.method ?? 'GET') === 'GET' && url.startsWith('https://db.example/storage/v1/object/sign/')) {
-        const bytes = opts.legacy?.bytes
-        return bytes ? new Response(bytes as unknown as BodyInit, { status: 200 }) : new Response('{"error":"not_found"}', { status: 400 })
-      }
       if ((init?.method ?? 'GET') === 'GET' && url.includes('/staging/')) {
         const staged = bucket.staging
         if (!staged) return new Response('<Error><Code>NoSuchKey</Code></Error>', { status: 404 })
@@ -227,17 +276,13 @@ function fakes(opts: {
           sha256:'ab'.repeat(32),size_bytes:old?5:ref.message_id?7:10,
           content_type:old?'application/x':ref.message_id?'application/pdf':'image/png',width:old?null:640,height:old?null:480,
           download_id:args.p_id,signed_at:'2026-10-16T12:00:00Z',expires_at:'2026-10-16T12:01:00.000Z',transfer_id:null,
-          ...(opts.legacy&&ref.message_id?{bucket_id:'chat-media',object_name:opts.legacy.row.object_name,
-            file_name:opts.legacy.row.file_name,content_type:opts.legacy.row.content_type,size_bytes:opts.legacy.bytes?.length??1}:{}),
         },error:null}
       }
       rpcs.push({ as: 'user', fn, args })
       if (fn === 'attachment_commit') return { data: [{ id: args.p_message_id, file_version: 1 }], error: null }
+      if (fn === 'attachment_declare') return { data: 'pending-blob', error: null }
       if (fn === 'send_friend_file_as_owner') return { data: { chat_id: 'dm-1', message_id: 'm-o', sender_user_id: USER, sent_by_agent: true }, error: null }
-      if (fn === 'attachment_legacy_source') return { data: opts.legacy ? [opts.legacy.row] : [], error: null }
       if (fn === 'attachment_forward') {
-        // 老式的原消息、又没带上传:库说要字节(和迁移里那一句同一个 HINT)。
-        if (opts.legacy && !args.p_staging_key) return { data: null, error: { message: 'message old-1 is an old attachment: forward it through attachments/forward', hint: 'attachment_forward_needs_bytes', code: 'P0001' } }
         return { data: [{ id: args.p_message_id, forwarded_from_message_id: args.p_source_message_id }], error: null }
       }
       if (fn === 'attachment_document_snapshot') {
@@ -266,8 +311,10 @@ function fakes(opts: {
     },
     serviceRpc: async (fn, args) => {
       order.push('service:' + fn)
+      if (fn === 'file_blob_gc_run_begin') return { data: { acquired: true, token: '11111111-1111-4111-8111-111111111111', batch_limit: 50, concurrency: 1 }, error: null }
+      if (fn === 'file_blob_gc_run_renew' || fn === 'file_blob_gc_run_end') return { data: true, error: null }
       if (fn==='file_managed_upload_for') {controls.push({as:'service',fn,args});return {data:{max_bytes:MAX_ATTACHMENT_BYTES},error:null}}
-      if (fn==='file_managed_upload_registered'||fn==='file_transfer_expire'||fn==='file_temporary_expire') {controls.push({as:'service',fn,args});return {data:null,error:null}}
+      if (fn==='file_managed_upload_registered'||fn==='file_transfer_expire'||fn==='file_temporary_expire'||fn==='file_managed_upload_parts_claim') {controls.push({as:'service',fn,args});return {data:null,error:null}}
       if (fn==='file_transfer_settings') {controls.push({as:'service',fn,args});return {data:{},error:null}}
       rpcs.push({ as: 'service', fn, args })
       if (fn === 'file_blob_register') {
@@ -276,7 +323,8 @@ function fakes(opts: {
         opts.afterRegister?.(bucket)
         return { data: [{ blob_id: 'b1', created: opts.registerCreated ?? true }], error: null }
       }
-      if (fn === 'file_blob_gc_claim') return { data: opts.claimed ?? [], error: null }
+      if (fn === 'file_blob_settle') return { data: opts.settle === 'failed' ? { status: 'failed' } : { status: 'ready', blob_id: 'b1', created: true }, error: null }
+      if (fn === 'file_blob_gc_run_claim') return { data: opts.claimed ?? [], error: null }
       if (fn === 'file_blob_gc_finish' || fn === 'file_blob_gc_fail') return { data: null, error: null }
       return { data: null, error: { message: `no fake for ${fn}` } }
     },
@@ -284,11 +332,11 @@ function fakes(opts: {
     storageRemove: async (bucket, object) => void removed.push(`${bucket}/${object}`),
     now: () => new Date('2026-10-16T12:00:00Z'),
     uuid: () => '22222222-2222-4222-8222-222222222222',
-    log: (stage) => void logs.push(stage),
+    log: (stage, extra) => { logs.push(stage); events.push({ stage, ...extra }) },
     retryDelayMs: 0,
     documentText: async () => opts.document!.text,
   }
-  return { deps, calls, rpcs, controls, logs, removed, bucket, order }
+  return { deps, calls, rpcs, controls, logs, events, removed, bucket, order }
 }
 /** The quota/actor guard must precede every byte read. Staging remains immutable and charged. */
 function expectManagedCommit(f: ReturnType<typeof fakes>, publication: string, start = 0) {
@@ -418,6 +466,14 @@ describe('提交', () => {
     await handleCommit(captioned.deps, USER, commitBody({ caption: '看这张' }))
     expectManagedCommit(captioned, 'attachment_commit')
     expect(captioned.rpcs[1]!.args).toMatchObject({ p_caption: '看这张' })
+    // 一次发出的几个文件(gugu#2581):组和张数照传;不在一组里就不带这两个键(同上,老库没有这两个参数)。
+    expect(rpcs[1]!.args).not.toHaveProperty('p_send_group_id')
+    expect(rpcs[1]!.args).not.toHaveProperty('p_send_group_size')
+    const grouped = fakes({ object: bytes })
+    const group = '6f1c2b1e-4a7d-4c3e-9b8a-2d5e7f9a1b3c'
+    await handleCommit(grouped.deps, USER, commitBody({ send_group_id: group, send_group_size: 3 }))
+    expectManagedCommit(grouped, 'attachment_commit')
+    expect(grouped.rpcs[1]!.args).toMatchObject({ p_send_group_id: group, p_send_group_size: 3 })
   })
 
   it('不是图片:客户端报的类型像 MIME 就记它,对象上当附件下载;报的是 image/* 却不是图片 ⇒ octet-stream', async () => {
@@ -490,6 +546,72 @@ describe('提交', () => {
     expect(refusalFromDb({ message: 'rate-limited', code: 'PT429' })).toMatchObject({ status: 429 })
     expect(refusalFromDb({ message: 'something else' })).toMatchObject({ status: 500, code: 'failed' })
     expect(new Refusal(400, 'invalid', 'x')).toBeInstanceOf(Error)
+  })
+
+  it('#2383 收件人从来不在群里:400 recipient_not_member,带上库给的 id 列表,不当成可重试的 500', () => {
+    const refusal = refusalFromDb({ message: 'recipient_not_member', hint: 'recipient_not_member', code: 'P0001', details: 'a,b' })
+    expect(refusal).toMatchObject({ status: 400, code: 'recipient_not_member', message: 'recipient_not_member', details: 'a,b' })
+    // Other refusals never carry the database's details through.
+    expect(refusalFromDb({ message: 'x', hint: 'attachment_source_gone', details: 'internal' }).details).toBeUndefined()
+  })
+})
+
+// Owner 11-15: a message is its text and its files' index. A declared commit sends the message before any byte is read;
+// finish hashes the bytes later and settles the declaration (or fails it); the old upload-first commit is unchanged.
+describe('bytes after the message', () => {
+  it.each(['temporary','permanent'])('declared keep %s travels with the declaration, with no fallible mark after the message', async keep => {
+    const f = fakes({ object: null })
+    await expect(handleCommit(f.deps, USER, commitBody({ sha256: 'ab'.repeat(32), size_bytes: 64, keep })))
+      .resolves.toEqual({ id: 'm1', file_version: 1 })
+    expect(f.rpcs.map(r => r.fn)).toEqual(['attachment_declare','attachment_commit'])
+    expect(f.rpcs[0]!.args).toMatchObject({ p_keep: keep })
+  })
+  it('finish ignores the released client keep field and does not issue a separate mark', async () => {
+    const f = fakes({ object: pngBytes() })
+    await expect(handleFinish(f.deps, USER, { staging_key: STAGING, file_name: 'shot.png', message_id: 'm1', keep: 'temporary' }))
+      .resolves.toEqual({ status: 'ready' })
+    expect(f.rpcs.some(r => r.fn === 'file_storage_mark_as')).toBe(false)
+  })
+
+  const declared = { sha256: 'ab'.repeat(32), size_bytes: 64, content_type: 'image/png' }
+  it('a declared commit sends the message without reading, copying or registering any byte', async () => {
+    const f = fakes({ object: null })
+    await expect(handleCommit(f.deps, USER, commitBody({ ...declared, width: 800, height: 600 }))).resolves.toEqual({ id: 'm1', file_version: 1 })
+    expect(f.calls, 'no object read or written').toEqual([])
+    expect(f.rpcs.map(r => `${r.as}:${r.fn}`)).toEqual(['user:attachment_declare', 'user:attachment_commit'])
+    expect(f.rpcs[0]!.args).toEqual({ p_staging_key: STAGING, p_sha256: 'ab'.repeat(32), p_size_bytes: 64, p_content_type: 'image/png', p_width: 800, p_height: 600 })
+    const file = fakes({ object: null })
+    await handleCommit(file.deps, USER, commitBody({ ...declared, content_type: 'application/pdf' }))
+    expect(file.rpcs[0]!.args, 'not an image: no size to declare').not.toHaveProperty('p_width')
+  })
+  it('finish hashes the bytes this function read and settles the declaration with them; a resumed upload names its own key', async () => {
+    const bytes = pngBytes(), f = fakes({ object: bytes })
+    await expect(handleFinish(f.deps, USER, { staging_key: STAGING, file_name: 'shot.png', message_id: 'm1' })).resolves.toEqual({ status: 'ready' })
+    const settle = f.rpcs.find(r => r.fn === 'file_blob_settle')!
+    expect(settle.as).toBe('service')
+    expect(settle.args).toMatchObject({ p_uploader: USER, p_pending_key: STAGING, p_upload_key: STAGING, p_sha256: createHash('sha256').update(bytes).digest('hex'), p_size_bytes: 64, p_content_type: 'image/png', p_width: 800, p_height: 600 })
+    expect(f.rpcs.some(r => ['file_blob_register', 'file_managed_upload_registered'].includes(r.fn)), 'a declared attachment settles and registers in one RPC').toBe(false)
+    const resumed = fakes({ object: bytes }), again = `staging/${USER}/44444444-4444-4444-8444-444444444444`
+    await handleFinish(resumed.deps, USER, { staging_key: STAGING, upload_key: again, file_name: 'shot.png', message_id: 'm1' })
+    expect(resumed.rpcs.find(r => r.fn === 'file_blob_settle')!.args).toMatchObject({ p_pending_key: STAGING, p_upload_key: again })
+  })
+  it('bytes that are not the declared file: 409 upload_mismatch; no upload there: 409 upload_missing; another\'s key: 400 before reading', async () => {
+    const wrong = fakes({ object: pngBytes(), settle: 'failed' })
+    await expect(handleFinish(wrong.deps, USER, { staging_key: STAGING, file_name: 'shot.png' })).rejects.toMatchObject({ status: 409, code: 'upload_mismatch' })
+    const missing = fakes({ object: null })
+    await expect(handleFinish(missing.deps, USER, { staging_key: STAGING, file_name: 'shot.png' })).rejects.toMatchObject({ status: 409, code: 'upload_missing' })
+    expect(missing.rpcs.some(r => r.fn === 'file_blob_settle')).toBe(false)
+    const other = fakes({ object: pngBytes() })
+    await expect(handleFinish(other.deps, '33333333-3333-4333-8333-333333333333', { staging_key: STAGING, file_name: 'shot.png' })).rejects.toMatchObject({ status: 400 })
+    expect(other.calls).toEqual([])
+  })
+  it('pending lists the caller\'s declarations still waiting for bytes, as the caller (a restarted sender resumes them)', async () => {
+    const f = fakes({ object: null })
+    const rows = [{ staging_key: STAGING, message_id: 'm1', chat_id: 'c1', as: USER, sha256: 'ab'.repeat(32), size_bytes: 64, content_type: 'image/png' }]
+    const base = f.deps.userRpc
+    f.deps.userRpc = async (fn, args) => fn === 'attachment_pending_mine' ? { data: rows, error: null } : base(fn, args)
+    await expect(handlePending(f.deps)).resolves.toEqual({ uploads: rows })
+    expect(f.calls, 'nothing read or written').toEqual([])
   })
 })
 
@@ -617,12 +739,14 @@ describe('直传表单、签名链接、回收', () => {
       { blob_id: 'b1', claim_token: 't1', bucket_id: 'oss', object_name: 'ab/x', content_type: 'image/png' },
       { blob_id: 'b2', claim_token: 't2', bucket_id: 'workspace', object_name: 'c/u/old', content_type: 'application/x' },
     ]
-    const { deps, calls, rpcs, removed, controls, order } = fakes({ claimed })
+    const { deps, calls, rpcs, removed, controls, order, events } = fakes({ claimed })
     expect(await handleGc(deps)).toEqual({ claimed: 2, deleted: 2, failed: 0 })
+    expect(events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'kick',
+      at: '2026-10-16T12:00:00.000Z', day: '2026-10-16', claimed: 2, deleted: 2, finished: 2, failed: 0, outcome: 'completed' }])
     expect(controls.filter(r => r.fn === 'file_temporary_expire')).toEqual([{as:'service',fn:'file_temporary_expire',args:{p_limit:500}}])
     expect(order.indexOf('service:file_temporary_expire')).toBeLessThan(order.indexOf('service:file_transfer_expire'))
     expect(controls.filter(r => r.fn === 'file_transfer_expire')).toEqual([{as:'service',fn:'file_transfer_expire',args:{p_limit:500}}])
-    expect(order.indexOf('service:file_transfer_expire')).toBeLessThan(order.indexOf('service:file_blob_gc_claim'))
+    expect(order.indexOf('service:file_transfer_expire')).toBeLessThan(order.indexOf('service:file_blob_gc_run_claim'))
     expect(order).not.toContain('service:file_transfer_object_gone')
     expect(calls.map((c) => `${c.method} ${c.url.replace(/\?.*$/, '')}`)).toEqual([
       'DELETE https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/ab/x',
@@ -636,6 +760,8 @@ describe('直传表单、签名链接、回收', () => {
     const broken = fakes({ claimed })
     broken.deps.storageRemove = async () => { throw new Error('storage 500') }
     expect(await handleGc(broken.deps)).toEqual({ claimed: 2, deleted: 1, failed: 1 })
+    expect(broken.events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'kick',
+      at: '2026-10-16T12:00:00.000Z', day: '2026-10-16', claimed: 2, deleted: 1, finished: 1, failed: 1, outcome: 'completed' }])
     expect(broken.rpcs.filter((r) => r.fn === 'file_blob_gc_fail').map((r) => r.args)).toEqual([{ p_blob_id: 'b2', p_claim_token: 't2', p_error: 'Error: storage 500' }])
   })
   it('gc removes temporary ciphertext at the same private provider without invoking CDN or weakening claim confirmation',async()=>{
@@ -644,6 +770,69 @@ describe('直传表单、签名链接、回收', () => {
     expect(calls.map(c=>`${c.method} ${c.url.replace(/\?.*$/,'')}`)).toEqual(['DELETE https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/temporary/group/file/generation'])
     expect(removed).toEqual([])
     expect(rpcs.filter(r=>r.fn==='file_blob_gc_finish').map(r=>r.args)).toEqual([{p_blob_id:'temporary',p_claim_token:'token'}])
+  })
+  it('gc logs an empty invocation once with an explicit UTC day', async () => {
+    const f = fakes()
+    f.deps.now = () => new Date('2026-11-07T00:30:00+09:00')
+    expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 0, deleted: 0, failed: 0 })
+    expect(f.events).toEqual([{ stage: 'gc_result', entry: 'kick', at: '2026-11-06T15:30:00.000Z', day: '2026-11-06',
+      claimed: 0, deleted: 0, finished: 0, failed: 0, outcome: 'completed' }])
+  })
+  it('gc counts a successful physical deletion even if its finish confirmation fails, preserving the API result', async () => {
+    const f = fakes({ claimed: [{ blob_id: 'b1', claim_token: 't1', bucket_id: 'workspace', object_name: 'c/u/old', content_type: 'application/pdf' }] })
+    const rpc = f.deps.serviceRpc
+    f.deps.serviceRpc = (fn, args) => fn === 'file_blob_gc_finish'
+      ? Promise.resolve({ data: null, error: { message: 'finish unavailable' } }) : rpc(fn, args)
+    expect(await handleGc(f.deps, 'file-accept')).toEqual({ claimed: 1, deleted: 0, failed: 1 })
+    expect(f.removed).toEqual(['workspace/c/u/old'])
+    expect(f.events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'file-accept',
+      at: '2026-10-16T12:00:00.000Z', day: '2026-10-16', claimed: 1, deleted: 1, finished: 0, failed: 1, outcome: 'completed' }])
+  })
+  it.each(['file_temporary_expire', 'file_transfer_expire', 'file_blob_gc_run_claim'])('gc records unknown claims and rethrows a %s refusal', async failedRpc => {
+    const f = fakes(), rpc = f.deps.serviceRpc
+    f.deps.serviceRpc = (fn, args) => fn === failedRpc
+      ? Promise.resolve({ data: null, error: { message: 'RPC unavailable' } }) : rpc(fn, args)
+    await expect(handleGc(f.deps, 'kick')).rejects.toMatchObject({ status: 500 })
+    expect(f.calls).toEqual([])
+    expect(f.removed).toEqual([])
+    expect(f.events).toEqual([{ stage: 'gc_result', entry: 'kick', at: '2026-10-16T12:00:00.000Z', day: '2026-10-16',
+      claimed: null, deleted: 0, finished: 0, failed: 0, outcome: 'error' }])
+  })
+  it.each([false, true])('gc preserves a successful result when summary logging throws (stderr unavailable: %s)', async stderrFails => {
+    const f = fakes({ claimed: [{ blob_id: 'b1', claim_token: 't1', bucket_id: 'workspace', object_name: 'c/u/old', content_type: 'application/pdf' }] }), loggingError = new Error('summary logger unavailable')
+    f.deps.log = () => { throw loggingError }
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => { if (stderrFails) throw new Error('stderr unavailable') })
+    try {
+      expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 1, deleted: 1, failed: 0 })
+      expect(f.removed).toEqual(['workspace/c/u/old'])
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
+    } finally { stderr.mockRestore() }
+  })
+  it.each([false, true])('gc preserves the original exception when summary logging throws (stderr unavailable: %s)', async stderrFails => {
+    const f = fakes(), original = new Error('claim transport unavailable'), loggingError = new Error('summary logger unavailable')
+    const rpc = f.deps.serviceRpc
+    f.deps.serviceRpc = (fn, args) => fn === 'file_blob_gc_run_claim' ? Promise.reject(original) : rpc(fn, args)
+    f.deps.log = () => { throw loggingError }
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => { if (stderrFails) throw new Error('stderr unavailable') })
+    try {
+      await expect(handleGc(f.deps, 'kick')).rejects.toBe(original)
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
+    } finally { stderr.mockRestore() }
+  })
+  it('gc excludes sensitive exception fields from its fallback log', async () => {
+    const sensitive = ['synthetic-private-report.pdf', 'synthetic-user@example.invalid', '/synthetic/private/upload', 'SyntheticSensitiveName', 'synthetic-stack-marker']
+    const loggingError = new Error(sensitive.slice(0, 3).join(' '))
+    loggingError.name = sensitive[3]!
+    loggingError.stack = sensitive[4]
+    const f = fakes()
+    f.deps.log = () => { throw loggingError }
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 0, deleted: 0, failed: 0 })
+      const output = JSON.stringify(stderr.mock.calls)
+      for (const value of sensitive) expect(output).not.toContain(value)
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
+    } finally { stderr.mockRestore() }
   })
 })
 
@@ -695,39 +884,19 @@ describe('按引用发(share)', () => {
 describe('转发', () => {
   const FWD = '33333333-3333-4333-8333-333333333333'
   const forwardBody = { source_message_id: 'old-1', message_id: FWD, chat_id: 'c2', sender_user_id: USER }
-  it('老式附件:先照旧转、库说要字节 → 库说出它在 chat-media 的对象 → 读出字节放进暂存(按这条新消息起名)→ 和提交同一步登记 → 带上这次上传再转', async () => {
-    const bytes = pngBytes()
-    const { deps, calls, rpcs } = fakes({ legacy: { row: { object_name: `${USER}/abc-old.png`, file_name: 'old.png', content_type: 'image/png' }, bytes } })
-    const message = await handleForward(deps, USER, forwardBody)
-    expect(message).toMatchObject({ id: FWD, forwarded_from_message_id: 'old-1' })
-    const key = `staging/${USER}/${FWD}`
-    expect(calls.map((c) => `${c.method} ${c.url.replace(/\?.*$/, '')}`)).toEqual([
-      `GET https://db.example/storage/v1/object/sign/chat-media/${USER}/abc-old.png`,
-      `PUT https://gugu-files-test.oss-cn-wulanchabu-internal.aliyuncs.com/${key}`,
-      `GET https://gugu-files-test.oss-cn-wulanchabu-internal.aliyuncs.com/${key}`,
-      expect.stringMatching(/^PUT https:\/\/gugu-files-test\.oss-cn-wulanchabu\.aliyuncs\.com\/[0-9a-f]{2}\/[0-9a-f]{64}$/),
-      expect.stringMatching(/^HEAD https:\/\/gugu-files-test\.oss-cn-wulanchabu\.aliyuncs\.com\/[0-9a-f]{2}\/[0-9a-f]{64}$/),
-    ])
-    expect(rpcs.map((r) => `${r.as} ${r.fn}`)).toEqual(['user attachment_forward', 'user attachment_legacy_source', 'service file_blob_register', 'user attachment_forward'])
-    expect(rpcs[0]!.args).not.toHaveProperty('p_staging_key')
-    expect(rpcs[1]!.args).toEqual({ p_source_message_id: 'old-1' })
-    expect(rpcs[2]!.args).toMatchObject({ p_uploader: USER, p_staging_key: key, p_size_bytes: bytes.length, p_content_type: 'image/png' })
-    expect(rpcs[3]!.args).toMatchObject({ p_source_message_id: 'old-1', p_message_id: FWD, p_chat_id: 'c2', p_staging_key: key })
-  })
-
-  it('新式附件:一次就转完 —— 不问老式来源(函数先于迁移上线时旧库里还没有它)、不碰 chat-media、不放暂存', async () => {
+  it('转发只问一次库:不碰 Storage、不放暂存', async () => {
     const { deps, calls, rpcs } = fakes()
     await handleForward(deps, USER, forwardBody)
     expect(calls).toEqual([])
     expect(rpcs.map((r) => `${r.as} ${r.fn}`)).toEqual(['user attachment_forward'])
     expect(rpcs[0]!.args).not.toHaveProperty('p_staging_key')
+    // gugu#2581: files forwarded together keep one send where they land; the keys only when given (older database).
+    expect(rpcs[0]!.args).not.toHaveProperty('p_send_group_id')
+    const grouped = fakes()
+    await handleForward(grouped.deps, USER, { ...forwardBody, send_group_id: '6f1c2b1e-4a7d-4c3e-9b8a-2d5e7f9a1b3c', send_group_size: 2 })
+    expect(grouped.rpcs[0]!.args).toMatchObject({ p_send_group_id: '6f1c2b1e-4a7d-4c3e-9b8a-2d5e7f9a1b3c', p_send_group_size: 2 })
   })
 
-  it('老式附件的字节在 chat-media 里已经没了:说清楚(410 source_gone),不转', async () => {
-    const { deps, rpcs } = fakes({ legacy: { row: { object_name: `${USER}/gone.png`, file_name: 'gone.png', content_type: 'image/png' }, bytes: null } })
-    await expect(handleForward(deps, USER, forwardBody)).rejects.toMatchObject({ status: 410, code: 'source_gone' })
-    expect(rpcs.map((r) => r.fn)).toEqual(['attachment_forward', 'attachment_legacy_source'])
-  })
 })
 
 

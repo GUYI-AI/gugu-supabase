@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 interface Database {
   connect(): Promise<void>
@@ -49,7 +50,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await db?.end() })
 beforeEach(async () => {
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   owner = randomUUID(); reader = randomUUID(); group = randomUUID(); root = randomUUID()
   stream = `thread:${group}:${root}`
   await db.query("INSERT INTO identity.users(id,type,display_name) SELECT id,'human','Thread read fixture' FROM unnest($1::text[]) id", [[owner, reader]])
@@ -87,8 +88,7 @@ describe('thread read account revisions', () => {
     expect(wakes.every(wake => wake.topic === `gugu:user:${reader}:events` && wake.private)).toBe(true)
     const legacy = (await db.query<{ payload: { member: Record<string, unknown> } }>(
       "SELECT payload FROM realtime.messages WHERE topic=$1 AND event='member_stream_read_changed'", [`gugu:user:${reader}:events`])).rows
-    const { entity_id, tombstone: _tombstone, ...streamState } = readPayload(state)
-    expect(legacy.map(event => event.payload.member)).toContainEqual({ ...streamState, user_id: entity_id })
+    expect(legacy).toEqual([])
     expect((await db.query('SELECT last_read_seq FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, reader])).rows).toEqual(mainBefore)
     expect((await asUser(reader, 'SELECT stream_id FROM chat.list_unread_locators($1)', [group])).map(row => row.stream_id)).not.toContain(stream)
   })

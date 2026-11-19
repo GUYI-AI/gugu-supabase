@@ -2,6 +2,7 @@ import { createFixtureGroup } from '../../support/groupFixture'
 import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS, FLUSH_REVISIONS } from '../../support/revisionTransaction'
 
 /**
  * 消息指向文件夹里那个条目的那一版(迁移 20261016105500;设计 §3.2–§3.5、§7):
@@ -154,7 +155,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await database?.end() })
 beforeEach(async () => {
-  await database.query('BEGIN')
+  await database.query(BEGIN_READING_REVISIONS)
   owner = await human('Owner')
   member = await human('Member')
   outsider = await human('Outsider')
@@ -522,6 +523,7 @@ describe('attachment message metadata', () => {
     const sent = await commit(owner, (await upload(owner, content)).key, randomUUID(), group, owner, 'shot.png')
     const expected = { status: 'ready', source: 'managed-object', sha256: sha(content), width: 640, height: 480 }
     expect(sent).toMatchObject({ file_metadata: expected, content: envelope('shot.png', 'image/png', 1234) })
+    await database.query(FLUSH_REVISIONS) // newGroup's create_gugu_group deferred every constraint again
     for (const actor of [owner, member]) {
       const [row] = await read(sent.id, actor)
       expect(row!.file_metadata).toMatchObject(expected)
@@ -616,11 +618,11 @@ describe('attachment message metadata', () => {
     expect(await read(sent.id, outsider)).toEqual([])
     await asOwner()
     await database.query('UPDATE chat.messages SET retracted_at=now() WHERE id=$1', [sent.id])
-    expect((await read(sent.id))[0]!.file_metadata).toEqual({ status: 'gone' })
+    expect((await read(sent.id))[0]!.file_metadata).toEqual({ status: 'gone', availability: 'unavailable', expired_at: null })
     const ordinary = await commit(owner, (await upload(owner, `deleted-${randomUUID()}`)).key, randomUUID(), group, owner, 'deleted.png')
     await asUser(owner)
     await database.query('SELECT chat.workspace_delete_as($1,$2)', [ordinary.file_item_id, owner])
-    expect((await read(ordinary.id))[0]!.file_metadata).toEqual({ status: 'gone' })
+    expect((await read(ordinary.id))[0]!.file_metadata).toEqual({ status: 'gone', availability: 'unavailable', expired_at: null })
   })
 })
 
@@ -656,14 +658,15 @@ describe('已经发出去的客户端与执行权', () => {
       { conname: 'messages_file_ref_shape', contype: 'c', convalidated: false, confdeltype: ' ' },
       { conname: 'messages_file_version_check', contype: 'c', convalidated: false, confdeltype: ' ' },
     ])
-    // 新行照样核:指着条目、又带一个(真的在桶里的)老式存储引用的附件,形状那一条拒(触发器不看这两列)。
+    // 新行照样核:指着条目、又带一个(真的在桶里的)老式存储引用的附件被拒。20261110053000 起消息一律不能指存储对象,
+    // validate_storage_reference_pair 在 CHECK 之前就拒;两道里哪道先拒都行,这一行进不来。
     const group = await newGroup(owner, [member])
     const file = await binary(group, owner)
     const media = `${group}/${randomUUID()}.png`
     await database.query(`INSERT INTO storage.objects (bucket_id, name) VALUES ('chat-media',$1)`, [media])
     expect(await fails(`INSERT INTO chat.messages (id, chat_id, sender_user_id, content, content_type, file_item_id, file_version, storage_bucket_id, storage_object_name)
       VALUES ($1,$2,$3,$4,'attachment',$5,1,'chat-media',$6)`, [randomUUID(), group, owner, envelope('deck.pptx', PPTX, 100), file, media]))
-      .toMatch(/messages_file_ref_shape/)
+      .toMatch(/messages_file_ref_shape|cannot name a Storage object/)
   })
 
   it('文件服务的门也认 AI 单聊:那里的活文档 files_authorize 回一行;私聊对照;不是成员不回(复核 L11 要改 7)', async () => {

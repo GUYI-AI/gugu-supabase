@@ -1,5 +1,6 @@
 import { createFixtureGroup } from '../../support/groupFixture'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -146,6 +147,65 @@ describe('within one transaction', () => {
   })
 
   describe('文件夹与路径', () => {
+    it('a listed folder says how many items are directly in it (20261112030000); files and documents say nothing', async () => {
+      const group = await newGroup(owner, [member])
+      const docs = await put(group, owner, 'Docs', { kind: 'folder' })
+      const year = await put(group, member, '2026', { kind: 'folder', parent: docs.id })
+      await put(group, member, 'plan.md', { parent: year.id })
+      await put(group, member, 'notes.md', { parent: year.id })
+      await put(group, owner, 'readme.md', { parent: docs.id })
+      await put(group, owner, 'Empty', { kind: 'folder' })
+      await put(group, owner, 'root.md')
+      const counts = async (folder: string) => Object.fromEntries((await rpc<{ path: string; child_count: string | null }>(owner,
+        'SELECT path, child_count FROM chat.workspace_list_as($1,$2,p_folder => $3)', [group, owner, folder])).map((row) => [row.path, row.child_count]))
+
+      // Only the items directly in it: Docs holds 2026 and readme.md, not what 2026 holds.
+      expect(await counts('')).toEqual({ Docs: '2', Empty: '0', 'root.md': null })
+      expect(await counts('Docs')).toEqual({ 'Docs/2026': '2', 'Docs/readme.md': null })
+      // Nothing is stored: a change is counted on the next read, without touching the folder's row.
+      const before = (await database.query<{ version: number; updated_at: Date }>('SELECT version, updated_at FROM chat.workspace_items WHERE id = $1', [docs.id])).rows[0]
+      await put(group, member, 'more.md', { parent: docs.id })
+      expect((await counts(''))['Docs']).toBe('3')
+      expect((await database.query('SELECT version, updated_at FROM chat.workspace_items WHERE id = $1', [docs.id])).rows[0]).toEqual(before)
+      // The whole tree read (no folder) counts the same.
+      const whole = await rpc<{ path: string; child_count: string | null }>(owner, 'SELECT path, child_count FROM chat.workspace_list_as($1,$2)', [group, owner])
+      expect(whole.find((row) => row.path === 'Docs/2026')?.child_count).toBe('2')
+    })
+
+    it('a folder holding more than 1000 items reads 1000 (20261112030000): one row costs at most 1000 index entries', async () => {
+      const group = await newGroup(owner, [])
+      const many = await put(group, owner, 'Many', { kind: 'folder' })
+      const few = await put(group, owner, 'Few', { kind: 'folder' })
+      const fill = (parent: string, n: number) => database.query(`INSERT INTO chat.workspace_items (chat_id, parent_id, kind, filename, content_type,
+        inline_text, size_bytes, source_message_ids, created_by, version)
+        SELECT $1, $2, 'document', 'f-' || i || '.md', 'text/plain', '', 0, '{}', $3, 1 FROM generate_series(1, $4::int) i`, [group, parent, owner, n])
+      await asService()
+      await fill(many.id, 1005)
+      await fill(few.id, 999)
+      const rows = await rpc<{ filename: string; child_count: string }>(owner,
+        'SELECT filename, child_count FROM chat.workspace_list_as($1,$2,p_folder => $3)', [group, owner, ''])
+      expect(Object.fromEntries(rows.map((row) => [row.filename, row.child_count]))).toEqual({ Many: '1000', Few: '999' })
+    })
+
+    it('the operational rollback restores the exact prior function and its grants (ops/rollback-workspace-list-child-count.sql)', async () => {
+      const signature = 'chat.workspace_list_as(text,text,integer,integer,text,text,text,boolean)'
+      const definition = async () => (await database.query<{ digest: string; columns: string }>(
+        `SELECT md5(pg_get_functiondef($1::regprocedure)) AS digest, pg_get_function_result($1::regprocedure) AS columns`, [signature])).rows[0]!
+      const executable = async (role: string) => (await database.query<{ allowed: boolean }>(
+        'SELECT has_function_privilege($1,$2,$3) AS allowed', [role, signature, 'EXECUTE'])).rows[0]!.allowed
+      await asService()
+      expect((await definition()).columns).toContain('child_count bigint')
+      await database.query('SAVEPOINT operational_rollback')
+      await database.query(readFileSync(new URL('../../../ops/rollback-workspace-list-child-count.sql', import.meta.url), 'utf8')
+        .replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, ''))
+      // The definition 20261109150000 left, byte for byte; only authenticated may run it.
+      expect(await definition()).toEqual({ digest: '454cdaa4b0c903b04f9b4dec6c74fdcc', columns: expect.not.stringContaining('child_count') })
+      expect(await executable('authenticated')).toBe(true)
+      for (const role of ['anon', 'service_role']) expect(await executable(role)).toBe(false)
+      await database.query('ROLLBACK TO SAVEPOINT operational_rollback')
+      expect((await definition()).columns).toContain('child_count bigint')
+    })
+
     it('人直接往表里建文件夹、往文件夹里放东西;list_as 按路径列,路径从根拼起', async () => {
       const group = await newGroup(owner, [member])
       const docs = await put(group, owner, 'Docs', { kind: 'folder' })
@@ -171,6 +231,151 @@ describe('within one transaction', () => {
 
       await asUser(owner)
       expect(await fails('SELECT * FROM chat.workspace_list_as($1,$2,p_folder => $3)', [group, owner, 'Docs/nope'])).toMatch(/workspace_folder_not_found/)
+    })
+
+    it('读一个文件夹只读它这一层(20261107220000):每行与整棵读里的那一行一样,含路径;分页的 total 是这一层的;最深那一层的也是', async () => {
+      const group = await newGroup(owner, [member])
+      let parent: string | null = null
+      const chain: string[] = []
+      for (let depth = 1; depth <= 15; depth += 1) {
+        parent = (await put(group, owner, `d${depth}`, { kind: 'folder', parent })).id
+        chain.push(parent)
+      }
+      for (const name of ['a.md', 'b.md', 'c.md']) await put(group, member, name, { parent: chain[2] })
+      await put(group, owner, 'deep.md', { parent: chain[14] })
+      await put(group, owner, 'root.md')
+
+      const list = (folder: string | null, offset = 0, limit: number | null = null) => rpc<Record<string, unknown>>(owner,
+        'SELECT * FROM chat.workspace_list_as($1,$2,$3,$4,p_folder => $5)', [group, owner, offset, limit, folder])
+      const whole = await list(null)
+      const childrenOf = (id: string | null) => whole.filter((row) => row.parent_id === id).map((row) => ({ ...row, total: expect.anything() }))
+      expect(await list(chain[2]!)).toEqual(childrenOf(chain[2]!))
+      expect(await list('d1/d2/d3')).toEqual(childrenOf(chain[2]!))
+      expect(await list('')).toEqual(childrenOf(null))
+      const deep = await list(chain[14]!)
+      expect(deep.map((row) => row.path)).toEqual([`${chain.map((_, i) => `d${i + 1}`).join('/')}/deep.md`])
+      expect(deep).toEqual(childrenOf(chain[14]!))
+      const page = await list(chain[2]!, 1, 2)
+      expect(page.map((row) => [row.filename, row.total])).toEqual(childrenOf(chain[2]!).slice(1, 3).map((row) => [row.filename, '4']))
+    })
+
+    it('读一个文件夹的深度上限(20261107220000):第 63 层能列,第 64 层不能,与整棵读走到的边界一样', async () => {
+      const group = await newGroup(owner, [member])
+      let parent: string | null = null
+      const chain: string[] = []
+      // 写的那一侧只放 16 层(触发器);这里造的是读的那一侧兜着的、更深的旧数据。
+      await database.query("SET LOCAL session_replication_role = replica")
+      for (let depth = 1; depth <= 64; depth += 1) {
+        parent = (await put(group, owner, `d${depth}`, { kind: 'folder', parent })).id
+        chain.push(parent)
+      }
+      await put(group, owner, 'in63.md', { parent: chain[62] })
+      await put(group, owner, 'in64.md', { parent: chain[63] })
+      await database.query("SET LOCAL session_replication_role = origin")
+      const list = (folder: string | null) => rpc<{ filename: string; path: string; total: string }>(owner,
+        'SELECT * FROM chat.workspace_list_as($1,$2,p_folder => $3)', [group, owner, folder])
+      const in63 = await list(chain[62]!)
+      expect(sorted(in63.map((row) => row.filename))).toEqual(['d64', 'in63.md'])
+      const base = chain.slice(0, 63).map((_, i) => `d${i + 1}`).join('/')
+      expect(sorted(in63.map((row) => row.path))).toEqual([`${base}/d64`, `${base}/in63.md`])
+      expect(await list(chain[63]!)).toEqual([])
+      const whole = await rpc<{ filename: string }>(owner, 'SELECT * FROM chat.workspace_list_as($1,$2)', [group, owner])
+      expect(whole.map((row) => row.filename)).toContain('in63.md')
+      expect(whole.map((row) => row.filename)).not.toContain('in64.md')
+    })
+
+    it('切页之后才查的副本与设备版本(20261107220000):每行都对;与名字、种类过滤、分页一起用也对;同一份内容有多个副本也只占一行,活着的那份说了算', async () => {
+      const group = await newGroup(owner, [member])
+      const folder = (await put(group, owner, 'Docs', { kind: 'folder' })).id
+      const transferGroup = (await database.query<{ g: string }>('SELECT chat.file_transfer_group($1) AS g', [group])).rows[0]!.g
+      const account = async (user: string) => (await database.query<{ a: string }>('SELECT chat.file_transfer_account($1) AS a', [user])).rows[0]!.a
+      // 放进文件夹时触发器已经记下这一份的副本(file_transfer_track);这里改它的状态,或再多放一份、或拿掉。
+      const copyIs = async (blob: string, by: string, state: { expiresAt?: string; expiredAt?: string } = {}) => {
+        await database.query(`UPDATE chat.file_transfer_storage_refs r SET account_id=$3,expires_at=$4,expired_at=$5
+          FROM chat.file_transfer_storage o WHERE o.id=r.storage_id AND o.blob_id=$1 AND r.chat_id=$2`,
+        [blob, transferGroup, await account(by), state.expiresAt ?? null, state.expiredAt ?? null])
+      }
+      const file = async (name: string, minute: number, contentType = 'application/pdf') => {
+        const blob = (await database.query<{ id: string }>(`INSERT INTO chat.file_blobs(bucket_id,object_name,size_bytes,content_type,created_by)
+          VALUES('workspace',$1,9,$2,$3) RETURNING id`, [randomUUID(), contentType, member])).rows[0]!.id
+        // 同一个事务里 now() 都一样:分页的次序要靠明确的时间才看得出。
+        const item = (await database.query<{ id: string }>(`INSERT INTO chat.workspace_items(chat_id,parent_id,kind,filename,content_type,size_bytes,blob_id,source_message_ids,created_by,version,created_at)
+          VALUES($1,$2,'file',$3,$4,9,$5,'{}',$6,1,TIMESTAMPTZ '2026-11-07 00:00:00+00'+make_interval(mins=>$7)) RETURNING id`,
+        [group, folder, name, contentType, blob, member, minute])).rows[0]!.id
+        return { item, blob }
+      }
+      await file('a-kept.pdf', 6)
+      const expiresAt = '2030-01-01T00:00:00.000Z'
+      await copyIs((await file('b-temporary.pdf', 5)).blob, owner, { expiresAt })
+      await file('c-image.png', 4, 'image/png')
+      const expiredAt = '2026-11-01T00:00:00.000Z'
+      await copyIs((await file('d-reclaimed.pdf', 3)).blob, member, { expiredAt })
+      const onDevice = await file('e-device.pdf', 2)
+      await database.query('DELETE FROM chat.file_transfer_storage_refs r USING chat.file_transfer_storage o WHERE o.id=r.storage_id AND o.blob_id=$1', [onDevice.blob])
+      const device = `dev-${owner}`
+      // Its next version stays on a device.
+      await database.query(`INSERT INTO chat.workspace_item_versions(item_id,n,host_device_id,host_project_id,relative_path,sha256,size_bytes,file_name,content_type)
+        VALUES($1,2,$2,'project','e-device.pdf',$3,9,'e-device.pdf','application/pdf')`, [onDevice.item, device, 'ab'.repeat(32)])
+      await database.query('UPDATE chat.workspace_items SET version=2,blob_id=NULL WHERE id=$1', [onDevice.item])
+      const twoCopies = await file('f-two-copies.pdf', 1)
+      for (const reclaimedAt of [null, expiredAt]) {
+        const extra = (await database.query<{ id: string }>(`INSERT INTO chat.file_transfer_storage(blob_id,bucket_id,object_name,size_bytes)
+          VALUES($1,'workspace',$2,9) RETURNING id`, [twoCopies.blob, randomUUID()])).rows[0]!.id
+        await database.query('INSERT INTO chat.file_transfer_storage_refs(storage_id,chat_id,account_id,expired_at) VALUES($1,$2,$3,$4)',
+          [extra, transferGroup, await account(member), reclaimedAt])
+      }
+      // 新建的这一行 created_at = now(),比上面那些都新:排最前。
+      await put(group, member, 'a-note.md', { parent: folder })
+
+      const columns = 'filename,path,total::int AS total,storage_class,copy_account_id,host_device_id,is_mine,expires_at,copy_expired_at'
+      const list = (offset: number, limit: number | null, name: string | null = null, kind: string | null = null, exact = false) =>
+        rpc<Record<string, unknown>>(owner, `SELECT ${columns} FROM chat.workspace_list_as($1,$2,$3,$4,$5,$6,'Docs',$7)`, [group, owner, offset, limit, name, kind, exact])
+      const memberAccount = await account(member)
+      const ownerAccount = await account(owner)
+      const row = (filename: string, total: number, fields: Record<string, unknown>) => ({
+        filename, path: `Docs/${filename}`, total, storage_class: null, copy_account_id: null, host_device_id: null,
+        is_mine: null, expires_at: null, copy_expired_at: null, ...fields,
+      })
+      const kept = { storage_class: 'kept', copy_account_id: memberAccount, is_mine: false }
+
+      expect(await list(0, null)).toEqual([
+        row('a-note.md', 7, {}),
+        row('a-kept.pdf', 7, kept),
+        row('b-temporary.pdf', 7, { storage_class: 'temporary', copy_account_id: ownerAccount, is_mine: true, expires_at: new Date(expiresAt) }),
+        row('c-image.png', 7, { ...kept, storage_class: 'image' }),
+        row('d-reclaimed.pdf', 7, { copy_account_id: memberAccount, copy_expired_at: new Date(expiredAt) }),
+        row('e-device.pdf', 7, { host_device_id: device }),
+        row('f-two-copies.pdf', 7, kept),
+      ])
+      // 分页只切这一层,total 还是这一层的总数。
+      const page = await list(5, 2)
+      expect(page.map((got) => [got.filename, got.total])).toEqual([['e-device.pdf', 7], ['f-two-copies.pdf', 7]])
+      // 客户端按名字找文件夹里的一项(p_folder + p_name + p_exact),也有模糊搜与种类过滤。
+      expect(await list(0, null, 'E-DEVICE.pdf', null, true)).toEqual([row('e-device.pdf', 1, { host_device_id: device })])
+      expect((await list(0, 1, 'copies')).map((got) => [got.filename, got.total])).toEqual([['f-two-copies.pdf', 1]])
+      expect((await list(0, null, null, 'document')).map((got) => got.filename)).toEqual(['a-note.md'])
+      expect(await list(0, null, 'nothing')).toEqual([])
+    })
+
+    it('一份内容有两个活副本时(20261108130000):副本的各列说的是同一个,id 小的那个', async () => {
+      const group = await newGroup(owner, [member])
+      const transferGroup = (await database.query<{ g: string }>('SELECT chat.file_transfer_group($1) AS g', [group])).rows[0]!.g
+      const account = async (user: string) => (await database.query<{ a: string }>('SELECT chat.file_transfer_account($1) AS a', [user])).rows[0]!.a
+      const blob = (await database.query<{ id: string }>(`INSERT INTO chat.file_blobs(bucket_id,object_name,size_bytes,content_type,created_by)
+        VALUES('workspace',$1,9,'application/pdf',$2) RETURNING id`, [randomUUID(), member])).rows[0]!.id
+      await database.query(`INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,size_bytes,blob_id,source_message_ids,created_by,version)
+        VALUES($1,'file','two-live.pdf','application/pdf',9,$2,'{}',$3,1)`, [group, blob, member])
+      await database.query('DELETE FROM chat.file_transfer_storage_refs r USING chat.file_transfer_storage o WHERE o.id=r.storage_id AND o.blob_id=$1', [blob])
+      // id 大的先写进去:没有排序时先读到的是它。
+      const live = async (id: string, by: string, expiresAt: string | null) => {
+        await database.query(`INSERT INTO chat.file_transfer_storage(id,blob_id,bucket_id,object_name,size_bytes) VALUES($1,$2,'workspace',$3,9)`, [id, blob, randomUUID()])
+        await database.query('INSERT INTO chat.file_transfer_storage_refs(storage_id,chat_id,account_id,expires_at) VALUES($1,$2,$3,$4)', [id, transferGroup, await account(by), expiresAt])
+      }
+      await live('ffffffff-ffff-4fff-8fff-ffffffffffff', owner, '2030-01-01T00:00:00.000Z')
+      await live('00000000-0000-4000-8000-000000000000', member, null)
+      const rows = await rpc<Record<string, unknown>>(owner,
+        `SELECT total::int AS total,storage_class,copy_account_id,is_mine,expires_at FROM chat.workspace_list_as($1,$2,p_folder => '')`, [group, owner])
+      expect(rows).toEqual([{ total: 1, storage_class: 'kept', copy_account_id: await account(member), is_mine: false, expires_at: null }])
     })
 
     it('父必须是同一个对话里的文件夹:别的对话的、不存在的、是文件的都拒;文件夹不能放进自己里面', async () => {

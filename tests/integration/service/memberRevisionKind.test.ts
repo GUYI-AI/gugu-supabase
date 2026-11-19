@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BEGIN_READING_REVISIONS } from '../../support/revisionTransaction'
 
 interface Database {
   connect(): Promise<void>
@@ -49,7 +50,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { await db?.end() })
 beforeEach(async () => {
-  await db.query('BEGIN')
+  await db.query(BEGIN_READING_REVISIONS)
   owner = randomUUID(); peer = randomUUID(); viewer = randomUUID()
   agent = randomUUID(); group = randomUUID(); message = randomUUID()
   for (const id of [owner, peer, viewer]) {
@@ -70,11 +71,11 @@ beforeEach(async () => {
 afterEach(async () => { await db.query('ROLLBACK') })
 
 describe('private member state revision budget', () => {
-  it('marks a human stream read without broadcasting a roster revision to peers', async () => {
+  it('marks a human stream read through its read revision without a redundant own or roster revision', async () => {
     await markPeerRead()
     const rows = await revisions()
-    fanout(rows, [peer])
-    expect(rows[0]!.resource_key.kind).toBe('own')
+    fanout(rows, [])
+    fanout(await revisions('member_read_changed'), [owner, peer, viewer])
   })
 
   it('keeps agent receipts private while preserving the human-only user event transport', async () => {

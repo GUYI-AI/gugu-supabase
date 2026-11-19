@@ -50,11 +50,12 @@ beforeEach(async () => {
 })
 afterEach(async () => { if (db) { await admin(); await db.query('ROLLBACK') } })
 
-describe('archive terminates identity without touching seats or history', () => {
+describe('archive terminates identity without touching its seats or history', () => {
   it('one update removes N=3 rosters/mentions/counts/send permission, zero member DML, retry is idempotent', async () => {
     const seats = (await db.query('SELECT * FROM chat.chat_members WHERE user_id=$1 ORDER BY chat_id', [agent])).rows
     const history = (await db.query('SELECT * FROM chat.messages WHERE chat_id=$1 ORDER BY id', [dm])).rows
-    const heads = (await db.query('SELECT * FROM chat.account_revision_heads WHERE user_id=ANY($1) ORDER BY user_id', [[owner, peer]])).rows
+    // Only the owner shares the agent's DM, whose list record removal closes; the peer's head stays.
+    const heads = (await db.query('SELECT * FROM chat.account_revision_heads WHERE user_id=$1', [peer])).rows
     // This suite is serial: transactional trigger DDL and counters roll back.
     await db.query('CREATE TEMP TABLE archive_write_log(kind text) ON COMMIT DROP')
     await db.query(`CREATE FUNCTION pg_temp.archive_watch() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -76,7 +77,8 @@ describe('archive terminates identity without touching seats or history', () => 
     expect((await db.query('SELECT kind,count(*)::int AS n FROM archive_write_log GROUP BY kind')).rows).toEqual([{ kind: 'identity', n: 1 }])
     expect((await db.query('SELECT * FROM chat.chat_members WHERE user_id=$1 ORDER BY chat_id', [agent])).rows).toEqual(seats)
     expect((await db.query('SELECT * FROM chat.messages WHERE chat_id=$1 ORDER BY id', [dm])).rows).toEqual(history)
-    expect((await db.query('SELECT * FROM chat.account_revision_heads WHERE user_id=ANY($1) ORDER BY user_id', [[owner, peer]])).rows).toEqual(heads)
+    expect((await db.query('SELECT * FROM chat.account_revision_heads WHERE user_id=$1', [peer])).rows).toEqual(heads)
+    expect((await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1 AND conversation_deleted_at IS NOT NULL', [dm])).rows).toEqual([{ user_id: owner }])
     const events = (await db.query(`SELECT event,topic,private,payload FROM realtime.messages
       WHERE topic='gugu:identity:lifecycle' AND payload->>'id'=$1`, [agent])).rows
     expect(events).toEqual([{ event: 'identity_removed', topic: 'gugu:identity:lifecycle', private: true, payload: { id: agent, removed_at: first.removed_at } }])
@@ -132,8 +134,23 @@ describe('archive terminates identity without touching seats or history', () => 
       WHERE n.nspname IN ('chat','identity','file_private','public') AND l.lanname IN ('sql','plpgsql') AND p.prokind='f'`)).rows
     // Personal deletion verifies the owner's retained historical DM seats without removing their access;
     // byte release finds a just-removed identity's own DM seats, which are no longer live.
+    // Privacy erasure must inspect historical seats too: another owner's
+    // removed agent is still outside the complete erased identity set. This is
+    // a closed maintenance capability, never a live-membership authorization.
     const physical = new Set(['chat.chats_membership_invariants','chat.chats_status_invariants','chat.historical_dm_peer','chat.delete_my_dm_conversation',
-      'chat.conversation_release_on_change'])
+      'chat.conversation_release_on_change','identity.erase_self_only_conversations',
+      'chat.restore_conversation_list_rows','chat.hide_my_conversation',
+      'chat.publish_native_conversation_message','chat.list_conversation_memberships',
+      // The additive clear wrapper retains the predecessor, private and uncallable by clients.
+      'chat.conversation_memberships_before_clear','identity.erase_human_account'])
+    const erased=(await db.query(`SELECT pg_get_userbyid(p.proowner) owner,p.prosecdef,p.proconfig,p.prosrc
+      FROM pg_proc p WHERE p.oid='identity.erase_self_only_conversations(text[])'::regprocedure`)).rows[0]
+    expect(erased).toMatchObject({owner:'postgres',prosecdef:true,proconfig:['search_path=pg_catalog']})
+    expect(erased.prosrc).toContain('c.transaction_id=pg_current_xact_id()')
+    expect(erased.prosrc).toContain("c.operation='privacy_erasure'")
+    expect(erased.prosrc).toContain('c.delete_user_ids=p_ids')
+    for(const role of ['anon','authenticated','service_role'])expect((await db.query(
+      "SELECT has_function_privilege($1,'identity.erase_self_only_conversations(text[])','EXECUTE') ok",[role])).rows[0].ok).toBe(false)
     expect(functions.filter(r => !physical.has(r.name) && /\b(?:FROM|JOIN|USING)\s+chat\.chat_members\b/i.test(
       r.prosrc.replace(/\bDELETE\s+FROM\s+chat\.chat_members\b/gi, 'DELETE TARGET'))).map(r => r.name)).toEqual([])
     expect(functions.find(r => r.name === 'chat.chats_membership_invariants')?.prosrc).toContain('FROM chat.active_members m')

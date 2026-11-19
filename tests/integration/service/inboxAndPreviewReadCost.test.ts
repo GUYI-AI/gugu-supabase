@@ -2,7 +2,8 @@
 // with structural assertions (function call counts in this transaction, grants, definitions), never wall-clock.
 //
 //   · Existing columns return exactly what the previous definitions returned. The attachment metadata release
-//     appends file_metadata; the text/system fixtures here must have NULL in that display-only column.
+//     appends file_metadata, the send-group release appends send_group_id and send_group_size; the text/system
+//     fixtures here must have NULL in those columns.
 //     Previous definitions are read from their releases and compared row for row, for every viewer.
 //   · pull_agent_inbox_v2 checks the reply preview only for the rows it returns, however long the backlog.
 //   · messages_view evaluates the reply preview only for returned rows whose reply columns are read; a query
@@ -198,7 +199,7 @@ describe('inbox pull, messages_view and message row policy: same results, cost b
         `WITH v AS (${OLD_VIEW}) SELECT to_jsonb(v) AS row FROM v WHERE v.chat_id = ANY($1) ORDER BY v.chat_id, v.seq`, [[GROUP, topic]])
       // These fixtures are text/system rows. Keep all prior keys and values (including reply previews)
       // exact; accepting an arbitrary subset would hide a breaking change to an old client's select.
-      expect(now, `messages_view for ${viewer}`).toEqual(before.map(({ row }) => ({ row: { ...row, file_metadata: null } })))
+      expect(now, `messages_view for ${viewer}`).toEqual(before.map(({ row }) => ({ row: { ...row, file_metadata: null, send_group_id: null, send_group_size: null } })))
     }
     const replies = await as<{ reply_to_content: string | null }>(ALICE,
       'SELECT reply_to_content FROM chat.messages_view WHERE chat_id = $1 AND reply_to_message_id IS NOT NULL', [GROUP])
@@ -253,7 +254,9 @@ describe('inbox pull, messages_view and message row policy: same results, cost b
     await db.query('SAVEPOINT old_budget_view')
     try {
       const released = migration('20261103231500_chat_projection_budget.sql')
+      // A view keeps its later columns: the replay carries the send-group columns (NULL) after file_metadata.
       const view = released.slice(released.indexOf('CREATE OR REPLACE VIEW'), released.indexOf('CREATE FUNCTION chat.list_chat_previews'))
+        .replace('END AS file_metadata', 'END AS file_metadata, NULL::uuid AS send_group_id, NULL::smallint AS send_group_size')
       await db.query(view)
       const [before, unbounded] = await delta(() => as(ALICE, query, [[GROUP]]))
       expect(before).toEqual(rows)
@@ -341,7 +344,7 @@ describe('inbox pull, messages_view and message row policy: same results, cost b
         'reply_to_message_id', 'reply_to_sender_user_id', 'reply_to_sender_name', 'reply_to_content', 'deleted_at', 'deleted_for_user_ids',
         'retracted_at', 'created_at', 'forwarded_from_message_id', 'thread_root_id', 'edited_at', 'is_whisper', 'is_thread_root',
         'client_message_id', 'is_imported_history_root', 'via_app', 'file_item_id', 'file_version', 'sent_by_agent', 'agent_sender', 'file_blob_id',
-        'file_metadata'],
+        'file_metadata', 'send_group_id', 'send_group_size'],
     })
   }))
 })

@@ -63,7 +63,7 @@ export function bearerFromAuthorization(header) {
 }
 
 /**
- * @typedef {{ userId: string, exp: number }} Identity
+ * @typedef {{ userId: string, exp: number, sessionId: string | null }} Identity
  * @param {{ jwksUrl: string | null, jwtSecret: Uint8Array | null, jwtIssuer: string | null }} options
  * @returns {(token: string | null) => Promise<Identity>}
  */
@@ -87,7 +87,8 @@ export function createVerifier({ jwksUrl, jwtSecret, jwtIssuer }) {
       throw new Denied('bad-credential', 401)
     }
     if (payload.role !== 'authenticated' || !isUuid(payload.sub)) throw new Denied('bad-credential', 401)
-    return { userId: /** @type {string} */ (payload.sub), exp: /** @type {number} */ (payload.exp) }
+    return { userId: /** @type {string} */ (payload.sub), exp: /** @type {number} */ (payload.exp),
+      sessionId: isUuid(payload.session_id) ? /** @type {string} */ (payload.session_id) : null }
   }
 }
 
@@ -99,6 +100,7 @@ export function createVerifier({ jwksUrl, jwtSecret, jwtIssuer }) {
  * @property {string} kind
  * @property {string} actorId   本人,或以其身份行事的 agent
  * @property {string} actorName
+ * @property {boolean} teamSessionRequired
  */
 
 /**
@@ -106,12 +108,13 @@ export function createVerifier({ jwksUrl, jwtSecret, jwtIssuer }) {
  * @param {string} itemId
  * @param {string} userId  验过的 JWT sub
  * @param {string | null} asAgent
+ * @param {string | null} [sessionId] The verified JWT session, never a request-body value.
  * @returns {Promise<Grant>}
  */
-export async function authorizeItem(pool, itemId, userId, asAgent) {
+export async function authorizeItem(pool, itemId, userId, asAgent, sessionId = null) {
   if (!isUuid(itemId)) throw new Denied('not-found')
   if (asAgent !== null && !isUuid(asAgent)) throw new Denied('not-found')
-  const { rows } = await pool.query('SELECT * FROM chat.files_authorize($1::uuid, $2, $3)', [itemId, userId, asAgent])
+  const { rows } = await pool.query('SELECT * FROM chat.files_authorize($1::uuid, $2, $3, $4)', [itemId, userId, asAgent, sessionId])
   const row = rows[0]
   if (!row) throw new Denied('not-found')
   return {
@@ -121,5 +124,6 @@ export async function authorizeItem(pool, itemId, userId, asAgent) {
     kind: row.kind,
     actorId: row.actor_id,
     actorName: row.actor_name ?? '',
+    teamSessionRequired: row.team_session_required === true,
   }
 }

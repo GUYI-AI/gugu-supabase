@@ -61,6 +61,8 @@ async function seed(bound: boolean): Promise<void> {
        VALUES ($1,$2,'p1','proj','/proj',now(),$3)`,
       [`dev-${owner}`, owner, group],
     )
+    // What publish_device_projects records for a bound project (20261109210000_project_groups).
+    await database.query('INSERT INTO chat.project_groups (chat_id) VALUES ($1)', [group])
   }
 }
 
@@ -122,6 +124,17 @@ describe('项目群里只有主人和主人的 agent', () => {
     expect(await denial(colleague)).toBeNull()
   }))
 
+  // 20261109210000_project_groups:设备行上写着这个群 id 不算主人(谁知道群 id 都能写一条);只认创建者与群主。
+  it('别人的设备行写着这个群 id,也照样进不了项目群', () => inRollback(true, async () => {
+    await database.query(
+      `INSERT INTO identity.device_projects (device_id, user_id, local_project_id, name, root_path, created_at, chat_id)
+       VALUES ($1,$2,'p2','proj','/proj',now(),$3)`,
+      [`dev-${colleague}`, colleague, group],
+    )
+    expect(await denial(colleague)).toBe('project_group_owner_only')
+    expect(await denial(colleagueAgent)).toBe('project_group_owner_only')
+  }))
+
   it('已经在项目群里的别人不动', () => inRollback(true, async () => {
     await database.query(`INSERT INTO chat.chat_members (chat_id, user_id, role) VALUES ($1,$2,'member')`, [group, colleague])
     expect(await denial(colleague)).toBeNull()
@@ -178,11 +191,13 @@ describe('member-visible project classification uses the existing group-info doo
     expect((await database.query<{ allowed: boolean }>("SELECT has_function_privilege('anon','chat.group_info_as(text,text)','EXECUTE') AS allowed")).rows[0]!.allowed).toBe(false)
   }))
 
-  it('observes binding removal without changing the existing admission decision', () => inRollback(true, async () => {
+  // 20261109210000_project_groups: the account records the project group; a project with no folder on any machine is still one.
+  it('stays a project group, still owner-only, after the last folder binding is removed', () => inRollback(true, async () => {
     expect((await groupInfo()).is_project_group).toBe(true)
     expect(await denial(colleague)).toBe('project_group_owner_only')
     await database.query('DELETE FROM identity.device_projects WHERE chat_id=$1', [group])
-    expect((await groupInfo()).is_project_group).toBe(false)
-    expect(await denial(colleague)).toBeNull()
+    expect((await groupInfo()).is_project_group).toBe(true)
+    expect(await denial(colleague)).toBe('project_group_owner_only')
+    expect(await denial(ownAgent)).toBeNull()
   }))
 })

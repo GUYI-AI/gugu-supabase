@@ -72,6 +72,7 @@ describe('non-project idle expiry, not quota eviction',()=>{
     const file=await upload();await age(file.stored)
     await db.query("UPDATE chat.file_blob_gc SET status='pending',next_attempt_at=now()+interval '1 day'")
     // Missing secrets prove the real tick queued work without scheduling a network call.
+    await db.query('UPDATE chat.file_blob_gc_control SET enabled=true,batch_limit=50 WHERE singleton')
     await db.query("DELETE FROM vault.secrets WHERE name IN ('attachments_gc_url','attachments_gc_key')")
     expect((await reject('SELECT chat.file_blob_gc_kick()')).message).toMatch(/blobs are due.*Vault has no attachments_gc_url/)
     expect((await state(file.stored)).expired_at).toBeNull() // A refused statement rolls back atomically.
@@ -92,7 +93,7 @@ describe('non-project idle expiry, not quota eviction',()=>{
     await user(member)
     expect((await db.query('SELECT chat.file_resolve_as($1,$2) AS r',[{message_id:file.message},member])).rows[0].r.status).toBe('expired')
     await user(outsider)
-    expect((await db.query('SELECT chat.file_resolve_as($1,$2) AS r',[{message_id:file.message},outsider])).rows[0].r).toEqual({status:'gone'})
+    expect((await db.query('SELECT chat.file_resolve_as($1,$2) AS r',[{message_id:file.message},outsider])).rows[0].r).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     await service();const readable=await upload()
     expect((await download(readable.message)).status).toBe('ready')
     await service();expect((await state(readable.stored)).last_download_at).not.toBeNull()
@@ -138,6 +139,8 @@ describe('non-project idle expiry, not quota eviction',()=>{
     const device=randomUUID()
     await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,$3,'fixture','linux')",[device,owner,'fixture'])
     await db.query("INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at,chat_id) VALUES($1,$2,'root','fixture','/fixture',now(),$3)",[device,owner,group])
+    // What publish_device_projects records for a bound project (20261109210000_project_groups).
+    await db.query('INSERT INTO chat.project_groups(chat_id) VALUES($1) ON CONFLICT DO NOTHING',[group])
     expect(await expire()).toBe(0)
     expect((await state(file.stored)).expired_at).toBeNull()
   })
