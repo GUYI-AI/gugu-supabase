@@ -118,7 +118,7 @@ describe('multipart upload plan', () => {
       expect(f.uploads.size).toBe(0)
     }
     const community = supabaseObjectStorage({ url: 'https://db.example', serviceKey: 'k', bucket: 'attachments', fetch: async () => new Response('{}'),
-      signUpload: async () => 'https://db.example/upload', signDownload: async () => '' })
+      signDownload: async () => '' })
     expect(community.parts).toBeUndefined()
   })
   it('of two concurrent openers the second abandons its own upload and both use the recorded one', async () => {

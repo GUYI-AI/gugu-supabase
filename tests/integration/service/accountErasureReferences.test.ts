@@ -77,6 +77,10 @@ describe('auth account erasure removes residual references without losing shared
     const message = randomUUID(), upload = randomUUID(), stored = randomUUID(), temporary = randomUUID()
     await db.query(`INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'Shared peer message')`, [message, room, peer])
     await db.query(`INSERT INTO chat.message_agent_delivery_blocks(message_id,agent_user_id) VALUES($1,$2)`, [message, agent])
+    // Every upload reservation gets its release time from the configured bounds.
+    await db.query(`INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1)
+      ON CONFLICT(scope,scope_id) DO UPDATE SET settings=chat.file_transfer_limits.settings||EXCLUDED.settings`,
+      [{ upload_edge_seconds: 400, upload_sign_seconds: 900, upload_inflight_seconds: 600 }])
     await db.query(`INSERT INTO chat.file_transfer_reservations(id,kind,account_id,subject,bytes,expires_at)
       VALUES($1,'upload',$2,'fixture',8,now()+interval '1 hour')`, [upload, owner])
     await db.query(`INSERT INTO chat.file_transfer_uploads(staging_key,reservation_id,account_id,actor_id,max_bytes)

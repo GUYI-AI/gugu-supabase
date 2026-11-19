@@ -19,8 +19,9 @@ function fixture(bytes: Uint8Array) {
           c.enqueue(bytes.subarray(0,511)); c.enqueue(bytes.subarray(511)); c.close()
         }}), limit, retain), revision: '"immutable"',
       }),
-      promote: async () => {}, exists: async () => true,
+      promote: async () => {}, exists: async () => true, remove: async () => {},
     },
+    log: () => {},
     serviceRpc: async (fn: string, args: Record<string, unknown>) => {
       calls.push({ fn, args })
       return { data: fn === 'file_managed_upload_for' ? { max_bytes: bytes.length } : [{ created: false }], error: null }

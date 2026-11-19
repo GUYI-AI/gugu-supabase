@@ -6,7 +6,7 @@ const settings = {
   inventory_ready:true,
   storage_global_bytes: 1000, storage_account_bytes: 800, storage_group_bytes: 700,
   download_global_bytes: 1000, download_account_bytes: 800, download_group_bytes: 700,
-  upload_permit_seconds: 120,
+  upload_permit_seconds: 120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600,
   sign_window_seconds: 60, sign_account_count: 100, sign_group_count: 100,
   file_max_bytes: 600,
 }
@@ -117,12 +117,12 @@ describe('atomic transfer budgets', () => {
     expect(Number((await db.query("SELECT chat.file_transfer_usage('upload','global','*') AS n")).rows[0].n)-baselineGlobalStorage).toBe(100)
     expect((await db.query("SELECT settings->'inventory_ready' AS ready FROM chat.file_transfer_limits")).rows[0].ready).toBe(false)
   })
-  it('keeps abandoned upload capacity until a trusted operator records terminal provider evidence',async()=>{
+  it('releases an open upload hold only through a service-recorded staging removal',async()=>{
     await user(owner)
     const permit=(await db.query('SELECT chat.file_managed_upload_as($1,$2,$3,60) AS r',[randomUUID(),group,owner])).rows[0].r
     expect((await reject('SELECT chat.file_managed_upload_closed($1,$2)',[permit.staging_key,'operator-proof'])).code).toBe('42501')
     await service()
-    expect((await reject('SELECT chat.file_managed_upload_closed($1,$2)',[permit.staging_key,''])).message).toBe('Terminal provider evidence is required')
+    expect((await reject('SELECT chat.file_managed_upload_closed($1,$2)',[permit.staging_key,''])).message).toBe('Staging removal evidence is required')
     await db.query('SELECT chat.file_managed_upload_closed($1,$2)',[permit.staging_key,'provider-terminal-and-absence:fixture'])
     expect((await db.query('SELECT staging_deleted,close_evidence FROM chat.file_transfer_uploads WHERE staging_key=$1',[permit.staging_key])).rows[0]).toEqual({staging_deleted:true,close_evidence:'provider-terminal-and-absence:fixture'})
     expect(Number((await db.query("SELECT chat.file_transfer_usage('upload','global','*') AS n")).rows[0].n)-baselineGlobalStorage).toBe(0)

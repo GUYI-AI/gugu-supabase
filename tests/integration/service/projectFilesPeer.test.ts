@@ -88,7 +88,7 @@ describe('project chat files kept by the device that sent each version',()=>{
   it('asks an older version\'s own device for a temporary copy, kept as long as that device\'s account says',async()=>{
     await service()
     await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=chat.file_transfer_limits.settings||EXCLUDED.settings",
-      [{inventory_ready:true,file_max_bytes:1000,upload_permit_seconds:120,sign_window_seconds:60,sign_account_count:100,temporary_group_bytes:10000}])
+      [{inventory_ready:true,file_max_bytes:1000,upload_permit_seconds:120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600,sign_window_seconds:60,sign_account_count:100,temporary_group_bytes:10000}])
     await storage(owner,{retention:'1d'});await storage(member,{retention:'30d'})
     await publish(owner,bound,'root')
     await publish(member,theirs,'device-store',{hash:next,expected:1,path:item+'/file.bin'})
@@ -111,7 +111,7 @@ describe('project chat files kept by the device that sent each version',()=>{
   it('lets only the holder decline a requested copy; the reader sees the reason at once and a new request asks again',async()=>{
     await service()
     await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=chat.file_transfer_limits.settings||EXCLUDED.settings",
-      [{inventory_ready:true,file_max_bytes:1000,upload_permit_seconds:120,sign_window_seconds:60,sign_account_count:100,temporary_group_bytes:10000}])
+      [{inventory_ready:true,file_max_bytes:1000,upload_permit_seconds:120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600,sign_window_seconds:60,sign_account_count:100,temporary_group_bytes:10000}])
     await publish(owner,bound,'root')
     await user(member)
     const request=randomUUID(),ask=(id:string)=>db.query('SELECT chat.file_temporary_request($1,$2,$3) AS r',[{item_id:item,version:1},member,id])
