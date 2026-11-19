@@ -36,7 +36,10 @@ beforeAll(async () => {
 afterAll(async () => { await Promise.all(clients.map(client => client.end())) })
 
 interface Failure { code?: string; hint?: string; message: string }
-async function transaction(client: pg.Client, actor: string, role: 'authenticated' | 'service_role', sql: string, args: unknown[]) {
+async function transaction(
+  client: pg.Client, actor: string, role: 'authenticated' | 'service_role', sql: string, args: unknown[],
+  beforeCommit?: () => Promise<void>,
+) {
   await client.query('BEGIN')
   // Local to this disposable connection, before assuming the API role. The
   // registration victim reports the old cycle promptly; no retry is involved.
@@ -45,6 +48,7 @@ async function transaction(client: pg.Client, actor: string, role: 'authenticate
   await client.query(`SET LOCAL ROLE ${role}`)
   try {
     const result = await client.query(sql, args)
+    await beforeCommit?.()
     await client.query('COMMIT')
     return { rows: result.rows, error: null }
   } catch (error) {
@@ -188,12 +192,37 @@ describe('quota admission before attachment receipt and file rows #359', () => {
     const [controllerPid, writerPid] = await Promise.all([pid(controller), pid(writer)])
     await controller.query('BEGIN')
     await controller.query(`SELECT pg_advisory_xact_lock(${quota})`)
+    // The predecessor uses pg_try_advisory_xact_lock and can return before
+    // quota becomes available. Keep its real transaction open after that call:
+    // its copy-row lock must remain observable until the probe has run.
+    let releaseCommit!: () => void
+    const commitBarrier = new Promise<void>(resolve => { releaseCommit = resolve })
+    let callReturned = false, transactionFinished = false, quotaQueued = false
     const releasing = transaction(writer, f.owner, 'authenticated', 'SELECT chat.file_storage_mark_as($1,$2) AS n',
-      [JSON.stringify([{ item_id: item }]), 'release'])
+      [JSON.stringify([{ item_id: item }]), 'release'], async () => {
+        callReturned = true
+        await commitBarrier
+      }).then(value => { transactionFinished = true; return value })
     let copyLocked = false
     let result: Awaited<ReturnType<typeof transaction>> | undefined
     try {
-      await blockedBy(writerPid, controllerPid)
+      const end = Date.now() + 5000
+      while (!callReturned) {
+        const waiting = await monitor.query<{ waiting: boolean }>(
+          `SELECT $2::int=ANY(pg_blocking_pids($1::int)) AND EXISTS (
+            SELECT 1 FROM pg_locks l WHERE l.pid=$1::int AND NOT l.granted
+              AND l.locktype='advisory' AND l.mode='ExclusiveLock' AND l.objsubid=1
+              AND l.classid=(((${quota}) >> 32) & 4294967295)::oid
+              AND l.objid=((${quota}) & 4294967295)::oid
+          ) AS waiting`, [writerPid, controllerPid])
+        if (waiting.rows[0]?.waiting) { quotaQueued = true; break }
+        if (transactionFinished) {
+          expect((await releasing).error).toBeNull()
+          throw new Error('RIG-FAIL: retention transaction finished without reaching its commit barrier')
+        }
+        if (Date.now() >= end) throw new Error('RIG-FAIL: retention call neither returned nor queued for the exact quota lock')
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
       await probe.query('BEGIN')
       try {
         const row = await probe.query(`SELECT 1 FROM chat.file_transfer_storage_refs
@@ -205,11 +234,12 @@ describe('quota admission before attachment receipt and file rows #359', () => {
         copyLocked = true
       } finally { await probe.query('ROLLBACK') }
     } finally {
-      await controller.query('ROLLBACK')
+      try { await controller.query('ROLLBACK') } finally { releaseCommit() }
       result = await releasing
-      console.info(JSON.stringify({ retentionCopyLockedWhileWaitingForQuota: copyLocked, result }))
+      console.info(JSON.stringify({ retentionCopyLockedBeforeCommit: copyLocked, quotaQueued, result }))
     }
     expect(copyLocked).toBe(false)
+    expect(quotaQueued).toBe(true)
     expect(result?.error).toBeNull()
     expect(result?.rows).toEqual([{ n: 1 }])
     expect((await monitor.query(`SELECT action,changed_copy_count FROM file_private.storage_action_audit
