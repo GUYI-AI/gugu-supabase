@@ -11,7 +11,7 @@ export interface TeamAccountsDependencies {
   clientIp?(request: Request): string | null;
   invitationMailer?: InvitationMailer;
 }
-const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization, apikey, content-type, x-client-info',
+const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization, apikey, content-type, x-client-info, x-gugu-credit-unit-version',
   'access-control-allow-methods': 'GET, POST, OPTIONS' };
 const READS = new Set(['contexts', 'profile', 'directory', 'members']);
 const PUBLIC_WRITES = new Set(['email_challenge', 'email_verify', 'create', 'sign_in', 'accept_invitation', 'invitation_info']);
