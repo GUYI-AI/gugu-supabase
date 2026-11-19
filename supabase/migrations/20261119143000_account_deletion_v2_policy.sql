@@ -153,7 +153,8 @@ $guard$||anchor);
     RETURN jsonb_build_object('ok',false,'error','scope_conflict','status',409);
   END IF;
   IF op.unprepared_native_generation IS NULL THEN
-    UPDATE account_deletion_private.operations SET unprepared_native_generation=p_native_generation
+    UPDATE account_deletion_private.operations SET unprepared_native_generation=p_native_generation,
+      revision=revision+CASE WHEN state='closed_before_confirm' THEN 1 ELSE 0 END,updated_at=clock_timestamp()
       WHERE id=op.id RETURNING * INTO op;
   END IF;
 $generation$||anchor);
