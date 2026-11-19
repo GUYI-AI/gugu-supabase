@@ -529,6 +529,14 @@ describe('temporary generations reuse managed budgets and private key issuance',
     await db.query(COMMIT,[id,owner,cipherSha,128,key])
     expect((await generation(id)).state).toBe('ready')
   })
+  it('commits a ciphertext whose sha equals a stored managed file',async()=>{
+    await service()
+    await db.query(`INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by)
+      VALUES('oss',$1,$2,128,'application/octet-stream',$3)`,[cipherSha.slice(0,2)+'/'+cipherSha,cipherSha,owner])
+    const id=await ready()
+    expect((await generation(id)).state).toBe('ready')
+    expect((await db.query("SELECT bucket_id FROM chat.file_blobs WHERE sha256=$1 ORDER BY bucket_id",[cipherSha])).rows.map(r=>r.bucket_id)).toEqual(['oss','temporary'])
+  })
   it('registers only an immutable service commitment; size, SHA and key changes cannot overwrite a ready generation',async()=>{
     const {transfer_id:id}=await request();await accept(id);await service()
     expect((await fails(COMMIT,[id,owner,cipherSha,127,key])).hint).toBe('file_transfer_conflict')
