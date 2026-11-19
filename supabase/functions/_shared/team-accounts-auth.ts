@@ -55,8 +55,9 @@ export function teamAuth(settings: Settings) {
     return session;
   }
   async function ensureAnchor(address: string): Promise<boolean> {
-    // Set the non-payer marker before INSERT triggers run. Existing personal
-    // identities are never changed or adopted by their email alone.
+    // Request the server marker at creation; GoTrue persists app metadata later
+    // in the transaction. Consumers must classify its final committed row.
+    // Existing personal identities are never changed or adopted by email.
     const anchor = await call('/auth/v1/admin/users', 'POST', settings.serviceKey, settings.serviceKey, {
       email: address, email_confirm: false, app_metadata: { gugu_account_kind: 'team_login_anchor' },
     });
