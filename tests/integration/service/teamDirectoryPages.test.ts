@@ -112,6 +112,24 @@ it('continues only when another matching row exists and keeps counts independent
   expect((await page(actor, 'One', null, 1))).toMatchObject({ matching_count: 1, next_cursor: null })
 })
 
+it('uses native UUID ordering for both directory and administrator-member cursor selection', async () => {
+  const id = await team(), actor = await member(id, 'Owner', 'owner@directory.invalid', 'superadmin')
+  await member(id, 'Second', 'second@directory.invalid')
+  await member(id, 'Third', 'third@directory.invalid')
+  const expected = (await db.query('SELECT id FROM team_private.members WHERE team_id=$1 ORDER BY id', [id])).rows.map(row => row.id)
+  const directory = await page(actor, null, null, 2)
+  const members = (await db.query("SELECT public.team_account_read('members',$1,$2,$3) r",
+    [actor.principal, actor.session, { limit: 2 }])).rows[0].r
+  for (const result of [directory, members]) {
+    expect(result.members.map((row: any) => row.id)).toEqual(expected.slice(0, 2))
+    expect(result.next_cursor).toBe(expected[1])
+  }
+  const continued = (await db.query("SELECT public.team_account_read('members',$1,$2,$3) r",
+    [actor.principal, actor.session, { limit: 2, cursor: members.next_cursor }])).rows[0].r
+  expect(continued.members.map((row: any) => row.id)).toEqual(expected.slice(2))
+  expect(continued.next_cursor).toBeNull()
+})
+
 it('pages a 128-person team and finds an email outside the first page', async () => {
   const id = await team(), actor = await member(id, 'Caller', 'caller@directory.invalid', 'admin')
   const principals = Array.from({ length: 127 }, () => randomUUID())
