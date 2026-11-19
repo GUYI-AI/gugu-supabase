@@ -54,11 +54,11 @@ BEGIN
       'phone-' || p_installation_id::text || '-' || owner_id
     OR p_provider IS NULL OR p_provider NOT IN ('apns','fcm','huawei','honor','xiaomi','oppo','vivo')
     OR p_token IS NULL OR octet_length(p_token) > 4096
-    OR CASE WHEN p_provider = 'apns' THEN p_token !~ '^([0-9a-f]{2})+$'
-      ELSE p_token COLLATE "C" !~ '^[!-~]+$' END
+    OR (p_provider = 'apns' AND p_token !~ '^([0-9a-f]{2})+$')
+    OR (p_provider <> 'apns' AND p_token COLLATE "C" !~ '^[!-~]+$')
     OR p_environment IS NULL OR p_environment NOT IN ('sandbox','production')
-    OR p_topic IS NULL OR CASE WHEN p_provider = 'apns' THEN p_topic <> 'app.gugu.chat'
-      ELSE p_topic NOT IN ('app.gugu.chat','app.gugu.chat.beta') OR p_environment <> 'production' END
+    OR p_topic IS NULL OR (p_provider = 'apns' AND p_topic <> 'app.gugu.chat')
+    OR (p_provider <> 'apns' AND (p_topic NOT IN ('app.gugu.chat','app.gugu.chat.beta') OR p_environment <> 'production'))
     OR p_chat_enabled IS NULL OR p_task_enabled IS NULL
     OR p_chat_sound_enabled IS NULL OR p_task_sound_enabled IS NULL THEN
     RAISE EXCEPTION 'Invalid mobile push binding' USING ERRCODE = '22023';
