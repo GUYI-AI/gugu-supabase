@@ -176,13 +176,14 @@ describe('retained community user-event producers', () => {
           : name === 'identity.fan_agent_presence_to_viewers' ? '(text,jsonb)' : '()'}`),
       'chat.send_user_event(jsonb,text,text,boolean)',
       'chat.flush_user_revisions()',
+      'chat.flush_pending_user_revisions()',
     ]
     const { rows: writers } = await db.query<{ signature: string }>(`
       SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
       WHERE p.oid=ANY($1::regprocedure[])
         AND p.prosrc ~* 'INSERT[[:space:]]+INTO[[:space:]]+chat[.]account_revisions'`, [signatures])
-    // Publishing stages; the commit flush is the one journal writer and sends the wake for the staged producers.
-    expect(writers).toEqual([{ signature: 'chat.flush_user_revisions()' }])
+    // Publishing stages; the shared finalizer is the one journal writer and sends the staged producers' wake.
+    expect(writers).toEqual([{ signature: 'chat.flush_pending_user_revisions()' }])
     const { rows: senders } = await db.query<{ signature: string }>(`
       SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
       WHERE p.oid=ANY($1::regprocedure[])
@@ -192,7 +193,7 @@ describe('retained community user-event producers', () => {
       SELECT n.nspname||'.'||p.proname AS name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
       WHERE p.oid=ANY($1::regprocedure[]) AND p.prosrc LIKE '%chat.send_user_event(%' ORDER BY name`, [signatures])
     const staged = ['chat.publish_user_revision', 'identity.fan_agent_presence_to_viewers']
-    expect(routed.map((row) => row.name)).toEqual([...sources.map((source) => source.name).filter((name) => !staged.includes(name)), 'chat.flush_user_revisions'].sort())
+    expect(routed.map((row) => row.name)).toEqual([...sources.map((source) => source.name).filter((name) => !staged.includes(name)), 'chat.flush_pending_user_revisions'].sort())
   })
 
   it('one append validates every event, advances only human heads at the flush, and publish wakes once', async () => {

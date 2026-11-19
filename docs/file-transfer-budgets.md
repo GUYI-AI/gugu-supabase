@@ -69,13 +69,25 @@ Use authenticated, protected exports from the configured provider account; never
 | CDN realtime SLS JSON | `method`, `domain`, `uri`, `uri_param`, `uuid`, `body_bytes_sent`, `unixtime` |
 | OSS SLS JSON | `http_method`, `host`, `request_uri`, `request_id`, `response_body_length`, `__time__`, `sync_request` |
 
-For OSS, export `url_decode(request_uri) AS request_uri` because SLS stores that field URL-encoded. Preserve the URI's own object encoding; do not repeatedly decode paths. CDN authentication's signed `rand` is the managed download UUID without hyphens. The OSS adapter recognizes `gugu-download-id` for a future authenticated direct-OSS provider; this release's managed OSS reads use CDN. Do not enable an adapter whose attribution identifier is absent or not covered by the provider's signed authorization.
+For OSS, export `url_decode(request_uri) AS request_uri` because SLS stores that field URL-encoded. Preserve the URI's own object encoding; do not repeatedly decode paths. CDN authentication's signed `rand` is the managed download UUID without hyphens. The OSS adapter recognizes `gugu-download-id` on signed direct OSS reads, including temporary transfers and origin fallback. A managed OSS download can use both the CDN and the origin under the same reservation. Do not enable an adapter whose attribution identifier is absent or not covered by the provider's signed authorization.
 
 Set `GUGU_FILE_LOG_DOMAIN` to the exact source domain and `GUGU_FILE_LOG_OBJECT_PREFIX` to its physical prefix, then run `node scripts/import-file-transfer-logs.mjs cdn` or `oss` with JSONL on stdin. The endpoint is `/attachments/usage-import`. Batches contain at most 512 events. Replaying overlapping exports is safe. A changed event ID payload or wrong object fails the batch atomically. A failed run may have committed earlier batches; restart from the same trusted export.
 
 HEAD requests are excluded. OSS CDN-origin requests (`sync_request='cdn'`) are excluded from the user's download ledger to avoid charging the same transfer twice; reconcile origin charges separately. Response-body bytes do not equal every provider billing item: headers, CDN billing adjustments, origin traffic, requests and storage belong in the provider invoice comparison. Do not describe this ledger as a hard currency cap.
 
 If logs are late or incomplete, keep outstanding reservations and pause issuance before unsafe headroom accumulates. Do not refund on expiry, one successful log record, a client completion message, or a partial range. After the provider's complete delivery window is independently verified, an operator may call service-only `chat.file_transfer_settle(download_id)` for an expired capability with observations. That call is an operational assertion of finality, not a log-completeness detector. Later observations are still accepted and charged in their observed UTC month. Downloads with no final evidence remain conservatively held.
+
+For expired downloads with **no observation records**, the service role can call `chat.file_transfer_downloads_closed(p_until, p_sources, p_evidence)`. The cutoff is exclusive and cannot be in the future. The call covers **all outstanding eligible reservations from the beginning of the ledger up to that cutoff**. Verify complete imports for the whole prefix, including the final bytes of responses admitted before link expiry. An export covering only a recent interval cannot justify closing older outstanding rows. A failed or interrupted import leaves the holds in place.
+
+| Logical object bucket | Sources the operator must verify |
+| --- | --- |
+| `oss` | Both `cdn` and `oss`, including signed origin fallback and thumbnails |
+| `temporary` | `oss` (direct ciphertext downloads) |
+| Native or historical Storage buckets, unknown objects | Ineligible. There is no trusted Storage usage importer. |
+
+The database records a logical bucket. The community adapter can sign native Storage reads even for the logical `oss` bucket. Check the **physical provider history** for every candidate across all signing deployments, domains and prefixes. If any candidate used native Storage signing during the covered period, or the deployment history is unknown, do not call this function. For a provider or domain change, verify both sides before advancing the cutoff across it. A CDN-free period may count as covered only with independent evidence that no CDN served that period. Exclude CDN-to-origin fetches from end-user bytes as described above.
+
+Supply distinct verified source names and a nonsecret audit reference of 1–160 characters, for example `logs:phys=oss,cdn=on:<period>:<export IDs>:<verifier>`. Keep the full verification record outside the ledger. The call returns the number of newly settled rows and preserves that reference in `close_evidence`. A retry leaves the first reference intact. A zero-byte observation still belongs to the observed-download settlement path. Late provider records continue to debit their observed UTC month. To disable this operation, apply `ops/rollback-file-download-closure.sql`; previously settled rows and evidence are preserved.
 
 ## Staging and cleanup
 

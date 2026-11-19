@@ -93,6 +93,7 @@ describe('private reversible device preparation',()=>{
     expect((await rejected(()=>read(f,prepared.server_generation))).message).toContain('UNAVAILABLE')
     expect((await rejected(()=>prepare(f))).message).toContain('UNAVAILABLE')
     expect((await rejected(()=>db.query("UPDATE identity.gugu_devices SET status='online' WHERE device_id=$1",[f.device]))).code).toBe('42501')
+    expect((await rejected(()=>db.query('SELECT identity.runtime_instance_heartbeat($1,$2)',[randomUUID(),f.device]))).code).toBe('42501')
   })
 })
 
@@ -123,6 +124,23 @@ async function claims(client: pg.Client,f: Awaited<ReturnType<typeof fixture>>) 
 }
 const prepareOn=(client: pg.Client,f: Awaited<ReturnType<typeof fixture>>) => client.query('SELECT account_deletion_private.device_preparation_prepare($1,$2,$3) r',[f.op,f.device,f.native])
 describe('device preparation independent-connection fences',()=>{
+  it.each([false,true])('admits ordinary concurrent heartbeats with preparation admission %s',async enabled=>{
+    const a=new pg.Client({connectionString:database}),b=new pg.Client({connectionString:database})
+    await a.connect(); await b.connect()
+    let f: Awaited<ReturnType<typeof committedFixture>> | undefined
+    try {
+      f=await committedFixture(a)
+      await a.query('UPDATE account_deletion_private.device_preparation_access SET enabled=$1',[enabled])
+      await a.query('BEGIN')
+      // A real routine non-key device write remains uncommitted on another connection.
+      await a.query('UPDATE identity.gugu_devices SET updated_at=clock_timestamp() WHERE device_id=$1',[f.device])
+      await b.query('BEGIN'); await claims(b,f)
+      await b.query("SET LOCAL statement_timeout='2s'")
+      await b.query('SELECT identity.runtime_instance_heartbeat($1,$2)',[randomUUID(),f.device])
+      await b.query('COMMIT')
+      expect((await db.query('SELECT count(*)::int n FROM identity.runtime_instances WHERE device_id=$1',[f.device])).rows[0].n).toBe(1)
+    } finally { await finishConnections(a,b,f) }
+  })
   it('waits for an admitted heartbeat then removes its ephemeral presence before preparing',async()=>{
     const a=new pg.Client({connectionString:database}),b=new pg.Client({connectionString:database})
     await a.connect(); await b.connect()

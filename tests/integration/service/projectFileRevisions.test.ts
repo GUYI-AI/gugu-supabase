@@ -579,6 +579,19 @@ describe('temporary generations reuse managed budgets and private key issuance',
     expect((await db.query('SELECT state,bytes FROM chat.file_transfer_reservations WHERE id=$1',[id])).rows[0]).toEqual({state:'issued',bytes:'128'})
     expect((await fails('SELECT chat.file_temporary_key_for($1,$2)',[id,member])).hint).toBe('file_transfer_denied')
   })
+  it.each(['read-once','1d','7d','30d'])('exposes %s only for a serviceable authorized generation',async(retention)=>{
+    await storage({retention})
+    const pending=await request()
+    expect(pending).not.toHaveProperty('retention')
+    const id=pending.transfer_id
+    await accept(id);await service()
+    await db.query(COMMIT,[id,owner,cipherSha,128,key])
+    await storage({retention:retention==='1d'?'30d':'1d'})
+    expect(await request(id)).toMatchObject({transfer_id:id,transfer_status:'ready',retention})
+    await service()
+    await db.query("UPDATE chat.file_temporary_transfers SET serve_until=now() WHERE id=$1",[id])
+    expect(await request(id)).not.toHaveProperty('retention')
+  })
   it('renews retained data only on a fresh read, never a retry or metadata display, and caps retention at thirty days',async()=>{
     const transfer=await ready(),id=randomUUID();await service()
     await db.query("UPDATE chat.file_temporary_transfers SET created_at=now()-interval '29 days',serve_until=now()+interval '1 hour' WHERE id=$1",[transfer])

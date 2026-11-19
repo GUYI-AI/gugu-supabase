@@ -343,6 +343,8 @@ describe('topics use one source resource container', () => {
   })
 
   it('a direct-chat topic has the same container rule without depending on groupId', async () => {
+    // A new human-DM anchor requires friendship; topic resource rules are unchanged.
+    await db.query("INSERT INTO identity.friendships(user_a_id,user_b_id) VALUES(LEAST($1::text,$2::text),GREATEST($1::text,$2::text))", [owner, reader])
     const dm = await room('dm', [reader]), dmTopic = await topicIn(dm)
     const number = String((await db.query('SELECT public_id FROM chat.chats WHERE id=$1', [dmTopic])).rows[0].public_id)
     expect(await rpc(reader, 'SELECT * FROM chat.chat_facts($1,$2)', [number, reader]))

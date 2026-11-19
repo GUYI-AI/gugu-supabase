@@ -23,7 +23,7 @@ A project chat has no host and no file policy. Each local revision records the d
 
 Composer preparation does not publish files. Ordered commit passes the message to the same `file_device_publish` entry point, which creates the revision and sends its exact pinned message in one transaction. A failed message, recipient, payload or idempotency check rolls back the revision and workspace row too. The entry point is `SECURITY INVOKER`, so `send_message_idempotent` runs with the caller's original message RLS. Calling it from a definer would bypass that RLS; the negative recipient contract protects this boundary. Thread fields retain the existing sender behavior; this entry point does not introduce a second thread ACL or claim that SQL rejects an unregistered thread ID.
 
-A file sent from any member's device stays on that device; there is no transfer of bytes to another machine. A reader fetches any version from the device that keeps it, through the local, owner SSH or encrypted temporary transfer providers below. The resolver names that device and whether it is online, so a reader whose holder is offline is told so instead of waiting.
+A file sent from any member's device stays on that device; there is no transfer of bytes to another machine. A reader fetches any version from the device that keeps it, through the local, owner SSH or encrypted temporary transfer providers below. The resolver names that device and whether it is online, so a reader whose holder is offline is told so instead of waiting. A holder that is online but cannot send a requested copy (the file changed or moved on that device, its upload failed) retires that request with a one-line reason through `file-decline`; the reader sees it as `transfer_declined` on its next poll of the same request, and a new request asks the holder again.
 
 For a file sent in a topic, the resource and quota still belong to the source group.
 
@@ -52,6 +52,8 @@ An unverified placeholder is registered in the existing blob table when the uplo
 The client implementation will have one resolver before any cloud metadata lookup: local loopback, the reader's already-open owner SSH link, then encrypted temporary cloud transfer. Expired cards and ordinary re-upload belong to the separate permanent-file expiry change, not this resolver change.
 
 The full contract runner isolates quota policy and next-idle-pass GC assertions from unrelated object-writing suites. The original GC concurrency suite still uses real concurrent database transactions, with every original assertion preserved. This separation does not replace or remove concurrency coverage: collection legitimately skips a busy global quota lock, so another suite's incidental writer cannot stand in for the test's intended idle pass.
+
+An authorized `file-request` without `download_request_id` returns transfer state without signing a download. For a currently serviceable ready generation the response also includes its stored `retention` (`read-once`, `1d`, `7d`, or `30d`) and existing `transfer_id`. Each reader checks the original reference and pinned content again through `file-resolve` before delivery. Share verified bytes only between readers admitted to the same explicitly reusable generation. The reader fetching bytes checks the signed response's `download.transfer_id` and completes its own acknowledgment. A read-once or missing policy keeps the individual reader's permit and acknowledgment.
 
 ## One backend activation event
 

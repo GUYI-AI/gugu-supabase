@@ -131,11 +131,12 @@ it('refuses a missing creation name as a workflow error before inserting a team'
 it('does not consume a verified login receipt when the member must choose a team', async () => {
   const owner = await founder(), second = randomUUID(), secondMember = randomUUID(), secondPrincipal = randomUUID()
   await db.query("INSERT INTO team_private.teams(id,name,region,state) VALUES($1,'Other same-email team','cn','active')", [second])
+  await db.query("INSERT INTO team_private.members(id,team_id,planned_principal_id,email_normalized,role,state) VALUES($1,$2,$3,$4,'superadmin','provisioning')", [secondMember, second, secondPrincipal, owner.email])
   await db.query(`INSERT INTO auth.users(id,aud,role,email,email_confirmed_at,created_at,raw_app_meta_data)
     VALUES($1,'authenticated','authenticated',$2,now(),now(),$3)`, [secondPrincipal, 'team-' + secondMember.replaceAll('-', '') + '@team.gugu.invalid', {
     gugu_account_kind: 'team_member', gugu_team_id: second, gugu_member_id: secondMember, gugu_team_region: 'cn',
   }])
-  await db.query("INSERT INTO team_private.members(id,team_id,principal_user_id,planned_principal_id,email_normalized,role,state) VALUES($1,$2,$3,$3,$4,'superadmin','active')", [secondMember, second, secondPrincipal, owner.email])
+  await db.query("UPDATE team_private.members SET principal_user_id=$2,state='active' WHERE id=$1", [secondMember, secondPrincipal])
   await db.query("UPDATE team_private.email_challenges SET created_at=created_at-interval '2 minutes',expires_at=expires_at-interval '2 minutes' WHERE email_normalized=$1", [owner.email])
   const proof = await receipt(owner.email, 'sign_in')
   const choose = await provision('sign_in', { receipt_digest: proof.digest })

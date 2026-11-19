@@ -252,6 +252,8 @@ describe('提交(chat.attachment_commit)', () => {
     const sent = await commit(owner, (await upload(owner, `ai-${randomUUID()}`)).key, randomUUID(), ai, owner, 'chart.png')
     expect(await inAttachments(ai)).toEqual(['chart.png'])
     expect(sent.chat_id).toBe(ai)
+    // This attachment-send positive control is a current human friendship.
+    await database.query("INSERT INTO identity.friendships(user_a_id,user_b_id) VALUES(LEAST($1::text,$2::text),GREATEST($1::text,$2::text))", [owner, member])
     const dm = await chatOf('dm', [owner, member])
     await commit(member, (await upload(member, `dm-${randomUUID()}`)).key, randomUUID(), dm, member, 'note.png')
     expect(await inAttachments(dm)).toEqual(['note.png'])
