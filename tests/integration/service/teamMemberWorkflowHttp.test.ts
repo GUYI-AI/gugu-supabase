@@ -134,13 +134,27 @@ it('creates, invites, signs in, disables, restores and confirms member email thr
   const allMembers = await handle(new Request('https://backend.example.invalid/functions/v1/team-accounts?action=directory',
     { headers: { authorization: 'Bearer ' + member.session.access_token } }))
   expect(allMembers.status).toBe(200)
-  for (const row of (await allMembers.json()).data.members) expect(row).not.toHaveProperty('email')
+  const canonicalNumber = (await db.query('SELECT gugu_number FROM identity.users WHERE id=$1', [member.session.user.id])).rows[0].gugu_number
+  const permittedRows = (await allMembers.json()).data.members
+  for (const row of permittedRows) {
+    expect(row).not.toHaveProperty('email')
+    expect(row.gugu_number).toBeTypeOf('number')
+  }
+  expect(permittedRows.find((row: { id: string }) => row.id === member.membership.id).gugu_number).toBe(canonicalNumber)
+  const numberSearch = await handle(new Request('https://backend.example.invalid/functions/v1/team-accounts?' + new URLSearchParams({
+    action: 'directory', query: String(canonicalNumber), limit: '1',
+  }), { headers: { authorization: 'Bearer ' + member.session.access_token } }))
+  expect(numberSearch.status).toBe(200)
+  const numberPage = (await numberSearch.json()).data
+  expect(numberPage).toMatchObject({ total_count: 2, matching_count: 1, next_cursor: null,
+    members: [{ id: member.membership.id, gugu_number: canonicalNumber }] })
+  expect(numberPage.members[0]).not.toHaveProperty('email')
   const administratorDirectory = await handle(new Request('https://backend.example.invalid/functions/v1/team-accounts?' + new URLSearchParams({
     action: 'directory', query: memberEmail.toUpperCase(), limit: '1',
   }), { headers: { authorization: 'Bearer ' + founder.session.access_token } }))
   expect(administratorDirectory.status).toBe(200)
   expect((await administratorDirectory.json()).data).toMatchObject({ team_id: founder.team.id, total_count: 2, matching_count: 1,
-    next_cursor: null, members: [{ id: member.membership.id, identity_id: member.session.user.id, email: memberEmail, role: 'member' }] })
+    next_cursor: null, members: [{ id: member.membership.id, identity_id: member.session.user.id, email: memberEmail, gugu_number: canonicalNumber, role: 'member' }] })
   for (const limit of ['0', '101']) {
     const invalid = await handle(new Request('https://backend.example.invalid/functions/v1/team-accounts?action=directory&limit=' + limit,
       { headers: { authorization: 'Bearer ' + member.session.access_token } }))
