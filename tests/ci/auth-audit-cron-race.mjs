@@ -59,6 +59,7 @@ try {
   assert.ok(worker, 'The actual scheduled worker did not finish')
   await pause()
   assert.equal(Number((await db.query('SELECT count(*) AS n FROM auth.audit_log_entries WHERE id=ANY($1::uuid[])', [rows])).rows[0].n), 0)
+  await db.query("SET statement_timeout='2s'")
   const afterWorker = await prune()
   assert.equal(afterWorker, 0, 'The original fixture expects 1 here, after the competing worker already consumed the row')
   console.log(JSON.stringify({ event: 'dev_auth_audit_cron_race_reproduced', source,
