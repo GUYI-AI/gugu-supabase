@@ -50,6 +50,7 @@ describe('temporary file HTTP protocol',()=>{
     f.userRpc.mockResolvedValue({data:failed,error:null})
     expect(await handleProjectFiles(f.deps,host,'file-request',{ref:{item_id:transfer},request_id:transfer})).toEqual(failed)
     expect(await handleProjectFiles(f.deps,host,'file-request',{ref:{item_id:transfer},request_id:transfer,download_request_id:download})).toEqual({...failed,download:null})
+  })
   it('lets the holder retire its own request with a reason, through the user RPC only',async()=>{
     const f=fixture()
     f.userRpc.mockResolvedValueOnce({data:null,error:null})
