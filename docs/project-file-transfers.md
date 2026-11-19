@@ -53,6 +53,8 @@ The client implementation will have one resolver before any cloud metadata looku
 
 The full contract runner isolates quota policy and next-idle-pass GC assertions from unrelated object-writing suites. The original GC concurrency suite still uses real concurrent database transactions, with every original assertion preserved. This separation does not replace or remove concurrency coverage: collection legitimately skips a busy global quota lock, so another suite's incidental writer cannot stand in for the test's intended idle pass.
 
+An authorized `file-request` without `download_request_id` returns transfer state without signing a download. For a currently serviceable ready generation the response also includes its stored `retention` (`read-once`, `1d`, `7d`, or `30d`) and existing `transfer_id`. Each reader checks the original reference and pinned content again through `file-resolve` before delivery. Share verified bytes only between readers admitted to the same explicitly reusable generation. The reader fetching bytes checks the signed response's `download.transfer_id` and completes its own acknowledgment. A read-once or missing policy keeps the individual reader's permit and acknowledgment.
+
 ## One backend activation event
 
 The budget enforcement code is already part of the integration branch. Deploying any later function bundle, including this combined lifecycle change, activates that same enforcement. Do not schedule an intermediate deployment while a previous compatible function bundle remains active. The lifecycle rollout and budget reactivation are one switchover, gated by the same operator checklist:

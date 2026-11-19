@@ -153,6 +153,59 @@ describe('atomic transfer budgets', () => {
     expect((await db.query('SELECT staging_deleted,close_evidence FROM chat.file_transfer_uploads WHERE staging_key=$1',[permit.staging_key])).rows[0]).toEqual({staging_deleted:true,close_evidence:'provider-terminal-and-absence:fixture'})
     expect(Number((await db.query("SELECT chat.file_transfer_usage('upload','global','*') AS n")).rows[0].n)-baselineGlobalStorage).toBe(0)
   })
+  it('closes only expired unobserved downloads whose signing paths the operator covered', async () => {
+    // Keep every boundary relative to the transaction clock, including an expiry exactly at the cutoff.
+    const cutoff = "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' - interval '1 day'"
+    const close = `SELECT chat.file_transfer_downloads_closed((${cutoff}), $1, $2) AS n`
+    async function fixture(bucket: string, state = 'issued', kind = 'download', age = 1) {
+      const storage = await object(10)
+      await db.query('UPDATE chat.file_transfer_storage SET bucket_id=$2 WHERE id=$1', [storage, bucket])
+      const id = randomUUID()
+      await db.query(`INSERT INTO chat.file_transfer_reservations
+        (id,kind,account_id,chat_id,subject,bytes,state,created_at,expires_at)
+        VALUES ($1,$2,$3,$4,$5,10,$6,(${cutoff})-interval '2 days',(${cutoff})-make_interval(days=>$7))`,
+      [id,kind,owner,group,'object:'+storage,state,age])
+      return id
+    }
+    const permanent = await fixture('oss','reserved')
+    const temporary = await fixture('temporary')
+    const observed = await fixture('oss')
+    const excluded = [await fixture('workspace'), await fixture('oss','issued','upload'),
+      await fixture('oss','issued','download',0), await fixture('oss','issued','download',-90)]
+    await db.query(`SELECT chat.file_transfer_observe('zero-event',$1,0,(${cutoff}))`,[observed])
+
+    await user(owner)
+    expect((await reject(close,[['cdn','oss'],'forged'])).code).toBe('42501')
+    await db.query('SET LOCAL ROLE service_role')
+    for (const sources of [[], ['cdn','cdn'], ['cdn',null], ['unknown'], ['storage']]) {
+      expect((await reject(close,[sources,'logs:test'])).message).toMatch(/source|Storage/)
+    }
+    for (const evidence of [null, '', '  ', 'x'.repeat(161)]) {
+      expect((await reject(close,[['oss'],evidence])).message).toMatch(/evidence/)
+    }
+    for (const until of [null, 'infinity', 'tomorrow']) {
+      expect((await reject('SELECT chat.file_transfer_downloads_closed($1,$2,$3)',[until,['oss'],'logs:test'])).message).toMatch(/cutoff/)
+    }
+    const held = async () => Number((await db.query("SELECT chat.file_transfer_usage('download','account',$1) AS n",[owner])).rows[0].n)
+    const initial = await held()
+    expect((await db.query(close,[['cdn'],'logs:cdn'])).rows[0].n).toBe(0)
+    expect((await db.query(close,[['oss'],'logs:direct'])).rows[0].n).toBe(1)
+    expect(await held()).toBe(initial-10)
+    expect((await db.query(close,[['cdn','oss'],'logs:both'])).rows[0].n).toBe(1)
+    expect((await db.query(close,[['oss','cdn'],'logs:retry'])).rows[0].n).toBe(0)
+    expect(await held()).toBe(initial-20)
+    const state = async (id: string) => (await db.query('SELECT state,close_evidence FROM chat.file_transfer_reservations WHERE id=$1',[id])).rows[0]
+    expect(await state(temporary)).toEqual({state:'settled',close_evidence:'logs:direct'})
+    for (const id of [...excluded, observed]) expect(await state(id)).toEqual({state:'issued',close_evidence:null})
+
+    await db.query('SELECT chat.file_transfer_settle($1)',[observed])
+    expect(await held()).toBe(initial-30)
+    await db.query(`SELECT chat.file_transfer_observe('prior-month',$1,12,(${cutoff}))`,[permanent])
+    expect(await held()).toBe(initial-30)
+    await db.query("SELECT chat.file_transfer_observe('current-month',$1,18,now())",[permanent])
+    expect(await held()).toBe(initial-12)
+    expect(await state(permanent)).toEqual({state:'settled',close_evidence:'logs:both'})
+  })
   it('only trusted imports can reconcile a current download, without refunding its issued capability',async()=>{
     const stored=await object(100),download=randomUUID()
     await reserve(100,'download',owner,group,download,'object:'+stored)
