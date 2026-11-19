@@ -49,7 +49,7 @@ BEGIN
   -- actor is selected from the stored operation for service phases, and the
   -- verified caller for admission phases. Never accept a body-selected actor.
   -- Preserve result, finish, failed-verification and cancellation/release paths.
-  EXECUTE replace(definition,anchor,$guard$  IF p_action IN ('register','begin','claim_confirmation','prepare_device','verified','execute') THEN
+  definition:=replace(definition,anchor,$guard$  IF p_action IN ('register','begin','claim_confirmation','prepare_device','verified','execute') THEN
     DECLARE eligible boolean;
     BEGIN
       eligible:=account_deletion_private.operation_personal_is_eligible(actor);
@@ -62,6 +62,26 @@ BEGIN
     END;
   END IF;
 $guard$||anchor);
+
+  -- A prepare may have committed while its HTTP response was lost. Returning
+  -- only the operation would strand custody without the server generation
+  -- once new admission is closed. The parent is already locked here; expose
+  -- only its existing generation pair, never create or release a preparation.
+  anchor:=$result$    RETURN jsonb_build_object('ok',true,'operation',account_deletion_private.operation_view(o));
+  END IF;
+
+  IF p_action IN ('prepare_device','read_preparation','cancel_preparation') THEN$result$;
+  IF length(definition)-length(replace(definition,anchor,''))<>length(anchor) THEN
+    RAISE EXCEPTION 'Unexpected V2 result recovery predecessor';
+  END IF;
+  EXECUTE replace(definition,anchor,$result$    RETURN jsonb_build_object('ok',true,'operation',account_deletion_private.operation_view(o))
+      ||COALESCE((SELECT jsonb_build_object('preparation',jsonb_build_object(
+        'prepared',p.state='prepared','cancelled',p.state='released',
+        'native_generation',p.native_generation,'server_generation',p.server_generation))
+        FROM account_deletion_private.device_preparations p WHERE p.operation_id=o.id),'{}'::jsonb);
+  END IF;
+
+  IF p_action IN ('prepare_device','read_preparation','cancel_preparation') THEN$result$);
 
   SELECT pg_get_functiondef('public.account_deletion_operation_flow(text,text,text,uuid,uuid,text,text,integer,uuid,uuid,text,text,uuid,uuid)'::regprocedure)
     INTO definition;

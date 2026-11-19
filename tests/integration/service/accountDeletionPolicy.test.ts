@@ -101,3 +101,23 @@ it('retains receipt-only recovery after deletion with both gates closed', async 
   expect((await flow('result', proof)).operation.state).toBe('deleted')
   expect((await flow('result', { ...proof, p_receipt_digest: hash('wrong') })).error).toBe('not_found')
 })
+it('recovers a committed preparation generation with closed gates without replaying prepare', async () => {
+  const f = await fixture(), registered = await flow('register', f), device = 'policy-' + randomUUID()
+  await db.query(`INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform,auth_session_id,capabilities)
+    VALUES($1,$2,'Policy fixture','Policy fixture','android',$3,'{"host_kind":"phone"}')`, [device, f.p_user_id, f.p_session_id])
+  const prepared = await flow('prepare_device', { ...f, p_device_id: device })
+  expect(prepared.preparation.prepared).toBe(true)
+  await db.query('UPDATE account_deletion_private.operation_access SET enabled=false')
+  await db.query('UPDATE account_deletion_private.device_preparation_access SET enabled=false')
+  const proof = { p_operation_digest: f.p_operation_digest, p_receipt_digest: f.p_receipt_digest }
+  const result = await flow('result', proof)
+  expect(result.operation.operation_id).toBe(registered.operation.operation_id)
+  expect(result.preparation).toEqual({ prepared: true, cancelled: false, native_generation: f.p_native_generation,
+    server_generation: prepared.preparation.server_generation })
+  expect((await db.query('SELECT count(*)::int n FROM account_deletion_private.device_preparations WHERE operation_id=$1', [registered.operation.operation_id])).rows[0].n).toBe(1)
+  const bad = await flow('result', { ...proof, p_receipt_digest: hash('wrong') })
+  expect(bad.error).toBe('not_found'); expect(bad).not.toHaveProperty('preparation')
+  expect((await flow('cancel_operation', { ...f, p_server_generation: prepared.preparation.server_generation })).operation.can_release_preparation).toBe(true)
+  expect((await flow('result', proof)).preparation).toEqual({ prepared: false, cancelled: true,
+    native_generation: f.p_native_generation, server_generation: prepared.preparation.server_generation })
+})
