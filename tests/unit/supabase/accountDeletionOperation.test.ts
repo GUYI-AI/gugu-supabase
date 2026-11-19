@@ -12,6 +12,8 @@ function fixture() {
     currentUser: vi.fn(async () => owner), sendCode: vi.fn(async () => true),
     verifyCode: vi.fn(async () => ({ id: owner.id, email: owner.email })), hardDelete: vi.fn(async () => 'unknown' as const),
     flow: vi.fn(async (args: OperationArgs): Promise<OperationReply> => {
+      if (args.p_action === 'verification_failed') return { ok: true, operation: { ...operation(), confirmation: {
+        confirmation_id: String(args.p_confirmation_id), challenge_generation: Number(args.p_generation), state: 'rejected', error_code: 'verification_failed' } } }
       if (args.p_action === 'claim_confirmation' || args.p_action === 'begin') return { ok: true, operation: operation(), dispatch_required: true, lease_token: lease }
       if (args.p_action === 'verified' || args.p_action === 'execute') return { ok: true, operation: operation('processing'), user_id: owner.id, lease_token: lease,
         request: { request_id: requestId, state: 'processing', expires_at: '2030-01-01T00:00:00Z', can_retry: false, last_error: null } }
@@ -107,6 +109,32 @@ describe('closed operation HTTP protocol', () => {
     const f = fixture(); vi.mocked(f.deps.flow).mockRejectedValue(new Error('private diagnostics'))
     const response = await f.call('confirm', confirm)
     expect(response.status).toBe(503); expect(await response.text()).toBe('{"error":"unavailable"}')
+    expect(f.deps.hardDelete).not.toHaveBeenCalled()
+  })
+  it('returns a definitive rejection only with the matching stored confirmation receipt', async () => {
+    const f = fixture()
+    vi.mocked(f.deps.verifyCode).mockResolvedValue(null)
+    const response = await f.call('confirm', confirm)
+    expect(response.status).toBe(422)
+    expect(await response.json()).toMatchObject({ error: 'verification_failed', operation: { operation_id: operationId, state: 'open',
+      confirmation: { confirmation_id: confirm.confirmation_id, challenge_generation: confirm.generation, state: 'rejected' } } })
+    expect(f.deps.hardDelete).not.toHaveBeenCalled()
+  })
+  it.each(['write_refused', 'write_unknown', 'missing_receipt', 'still_verifying', 'wrong_operation', 'wrong_confirmation', 'wrong_generation'])('preserves unknown verification when rejection acknowledgement is %s', async kind => {
+    const f = fixture(), original = f.deps.flow
+    vi.mocked(f.deps.verifyCode).mockResolvedValue(null)
+    f.deps.flow = vi.fn(async args => {
+      if (args.p_action !== 'verification_failed') return original(args)
+      if (kind === 'write_unknown') throw Error('private rejection write outcome')
+      if (kind === 'write_refused') return { ok: false, error: 'state_conflict', status: 409 }
+      const receipt = { confirmation_id: kind === 'wrong_confirmation' ? randomUUID() : confirm.confirmation_id,
+        challenge_generation: kind === 'wrong_generation' ? 2 : 1, state: kind === 'still_verifying' ? 'verifying' : 'rejected' }
+      return { ok: true, operation: { ...operation(), operation_id: kind === 'wrong_operation' ? randomUUID() : operationId,
+        ...(kind === 'missing_receipt' ? {} : { confirmation: receipt }) } }
+    })
+    const response = await f.call('confirm', confirm)
+    expect(response.status).toBe(503)
+    expect(await response.json()).toEqual({ error: 'unavailable' })
     expect(f.deps.hardDelete).not.toHaveBeenCalled()
   })
 })

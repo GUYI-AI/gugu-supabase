@@ -3,7 +3,8 @@ import { sha256, type DeletionDependencies, type FlowReply } from './account-del
 export type OperationArgs = Record<string, string | number | null> & { p_action: string };
 
 export interface OperationReply extends FlowReply {
-  operation?: { operation_id: string; state: string; revision: number; challenge_generation: number; request_id: string | null; can_retry: boolean; can_release_preparation?: boolean };
+  operation?: { operation_id: string; state: string; revision: number; challenge_generation: number; request_id: string | null; can_retry: boolean; can_release_preparation?: boolean;
+    confirmation?: { confirmation_id: string; state: string; challenge_generation: number; error_code?: string | null } | null };
   dispatch_required?: boolean;
   confirmation_state?: string;
   preparation?: Record<string, unknown>;
@@ -120,8 +121,12 @@ export function createAccountDeletionOperationHandler(deps: OperationDependencie
       let verified: { id: string; email: string } | null = null;
       try { verified = await deps.verifyCode(user.email, body.code); } catch { /* safe fixed result below */ }
       if (!verified || verified.id !== user.id || verified.email.toLowerCase() !== user.email.toLowerCase()) {
-        await call('verification_failed', { ...intent, p_lease_token: claimed.lease_token });
-        return fail('verification_failed', 422);
+        const rejected = await call('verification_failed', { ...intent, p_lease_token: claimed.lease_token });
+        const recorded = rejected.operation?.confirmation;
+        if (!rejected.ok || !claimed.operation?.operation_id || rejected.operation?.operation_id !== claimed.operation.operation_id
+            || rejected.operation.state !== 'open' || recorded?.state !== 'rejected'
+            || recorded.confirmation_id !== body.confirmation_id || recorded.challenge_generation !== generation) return fail('unavailable', 503);
+        return new Response(JSON.stringify({ error: 'verification_failed', operation: rejected.operation }), { status: 422, headers });
       }
       const ready = await call('verified', { ...intent, p_lease_token: claimed.lease_token });
       if (!ready.ok) return output(ready);
