@@ -56,10 +56,14 @@ it('exposes only active same-team people to both ordinary members and administra
   await db.query('UPDATE identity.users SET removed_at=now() WHERE id=$1', [removed.principal])
   await member(other, 'Other team', 'other@directory.invalid')
   const result = await page(ordinary)
-  expect(result).toEqual(await page(owner))
+  const administrator = await page(owner)
+  expect(result.members).toEqual(administrator.members.map(({ email: _email, ...row }: any) => row))
   expect(result).toMatchObject({ team_id: id, total_count: 2, matching_count: 2, next_cursor: null })
   expect(result.members.map((row: any) => row.id).sort()).toEqual([owner.id, ordinary.id].sort())
   for (const row of result.members) {
+    expect(Object.keys(row).sort()).toEqual(['avatar', 'id', 'identity_id', 'name', 'revision', 'role'])
+  }
+  for (const row of administrator.members) {
     expect(Object.keys(row).sort()).toEqual(['avatar', 'email', 'id', 'identity_id', 'name', 'revision', 'role'])
     expect(row.email).not.toContain('team.gugu.invalid')
   }
@@ -69,7 +73,7 @@ it('exposes only active same-team people to both ordinary members and administra
 })
 
 it('searches names and canonical emails case-insensitively without treating wildcards as patterns', async () => {
-  const id = await team(), actor = await member(id, '林晓', 'linxiao@directory.invalid')
+  const id = await team(), actor = await member(id, '林晓', 'linxiao@directory.invalid', 'admin')
   await member(id, 'Name has 100%_literal', 'percent@directory.invalid')
   await member(id, 'Another person', 'email-only@directory.invalid')
   expect((await page(actor, '林')).members.map((row: any) => row.id)).toEqual([actor.id])
@@ -78,6 +82,17 @@ it('searches names and canonical emails case-insensitively without treating wild
   expect((await page(actor, '%_')).matching_count).toBe(1)
   expect((await page(actor, "' OR true --"))).toMatchObject({ total_count: 3, matching_count: 0, members: [], next_cursor: null })
   expect((await page(actor, '   ')).matching_count).toBe(3)
+})
+
+it('does not disclose email through ordinary-member rows, search counts or pagination after demotion', async () => {
+  const id = await team(), actor = await member(id, 'Caller', 'caller@directory.invalid', 'admin')
+  await member(id, 'Visible name', 'private-address@directory.invalid')
+  expect((await page(actor, 'PRIVATE-ADDRESS', null, 1))).toMatchObject({ matching_count: 1,
+    members: [{ email: 'private-address@directory.invalid' }], next_cursor: null })
+  await db.query("UPDATE team_private.members SET role='member',revision=revision+1 WHERE id=$1", [actor.id])
+  expect((await page(actor, 'PRIVATE-ADDRESS', null, 1))).toMatchObject({ matching_count: 0, members: [], next_cursor: null })
+  expect((await page(actor, 'Visible', null, 1)).members[0]).not.toHaveProperty('email')
+  expect(JSON.stringify(await page(actor))).not.toContain('private-address')
 })
 
 it('continues only when another matching row exists and keeps counts independent of the cursor', async () => {
@@ -98,7 +113,7 @@ it('continues only when another matching row exists and keeps counts independent
 })
 
 it('pages a 128-person team and finds an email outside the first page', async () => {
-  const id = await team(), actor = await member(id, 'Caller', 'caller@directory.invalid')
+  const id = await team(), actor = await member(id, 'Caller', 'caller@directory.invalid', 'admin')
   const principals = Array.from({ length: 127 }, () => randomUUID())
   const seats = principals.map(() => randomUUID())
   await db.query(`INSERT INTO team_private.members(id,team_id,planned_principal_id,email_normalized,role,state)

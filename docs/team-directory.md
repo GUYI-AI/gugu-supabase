@@ -2,18 +2,22 @@
 
 `team-accounts?action=directory` requires a verified team principal and its live
 Auth session. Ordinary members and administrators see the same active people in
-their own team. Administrative member operations remain separately authorized.
+their own team. Only administrators receive member emails or search by email;
+ordinary members search names only. Administrative member operations remain
+separately authorized.
 
 Optional parameters are `query`, `cursor` and `limit` (1–100, default 50). Search
-matches literal substrings of display names or canonical member emails, without
-case sensitivity. Empty or whitespace-only queries select all active people;
+matches literal substrings of display names and, for administrators, canonical
+member emails, without case sensitivity. Empty or whitespace-only queries select all active people;
 queries longer than 254 characters and invalid cursors/page sizes are refused.
 
 The response retains `members` and `next_cursor` and adds `team_id`, `total_count`
 and `matching_count`. Counts cover all visible/matching members, independent of
 the current cursor. Each member retains `identity_id`, `name`, `avatar` and `role`
-and additionally includes its membership `id`, `email` and `revision`. The email
-is the person's canonical membership address, not an internal Auth alias.
+and additionally includes its membership `id` and `revision`. Administrators
+also receive `email`, the person's canonical membership address rather than an
+internal Auth alias. Ordinary-member responses omit this field entirely, and
+email-only matches do not affect their rows, counts or continuation cursor.
 Invited, disabled and removed identities are excluded. Financial usage and caps
 are supplied by the separate billing service.
 

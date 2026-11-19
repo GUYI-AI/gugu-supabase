@@ -130,7 +130,16 @@ it('creates, invites, signs in, disables, restores and confirms member email thr
     action: 'directory', query: memberEmail.toUpperCase(), limit: '1',
   }), { headers: { authorization: 'Bearer ' + member.session.access_token } }))
   expect(directory.status).toBe(200)
-  expect((await directory.json()).data).toMatchObject({ team_id: founder.team.id, total_count: 2, matching_count: 1,
+  expect((await directory.json()).data).toMatchObject({ team_id: founder.team.id, total_count: 2, matching_count: 0, members: [], next_cursor: null })
+  const allMembers = await handle(new Request('https://backend.example.invalid/functions/v1/team-accounts?action=directory',
+    { headers: { authorization: 'Bearer ' + member.session.access_token } }))
+  expect(allMembers.status).toBe(200)
+  for (const row of (await allMembers.json()).data.members) expect(row).not.toHaveProperty('email')
+  const administratorDirectory = await handle(new Request('https://backend.example.invalid/functions/v1/team-accounts?' + new URLSearchParams({
+    action: 'directory', query: memberEmail.toUpperCase(), limit: '1',
+  }), { headers: { authorization: 'Bearer ' + founder.session.access_token } }))
+  expect(administratorDirectory.status).toBe(200)
+  expect((await administratorDirectory.json()).data).toMatchObject({ team_id: founder.team.id, total_count: 2, matching_count: 1,
     next_cursor: null, members: [{ id: member.membership.id, identity_id: member.session.user.id, email: memberEmail, role: 'member' }] })
   for (const limit of ['0', '101']) {
     const invalid = await handle(new Request('https://backend.example.invalid/functions/v1/team-accounts?action=directory&limit=' + limit,
