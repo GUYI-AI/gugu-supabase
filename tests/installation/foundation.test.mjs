@@ -16,6 +16,7 @@ import { installConnectionCutoverWithEvidence } from './platform-connection-cuto
 import { installConnectionFollowupsWithEvidence } from './platform-connection-followups-fixture.mjs'
 import { installConnectionCatalogWithEvidence, releasedDirectoryRow } from './platform-connection-catalog-fixture.mjs'
 import { humanDmFriendshipVersion, installHumanDmFriendshipWithEvidence } from './human-dm-friendship-fixture.mjs'
+import { accountAuditCronNamesVersion, installAccountAuditCronNames } from './account-audit-cron-fixture.mjs'
 
 // Deliberately requires an empty, disposable Supabase PostgreSQL 17 instance.
 // Never resets schemas, migration history, or user data to make a test pass.
@@ -48,6 +49,10 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     assert.ok(deviceCheckRelease && validationRelease)
     let widgetUpgrade
     const releaseQuery = async (sql) => {
+      const auditCronRelease = releases.find(release => release.version === accountAuditCronNamesVersion)
+      if (auditCronRelease && sql.includes(auditCronRelease.sql)) {
+        return installAccountAuditCronNames({ query, sql, release: auditCronRelease, test: (name, action) => t.test(name, action) })
+      }
       const humanDmRelease = releases.find(release => release.version === humanDmFriendshipVersion)
       if (humanDmRelease && sql.includes(humanDmRelease.sql)) {
         return installHumanDmFriendshipWithEvidence({ db, query, sql, url: url.href, test: (name, action) => t.test(name, action) })
