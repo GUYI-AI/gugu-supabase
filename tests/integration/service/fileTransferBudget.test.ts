@@ -63,6 +63,21 @@ beforeEach(async () => {
 })
 afterEach(async () => { await db.query('ROLLBACK') })
 describe('atomic transfer budgets', () => {
+  it('counts an unsettled download only in the UTC month it was signed',async()=>{
+    const usage=async()=>Promise.all(['global','account','group'].map(async(scope)=>Number((await db.query(
+      'SELECT chat.file_transfer_usage($1,$2,$3) AS n',['download',scope,scope==='global'?'*':scope==='account'?owner:group])).rows[0].n)))
+    const initial=await usage()
+    const earlier=randomUUID(), current=randomUUID()
+    await reserve(100,'download',owner,group,earlier,'signed last month')
+    await reserve(30,'download',owner,group,current,'signed this month')
+    expect(await usage()).toEqual(initial.map(n=>n+130))
+    // Signed before this UTC month and never settled: no longer held against this month's budget.
+    await db.query("UPDATE chat.file_transfer_reservations SET created_at=date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'-interval '1 second' WHERE id=$1",[earlier])
+    expect(await usage()).toEqual(initial.map(n=>n+30))
+    // The first instant of the month still belongs to it.
+    await db.query("UPDATE chat.file_transfer_reservations SET created_at=date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' WHERE id=$1",[earlier])
+    expect(await usage()).toEqual(initial.map(n=>n+130))
+  })
   it('keeps ledger usage equal to holds and UTC-month observations through reconciliation and deletion',async()=>{
     const id=randomUUID()
     await reserve(100,'download',owner,group,id,'ledger lifecycle')
