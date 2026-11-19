@@ -7,44 +7,6 @@ on:
 permissions:
   contents: read
 jobs:
-  audit-cron-dev-control:
-    name: Auth audit cron race on unchanged dev
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      GUGU_INSTALL_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres?sslmode=disable
-      SUPABASE_INTERNAL_IMAGE_REGISTRY: docker.io
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          path: .audit-regression
-          sparse-checkout: tests/ci
-          persist-credentials: false
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Pull Docker Hub images through mirror.gcr.io
-        run: |
-          current=$(sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}')
-          echo "$current" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
-      - run: pnpm test:db:start
-      - run: pnpm test:installation
-      - name: Force the real cron interleaving on the unchanged dev fixture
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: node .audit-regression/tests/ci/auth-audit-cron-race.mjs "$PWD" "$BASE_SHA"
-      - if: always()
-        run: pnpm test:db:stop
   push-worker-image:
     name: Push worker image without credentials
     runs-on: ubuntu-24.04
@@ -242,6 +204,10 @@ jobs:
           docker info --format '{{.RegistryConfig.Mirrors}}'
       - run: pnpm test:db:start
       - run: pnpm test:installation
+      - name: Prove Auth audit fixture isolation with the real cron worker
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: node tests/ci/auth-audit-cron-race.mjs "$PWD" "$SOURCE_SHA"
       - name: Check installed candidate application owners
         env:
           OWNER_ENFORCED: ${{ needs.migration-source.outputs.owner_enforced }}

@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { pauseAuthAuditRetentionCron } from '../../support/auth-audit-cron.mjs'
 
 const url = process.env.GUGU_INTEGRATION_DATABASE_URL ?? ''
 let db: pg.Client, subject: string, agent: string
+let cronPause: Awaited<ReturnType<typeof pauseAuthAuditRetentionCron>> | undefined
 const ids = () => [subject, agent]
 const email = () => subject + '@audit.invalid'
 async function context(values = ids()) {
@@ -27,8 +29,9 @@ async function refused(sql: string, args: unknown[] = []) {
 beforeAll(async () => {
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(url).hostname)) throw Error('Auth audit tests require an owned loopback fixture')
   db = new pg.Client({ connectionString: url }); await db.connect()
+  cronPause = await pauseAuthAuditRetentionCron(db)
 })
-afterAll(async () => { await db?.end() })
+afterAll(async () => { try { await cronPause?.restore() } finally { await db?.end() } })
 beforeEach(async () => {
   subject = randomUUID(); agent = 'agent-' + randomUUID()
   await db.query('BEGIN')

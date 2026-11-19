@@ -5,9 +5,10 @@ import { readFileSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { pauseAuthAuditRetentionCron } from '../support/auth-audit-cron.mjs'
 
-// A real pg_cron worker, against the unchanged PR-base dev database. The
-// explicit barrier selects a legal interleaving of the original row-lock test.
+// A real worker consumes the unprotected historical fixture, while the shared
+// fixture guard protects the same row-lock sequence across scheduled periods.
 const root = realpathSync(process.argv[2]) + sep
 const source = process.argv[3]
 assert.match(source, /^[a-f0-9]{40}$/)
@@ -23,6 +24,7 @@ const db = new Client({ connectionString: url.href, application_name: 'gugu-audi
 const locker = new Client({ connectionString: url.href, application_name: 'gugu-audit-cron-locker', connectionTimeoutMillis: 5000, query_timeout: 5000 })
 const rows = [randomUUID(), randomUUID()]
 let original
+let evidence
 const prune = async () => Number((await db.query('SELECT identity.prune_auth_audit_log(100) AS n')).rows[0].n)
 const pause = async () => {
   await db.query('SELECT cron.alter_job($1::bigint,active:=false)', [original.jobid])
@@ -62,9 +64,28 @@ try {
   await db.query("SET statement_timeout='2s'")
   const afterWorker = await prune()
   assert.equal(afterWorker, 0, 'The original fixture expects 1 here, after the competing worker already consumed the row')
-  console.log(JSON.stringify({ event: 'dev_auth_audit_cron_race_reproduced', source,
+
+  await db.query("SELECT cron.alter_job($1::bigint,schedule:='1 second',active:=true)", [original.jobid])
+  const guard = await pauseAuthAuditRetentionCron(db)
+  try {
+    const pausedAt = (await db.query('SELECT coalesce(max(runid),0) AS id FROM cron.job_run_details WHERE jobid=$1', [original.jobid])).rows[0].id
+    for (let iteration = 0; iteration < 3; iteration++) {
+      await locker.query("INSERT INTO auth.audit_log_entries(id,payload,created_at) SELECT unnest($1::uuid[]),'{}',now()-interval '181 days'", [rows])
+      await locker.query('BEGIN')
+      await locker.query('SELECT id FROM auth.audit_log_entries WHERE id=$1 FOR UPDATE', [rows[0]])
+      await db.query('BEGIN'); await db.query("SET LOCAL statement_timeout='2s'")
+      assert.equal(await prune(), 1)
+      await db.query('COMMIT'); await locker.query('COMMIT')
+      // Cross a real one-second scheduling period after the commit/unlock.
+      await delay(1200)
+      assert.equal((await db.query('SELECT active FROM cron.job WHERE jobid=$1', [original.jobid])).rows[0].active, false)
+      assert.equal((await db.query('SELECT coalesce(max(runid),0) AS id FROM cron.job_run_details WHERE jobid=$1', [original.jobid])).rows[0].id, pausedAt)
+      assert.equal(await prune(), 1)
+    }
+  } finally { await guard.restore() }
+  evidence = { event: 'auth_audit_cron_before_after_control_passed', source,
     fixtureSha256: createHash('sha256').update(readFileSync(resolve(root, 'tests/integration/service/authAuditRetention.test.ts'))).digest('hex'),
-    workerRunId: worker.runid, originalFixtureExpected: 1, observedFinalPrune: afterWorker }))
+    workerRunId: worker.runid, unprotectedFinalPrune: afterWorker, protectedFinalPrune: 1, protectedIterations: 3 }
 } finally {
   await db.query('ROLLBACK').catch(() => {})
   await locker.query('ROLLBACK').catch(() => {})
@@ -72,6 +93,9 @@ try {
     await pause()
     await db.query('DELETE FROM auth.audit_log_entries WHERE id=ANY($1::uuid[])', [rows])
     await db.query('SELECT cron.alter_job($1::bigint,schedule:=$2::text,active:=$3::boolean)', [original.jobid, original.schedule, original.active])
+    const restored = (await db.query('SELECT schedule,active FROM cron.job WHERE jobid=$1', [original.jobid])).rows[0]
+    assert.deepEqual(restored, { schedule: original.schedule, active: original.active })
   }
   await locker.end(); await db.end()
 }
+console.log(JSON.stringify({ ...evidence, schedulerRestored: true }))
