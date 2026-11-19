@@ -204,7 +204,7 @@ jobs:
           docker info --format '{{.RegistryConfig.Mirrors}}'
       - run: pnpm test:db:start
       - run: pnpm test:installation
-      - name: Upload actual 24-function body and ACL comparison
+      - name: Upload actual writer body and ACL comparison
         if: always()
         uses: actions/upload-artifact@v4
         with:

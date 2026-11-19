@@ -42,11 +42,9 @@ BEGIN
         'chat.workspace_import_document(uuid,integer,uuid,jsonb)'::regprocedure,
         'chat.files_replace_stage(uuid,text,text,text,integer,jsonb,boolean)'::regprocedure,
         'file_private.publish_revision(uuid,text,text,text,text,text,bigint,text,text,integer,uuid,integer,integer)'::regprocedure,
-        'file_private.publish_revision_by(uuid,text,text,text,text,bigint,text,text,integer,uuid,text)'::regprocedure,
         'file_private.link_project_message(uuid,text)'::regprocedure,
         'chat.send_friend_file_as_owner(text,text,text,text,text,text)'::regprocedure,
         'chat.session_attachment_commit(text,uuid,text,text,text[],text)'::regprocedure,
-        'chat.file_version_handoff_publish(uuid,text,text,bigint)'::regprocedure,
         -- Retention's audited wrapper keeps its identity-erasure guard outside
         -- this closed base. The base must admit quota before updating copy rows,
         -- rather than reaching file_transfer_expire only after those updates.

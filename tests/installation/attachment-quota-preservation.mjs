@@ -23,15 +23,19 @@ export const quotaWriterSignatures = Object.freeze([
   'chat.workspace_import_document(uuid,integer,uuid,jsonb)',
   'chat.files_replace_stage(uuid,text,text,text,integer,jsonb,boolean)',
   'file_private.publish_revision(uuid,text,text,text,text,text,bigint,text,text,integer,uuid,integer,integer)',
-  'file_private.publish_revision_by(uuid,text,text,text,text,bigint,text,text,integer,uuid,text)',
   'file_private.link_project_message(uuid,text)',
   'chat.send_friend_file_as_owner(text,text,text,text,text,text)',
   'chat.session_attachment_commit(text,uuid,text,text,text[],text)',
-  'chat.file_version_handoff_publish(uuid,text,text,bigint)',
   'file_private.storage_mark_audit_base(jsonb,text,text)',
   'chat.send_message_idempotent(text,text,text,text[],text,text,text,text,boolean,boolean,text,uuid,integer,text,uuid)',
   'chat.workspace_item_for(text,text,boolean)',
   'chat.messages_file_ref()',
+])
+// project_files_peer dropped these APIs on 2026-10-30. They are reviewed
+// exclusions, not live write frontiers; this release must not recreate them.
+export const retiredQuotaSignatures = Object.freeze([
+  'file_private.publish_revision_by(uuid,text,text,text,text,bigint,text,text,integer,uuid,text)',
+  'chat.file_version_handoff_publish(uuid,text,text,bigint)',
 ])
 const admission = '    -- #359: quota admission before any file row lock.\n'
   + '    PERFORM pg_catalog.pg_advisory_xact_lock(\n'
@@ -94,6 +98,7 @@ export function verifyQuotaFunction(before, after) {
 
 export function auditQuotaSnapshots(before, after) {
   const errors = [], functions = [], unexpectedChanges = []
+  if (new Set([...quotaWriterSignatures, ...retiredQuotaSignatures]).size !== 24 || retiredQuotaSignatures.length !== 2) errors.push('reviewed_inventory')
   const oldByOid = new Map(before.map(row => [row.oid, row]))
   const newByOid = new Map(after.map(row => [row.oid, row]))
   if (oldByOid.size !== before.length || newByOid.size !== after.length) errors.push('duplicate_catalog_oid')
@@ -111,9 +116,16 @@ export function auditQuotaSnapshots(before, after) {
     }
   }
   if (unexpectedChanges.length) errors.push('unexpected_catalog_changes')
-  if (functions.length !== 24) errors.push('expected_24_functions')
+  const retired = retiredQuotaSignatures.map(signature => {
+    const beforePresent = before.some(row => row.signature === signature)
+    const afterPresent = after.some(row => row.signature === signature)
+    if (beforePresent || afterPresent) errors.push('retired_function_present:' + signature)
+    return { signature, before_present: beforePresent, after_present: afterPresent, unchanged_absence: !beforePresent && !afterPresent }
+  })
+  if (functions.length !== 22) errors.push('expected_22_live_functions')
   return { schema_version: 1, release: quotaLockOrderVersion, passed: errors.length === 0,
-    expected_functions: 24, audited_functions: functions.length, errors, unexpected_changes: unexpectedChanges, functions }
+    reviewed_signatures: 24, expected_functions: 22, audited_functions: functions.length,
+    expected_retired: 2, retired, errors, unexpected_changes: unexpectedChanges, functions }
 }
 
 async function snapshot(db) {
@@ -130,14 +142,18 @@ async function snapshot(db) {
         ORDER BY a.grantor,a.grantee,a.privilege_type,a.is_grantable),'[]'::jsonb)
        FROM aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a) AS acl
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace LEFT JOIN wanted w ON w.oid=p.oid
-    WHERE n.nspname IN ('chat','file_private') ORDER BY p.oid`, [quotaWriterSignatures])).rows
+    WHERE n.nspname IN ('chat','file_private') ORDER BY p.oid`, [[...quotaWriterSignatures, ...retiredQuotaSignatures]])).rows
 }
 
 export async function installQuotaLockOrderWithEvidence({ db, query, sql, artifactPath = '.local/verification/attachment-quota-359.json' }) {
   let report = { schema_version: 1, release: quotaLockOrderVersion, passed: false, stage: 'before_snapshot' }
   try {
     const before = await snapshot(db)
-    assert.equal(before.filter(row => quotaWriterSignatures.includes(row.signature)).length, 24, 'all 24 actual predecessor functions must exist')
+    report.predecessor_inventory = before.filter(row => row.signature).map(row => row.signature)
+    const missing = quotaWriterSignatures.filter(signature => !report.predecessor_inventory.includes(signature))
+    assert.equal(missing.length, 0, 'missing actual predecessor functions: ' + missing.join(', '))
+    assert.equal(before.filter(row => quotaWriterSignatures.includes(row.signature)).length, 22, 'all 22 live predecessor functions must exist')
+    assert.equal(before.filter(row => retiredQuotaSignatures.includes(row.signature)).length, 0, 'retired handoff APIs must remain absent')
     report.stage = 'migration'
     const result = await query(sql)
     report.stage = 'after_snapshot'
@@ -145,7 +161,7 @@ export async function installQuotaLockOrderWithEvidence({ db, query, sql, artifa
     report = { ...auditQuotaSnapshots(before, after), stage: 'verified', executed_sql_sha256: sha256(sql),
       provenance: { commit: process.env.GITHUB_SHA ?? null, run_id: process.env.GITHUB_RUN_ID ?? null,
         source: 'pg_proc immediately before and after the actual incremental release', utf8: true } }
-    assert.equal(report.passed, true, 'quota release changed bytes/ACLs outside its 24 allowed admission fragments; see JSON evidence')
+    assert.equal(report.passed, true, 'quota release changed bytes/ACLs outside its 22 allowed admission fragments or recreated retired APIs; see JSON evidence')
     return result
   } finally {
     mkdirSync(path.dirname(artifactPath), { recursive: true })

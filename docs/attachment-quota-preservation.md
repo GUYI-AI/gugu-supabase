@@ -5,7 +5,10 @@ Installation CI captures the real `pg_proc` rows immediately before and after
 from migration source: this also covers functions amended or copied by previous
 dynamic releases.
 
-The independent reviewed inventory requires all 24 functions. For each function,
+The reviewed inventory has 22 live functions and two retired API exclusions.
+`20261030090000_project_files_peer` dropped `file_version_handoff_publish` and
+`publish_revision_by`; both signatures must be absent before and after the release.
+For each of the 22 live functions,
 the verifier removes exactly one literal admission fragment from its permitted
 entry position. The remaining UTF-8 bytes must equal the predecessor bytes,
 without SQL, whitespace or Unicode normalization. Conditional file-message and
@@ -22,7 +25,7 @@ Function body bytes are never deparsed or normalized.
 `pnpm test:installation` fails if this audit fails. CI uploads
 `.local/verification/attachment-quota-359.json` even on failure; a missing artifact
 is an error. It contains the release/SQL digest, CI source identity, all 24
-signatures, original and installed body bytes in hex, allowed insertion bytes and
+reviewed signatures (22 body comparisons and two absence checks), original and installed body bytes in hex, allowed insertion bytes and
 offset, before/after/restored SHA-256 digests, ACL tuples, metadata and any
 unexpected catalog changes. It contains source/catalog information, not fixture
 credentials or application data. A report with `passed: false` is not acceptance.

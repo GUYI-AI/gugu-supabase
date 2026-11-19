@@ -50,7 +50,7 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     assert.ok(deviceCheckRelease && validationRelease)
     let widgetUpgrade
     const quotaRelease = releases.find(release => release.version === quotaLockOrderVersion)
-    assert.ok(quotaRelease, 'quota lock order release and its 24-function preservation audit are required')
+    assert.ok(quotaRelease, 'quota lock order release and its live/retired function preservation audit are required')
     const releaseQuery = async (sql) => {
       if (sql.includes(quotaRelease.sql)) {
         return installQuotaLockOrderWithEvidence({ db, query, sql })

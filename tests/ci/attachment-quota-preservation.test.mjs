@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { auditQuotaSnapshots, quotaWriterSignatures } from '../installation/attachment-quota-preservation.mjs'
+import { auditQuotaSnapshots, quotaWriterSignatures, retiredQuotaSignatures } from '../installation/attachment-quota-preservation.mjs'
 
 // Synthetic catalog rows test the verifier's refusal behavior only. The real
 // before/after SQL bodies and ACLs are captured separately by installation CI.
@@ -29,14 +29,26 @@ function snapshots() {
   return { before, after }
 }
 
-test('audit requires all 24 real body comparisons, including conditional write entries', () => {
+test('audit requires 22 real body comparisons and two retired API exclusions', () => {
   const { before, after } = snapshots(), report = auditQuotaSnapshots(before, after)
   assert.equal(report.passed, true)
-  assert.equal(report.functions.length, 24)
+  assert.equal(report.functions.length, 22)
+  assert.equal(report.retired.length, 2)
+  assert.ok(report.retired.every(row => row.unchanged_absence))
   for (const row of report.functions) {
     assert.equal(row.before_sha256, row.restored_sha256)
     assert.notEqual(row.before_sha256, row.after_sha256)
     assert.equal(row.acl_identical, true)
+  }
+})
+
+test('a retired API present before or after migration is refused', () => {
+  for (const stage of ['before', 'after']) {
+    const sample = snapshots()
+    sample[stage].push({ ...structuredClone(sample.before[0]), oid: '999', signature: retiredQuotaSignatures[0] })
+    const report = auditQuotaSnapshots(sample.before, sample.after)
+    assert.equal(report.passed, false)
+    assert.ok(report.errors.some(error => error.startsWith('retired_function_present:')))
   }
 })
 
