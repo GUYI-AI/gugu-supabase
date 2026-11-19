@@ -13,6 +13,29 @@ const post = (body: unknown) => new Request('https://backend.example.invalid/fun
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
 })
 describe('team member HTTP authorization boundary', () => {
+  it('permits the dashboard SDK preflight without an Auth or database side effect', async () => {
+    const headers = ['authorization', 'apikey', 'content-type', 'x-client-info', 'x-gugu-credit-unit-version']
+    for (const method of ['GET', 'POST']) {
+      const f = fixture(), response = await f.handle(new Request('https://backend.example.invalid/functions/v1/team-accounts', {
+        method: 'OPTIONS', headers: { Origin: 'https://site.example.invalid', 'Access-Control-Request-Method': method,
+          'Access-Control-Request-Headers': headers.join(',') },
+      }))
+      expect(response.status).toBe(204)
+      expect(response.headers.get('access-control-allow-origin')).toBe('*')
+      const allowed = response.headers.get('access-control-allow-headers')?.split(',').map(value => value.trim())
+      for (const header of headers) expect(allowed).toContain(header)
+      expect(response.headers.get('access-control-allow-methods')?.split(',').map(value => value.trim())).toContain(method)
+      expect(f.auth.currentCaller).not.toHaveBeenCalled(); expect(f.rpc).not.toHaveBeenCalled()
+    }
+  })
+  it('keeps an unauthorized profile response readable to the same cross-origin SDK', async () => {
+    const f = fixture(), response = await f.handle(new Request('https://backend.example.invalid/functions/v1/team-accounts?action=profile', {
+      headers: { Origin: 'https://site.example.invalid', authorization: 'Bearer invalid', 'x-gugu-credit-unit-version': '2' },
+    }))
+    expect(response.status).toBe(401)
+    expect(response.headers.get('access-control-allow-headers')).toContain('x-gugu-credit-unit-version')
+    expect((await response.json()).ok).toBe(false); expect(f.rpc).not.toHaveBeenCalled()
+  })
   it('distinguishes an uncreated invitation from an uncertain database acknowledgment', async () => {
     for (const uncertain of [false, true]) {
       const f = fixture(); f.auth.currentCaller.mockResolvedValue({ id: challengeId, sessionId: challengeId, accountKind: 'team_member' })

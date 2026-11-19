@@ -17,6 +17,7 @@ import { installConnectionFollowupsWithEvidence } from './platform-connection-fo
 import { installConnectionCatalogWithEvidence, releasedDirectoryRow } from './platform-connection-catalog-fixture.mjs'
 import { humanDmFriendshipVersion, installHumanDmFriendshipWithEvidence } from './human-dm-friendship-fixture.mjs'
 import { accountAuditCronNamesVersion, installAccountAuditCronNames } from './account-audit-cron-fixture.mjs'
+import { quotaLockOrderVersion, installQuotaLockOrderWithEvidence } from './attachment-quota-preservation.mjs'
 
 // Deliberately requires an empty, disposable Supabase PostgreSQL 17 instance.
 // Never resets schemas, migration history, or user data to make a test pass.
@@ -48,7 +49,29 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
     const validationRelease = releases.find((release) => release.constraintValidation)
     assert.ok(deviceCheckRelease && validationRelease)
     let widgetUpgrade
+    const quotaRelease = releases.find(release => release.version === quotaLockOrderVersion)
+    assert.ok(quotaRelease, 'quota lock order release and its live/retired function preservation audit are required')
     const releaseQuery = async (sql) => {
+      if (sql.includes(quotaRelease.sql)) {
+        return installQuotaLockOrderWithEvidence({ db, query, sql })
+      }
+      const questionCardRelease = releases.find(release => release.version.endsWith('_agent_question_card_settlement'))
+      if (questionCardRelease && sql.includes(questionCardRelease.sql)) {
+        const executionAcl = () => query(`SELECT array_agg(permission::text ORDER BY permission::text) AS acl
+          FROM pg_proc p CROSS JOIN LATERAL unnest(COALESCE(p.proacl,acldefault('f',p.proowner))) AS permissions(permission)
+          WHERE p.oid='chat.sync_since(bigint,integer)'::regprocedure`)
+        const before = await executionAcl()
+        const result = await query(sql)
+        await t.test('question settlement preserves the sync reader ACL and grants only its addressee API', async () => {
+          assert.deepEqual(await executionAcl(), before)
+          const [access] = await query(`SELECT
+            has_function_privilege('authenticated','chat.settle_agent_question_card(text,text,jsonb)','EXECUTE') AS owner,
+            has_function_privilege('anon','chat.settle_agent_question_card(text,text,jsonb)','EXECUTE') AS anonymous,
+            has_function_privilege('service_role','chat.settle_agent_question_card(text,text,jsonb)','EXECUTE') AS service`)
+          assert.deepEqual(access,{ owner:true,anonymous:false,service:false })
+        })
+        return result
+      }
       const auditCronRelease = releases.find(release => release.version === accountAuditCronNamesVersion)
       if (auditCronRelease && sql.includes(auditCronRelease.sql)) {
         return installAccountAuditCronNames({ query, sql, release: auditCronRelease, test: (name, action) => t.test(name, action) })
