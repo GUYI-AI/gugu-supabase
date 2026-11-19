@@ -1,6 +1,7 @@
 import { type AttachmentsDeps, type Rpc, call, objectStorage, Refusal } from './attachments-core.ts'
 import { canSignThumbnail } from './blob-sniff.ts'
 import { ObjectStorageError } from './object-storage.ts'
+import { THUMB_PROCESS, VIEW_PROCESS } from './oss.ts'
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 export function fileRef(value:unknown):Record<string,unknown> {
@@ -25,6 +26,8 @@ export async function handleFileResolve(deps:AttachmentsDeps,user:string,body:Re
 export async function handleFileDownload(deps:AttachmentsDeps,user:string,body:Record<string,unknown>) {
   if (typeof body.request_id!=='string'||!UUID.test(body.request_id)) throw new Refusal(400,'invalid','request_id must be a uuid')
   if (body.origin!==undefined&&typeof body.origin!=='boolean') throw new Refusal(400,'invalid','origin must be a boolean')
+  // Which thumbnail the link carries: the bubble's (default) or the image viewer's larger preview. Admission is the same read.
+  if (body.preview!==undefined&&body.preview!=='view') throw new Refusal(400,'invalid','preview is view or absent')
   const row=await call(deps.userRpc,'file_transfer_download_as',{
     p_ref:fileRef(body.ref),p_as:typeof body.as==='string'?body.as:user,p_id:body.request_id,
   }) as {status:string;bucket_id:string;object_name:string;download_id:string;signed_at:string;expires_at:string;content_type:string;size_bytes:unknown;width?:unknown;height?:unknown;transfer_id?:string}
@@ -35,7 +38,7 @@ export async function handleFileDownload(deps:AttachmentsDeps,user:string,body:R
   if (traffic!==undefined&&(!Number.isSafeInteger(traffic)||traffic<819200||traffic>838860800)) throw new Refusal(503,'not_configured','Download rate is not configured')
   try {
     const signed=row.bucket_id==='oss'||row.bucket_id==='temporary'
-      ?await objectStorage(deps).sign(row.object_name,row.bucket_id==='oss'&&canSignThumbnail(row.content_type,row.size_bytes,row.width,row.height),new Date(row.signed_at),{
+      ?await objectStorage(deps).sign(row.object_name,row.bucket_id==='oss'&&canSignThumbnail(row.content_type,row.size_bytes,row.width,row.height)?(body.preview==='view'?VIEW_PROCESS:THUMB_PROCESS):null,new Date(row.signed_at),{
         requestId:row.download_id,expiresSeconds:60,...(traffic===undefined?{}:{trafficBits:traffic}),...(row.bucket_id==='temporary'||body.origin===true?{direct:true}:{}),
       })
       :{url:await deps.storageSignedUrl(row.bucket_id,row.object_name,60,traffic),thumbUrl:null}

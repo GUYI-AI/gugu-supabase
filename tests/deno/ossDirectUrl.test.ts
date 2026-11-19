@@ -15,7 +15,7 @@ Deno.test('official origin signer binds limits and cannot refresh an existing re
   globalThis.Date=FixedDate as DateConstructor
   try {
     const sign=ossDirectSigner(config),signedAt=new Date(instant-30000)
-    const first=await sign('temporary/资料/file name.bin',false,signedAt,permit)
+    const first=await sign('temporary/资料/file name.bin',null,signedAt,permit)
     const url=new URL(first.url),q=url.searchParams
     assert(url.protocol==='https:','origin uses TLS')
     assert(decodeURIComponent(url.pathname)==='/fixture-153/temporary/资料/file name.bin','the same validated object prefix is applied')
@@ -23,18 +23,18 @@ Deno.test('official origin signer binds limits and cannot refresh an existing re
     assert(first.expiresAt===new Date(instant+30000).toISOString(),'the actual signature deadline matches the reservation')
     assert(q.get('x-oss-traffic-limit')==='819200'&&q.get('gugu-download-id')===permit.requestId,'throttle and attribution are signed')
     assert(first.thumbUrl===null&&/^[0-9a-f]{64}$/.test(q.get('x-oss-signature')??''),'ciphertext is never transformed')
-    const unlimited=await sign('temporary/资料/file name.bin',false,signedAt,{...permit,trafficBits:undefined})
+    const unlimited=await sign('temporary/资料/file name.bin',null,signedAt,{...permit,trafficBits:undefined})
     const withoutRate=new URL(unlimited.url).searchParams
     assert(!withoutRate.has('x-oss-traffic-limit'),'an absent declaration does not invent a provider limit')
     assert(withoutRate.get('gugu-download-id')===permit.requestId,'unthrottled reads retain signed attribution')
     assert(withoutRate.get('x-oss-expires')==='30'&&unlimited.expiresAt===first.expiresAt,'optional throttling cannot extend the reservation')
     for(const invalid of [{...permit,trafficBits:819199},{...permit,expiresSeconds:61}]) {
       let refused=false
-      try{await sign('temporary/file',false,signedAt,invalid)}catch(error){refused=error instanceof ObjectStorageError&&error.status===503}
+      try{await sign('temporary/file',null,signedAt,invalid)}catch(error){refused=error instanceof ObjectStorageError&&error.status===503}
       assert(refused,'unsupported bounds fail closed')
     }
     let expired=false
-    try{await sign('temporary/file',false,new Date(instant-60000),permit)}catch(error){expired=error instanceof ObjectStorageError&&error.status===410}
+    try{await sign('temporary/file',null,new Date(instant-60000),permit)}catch(error){expired=error instanceof ObjectStorageError&&error.status===410}
     assert(expired,'an expired reservation cannot receive a fresh SDK signature')
   }finally{globalThis.Date=NativeDate}
 })
@@ -46,7 +46,7 @@ Deno.test('origin image previews sign only the same object and fixed thumbnail t
   }
   globalThis.Date=FixedDate as DateConstructor
   try {
-    const signedAt=new Date(instant-30000),signed=await ossDirectSigner(config)('images/资料/photo.png',true,signedAt,permit)
+    const signedAt=new Date(instant-30000),signed=await ossDirectSigner(config)('images/资料/photo.png',THUMB_PROCESS,signedAt,permit)
     assert(signed.thumbUrl!==null,'an eligible image receives an origin thumbnail')
     const original=new URL(signed.url),thumbnail=new URL(signed.thumbUrl!),q=thumbnail.searchParams
     assert(original.protocol==='https:'&&thumbnail.protocol==='https:','both reads use TLS')
@@ -60,7 +60,7 @@ Deno.test('origin image previews sign only the same object and fixed thumbnail t
     assert(Date.parse(signed.expiresAt)===Math.min(expiry(original),expiry(thumbnail)),'the response uses the earliest capability deadline')
     assert(Date.parse(signed.expiresAt)<=signedAt.getTime()+60000,'neither capability extends its original reservation')
     let expired=false
-    try{await ossDirectSigner(config)('images/photo.png',true,new Date(instant-60000),permit)}catch(error){expired=error instanceof ObjectStorageError&&error.status===410}
+    try{await ossDirectSigner(config)('images/photo.png',THUMB_PROCESS,new Date(instant-60000),permit)}catch(error){expired=error instanceof ObjectStorageError&&error.status===410}
     assert(expired,'an expired image reservation does not receive a thumbnail capability')
   }finally{globalThis.Date=NativeDate}
 })

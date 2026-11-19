@@ -21,7 +21,9 @@ No permanent file is evicted to satisfy a quota. This release contains no LRU. A
 
 An OSS download advertises `origin_available` without pre-signing an origin URL. After a CDN connection failure, the client can repeat `file-download` with `origin: true`, the same reference and actor, and the current `download_id` as `request_id`. The existing authorization and reservation checks still run before signing.
 
-For an eligible managed image, that explicit fallback response reuses `thumb_url` for an OSS V4 URL to the same object with the existing fixed thumbnail transformation. No caller-selected object key or processing expression is accepted. Both original and thumbnail signatures retain the reservation's attribution, optional traffic limit and original deadline of at most 60 seconds; `expires_at` is their earliest actual expiry. Non-images, images outside the existing processing limits and encrypted temporary objects receive no origin thumbnail.
+For an eligible managed image, that explicit fallback response reuses `thumb_url` for an OSS V4 URL to the same object with the same fixed thumbnail transformation as the CDN link. No caller-selected object key or processing expression is accepted. Both original and thumbnail signatures retain the reservation's attribution, optional traffic limit and original deadline of at most 60 seconds; `expires_at` is their earliest actual expiry. Non-images, images outside the existing processing limits and encrypted temporary objects receive no origin thumbnail.
+
+`thumb_url` carries one of two fixed transformations: the chat bubble's (560 px wide, the default) or, when the request says `preview: "view"`, the image viewer's first frame (at most 2048 px wide). `preview` only selects which of the two; it never changes admission, the reservation or the object. Any other value is refused.
 
 Clients must not persist signed URLs. If an older backend supplies no origin `thumb_url`, the failed thumbnail preview must remain an explicit failure rather than silently fetching the full original. Preview bytes may retain their existing cache policy independently of these short-lived capabilities.
 
