@@ -1,5 +1,5 @@
 // Managed registration resolves a blob by its place ('oss', '<aa>/<sha>'), never by a sha256 another bucket also holds
-// (20261120020000).
+// (20261120110000).
 import { randomBytes, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
