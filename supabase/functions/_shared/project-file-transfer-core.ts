@@ -39,6 +39,23 @@ export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:
   }
   const transfer=id(body,'transfer_id'),bytes=body.ciphertext_bytes
   if(typeof bytes!=='number'||!Number.isSafeInteger(bytes)||bytes<1) throw new Refusal(400,'invalid','ciphertext_bytes must be a positive integer')
+  if(route!=='file-accept'&&route!=='file-commit') throw new Refusal(404,'invalid','Unknown project file operation')
+  try {
+    return await hostTransfer(deps,user,route,transfer,bytes,body)
+  } catch(error) {
+    // A refusal the same transfer cannot cure is recorded on it (its own transaction: the refused one rolled back), so the
+    // reader stops waiting. The host gets the same refusal as before. `denied` is not here: it cannot tell a stranger
+    // from a stale permit.
+    if(error instanceof Refusal&&TERMINAL[route].has(error.code))
+      await call(deps.serviceRpc,'file_temporary_fail',{p_id:transfer,p_host:user,p_code:error.code})
+    throw error
+  }
+}
+const TERMINAL:Record<'file-accept'|'file-commit',Set<string>>={
+  'file-accept':new Set(['account_storage_full','group_storage_full','global_storage_full','too_large']),
+  'file-commit':new Set(['upload_changed']),
+}
+async function hostTransfer(deps:AttachmentsDeps,user:string,route:'file-accept'|'file-commit',transfer:string,bytes:number,body:Record<string,unknown>) {
   const store=objectStorage(deps)
   if(route==='file-accept') {
     const retired=await call(deps.serviceRpc,'file_temporary_expire',{p_limit:500,p_request:transfer,p_host:user,p_needed:bytes})
@@ -50,7 +67,6 @@ export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:
     const form=await store.upload(permit.staging_key,new Date(permit.signed_at),{maxBytes:bytes,expiresSeconds:seconds})
     return {...form,transfer_id:transfer,expires_at:permit.expires_at,max_bytes:bytes}
   }
-  if(route!=='file-commit') throw new Refusal(404,'invalid','Unknown project file operation')
   const sha=text(body,'ciphertext_sha256'),key=text(body,'key')
   if(!/^[0-9a-f]{64}$/.test(sha)||!/^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/.test(key)) throw new Refusal(400,'invalid','Invalid ciphertext SHA or canonical 256-bit key')
   const decision=await call(deps.serviceRpc,'file_temporary_host_for',{p_id:transfer,p_host:user}) as {object_name:string;ciphertext_bytes:number;state:string}
