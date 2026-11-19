@@ -32,6 +32,7 @@ DECLARE
   question jsonb;
   question_index integer;
   recipient text;
+  original_body text;
 BEGIN
   IF owner_id IS NULL THEN RAISE EXCEPTION 'authenticated owner required' USING ERRCODE = '42501'; END IF;
   IF p_state IS NULL OR p_state NOT IN ('answered', 'withdrawn', 'discuss') THEN
@@ -100,9 +101,9 @@ BEGIN
   END IF;
   settlement := jsonb_build_object('state',p_state,'at',clock_timestamp());
   IF p_state = 'answered' THEN settlement := settlement || jsonb_build_object('answers',p_answers); END IF;
-  -- v/type/text must remain first: older list-preview readers inspect only the first 100 characters.
-  UPDATE chat.messages SET content = '{"v":1,"type":"question","text":' || (card->'text')::text || ','
-    || substr(((card - ARRAY['v','type','text']) || jsonb_build_object('settled',settlement))::text,2)
+  -- Append before the closing brace: preserve every original byte of the prefix, including legacy list previews.
+  original_body := regexp_replace(original.content,'[[:space:]]+$','');
+  UPDATE chat.messages SET content = left(original_body,length(original_body)-1) || ',"settled":' || settlement::text || '}'
     WHERE id = p_message_id;
   FOR recipient IN
     SELECT DISTINCT m.user_id FROM chat.active_members m WHERE m.chat_id = room_id

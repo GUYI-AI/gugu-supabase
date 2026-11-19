@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { FLUSH_REVISIONS } from '../../support/revisionTransaction'
 
 let db: pg.Client
 const sql = 'SELECT chat.settle_agent_question_card($1,$2,$3::jsonb) AS settled'
@@ -29,7 +30,7 @@ async function post(extra: object = {}, sender = agent, destination = room) {
 }
 async function revisions(id: string) {
   await actor(owner,'postgres')
-  await query('SELECT chat.flush_pending_user_revisions()')
+  await query(FLUSH_REVISIONS)
   await actor(id)
   return (await query('SELECT chat.sync_since(0,500) AS page'))[0].page.operations as Array<{ event:string; payload: Record<string,unknown> }>
 }
@@ -56,7 +57,7 @@ afterEach(async () => { await query('ROLLBACK') })
 describe('owner settlement of an agent question card', () => {
   it('updates the same message once, preserves preview order and publishes only additive chat_changed facts', async () => {
     await actor(owner,'postgres')
-    await query('SELECT chat.flush_pending_user_revisions()')
+    await query(FLUSH_REVISIONS)
     const before = (await query('SELECT id,seq,created_at,sender_user_id,content FROM chat.messages WHERE id=$1',[message]))[0]
     const head = (await query('SELECT revision FROM chat.account_revision_heads WHERE user_id=$1',[colleague]))[0].revision
     await actor(owner)
@@ -68,9 +69,10 @@ describe('owner settlement of an agent question card', () => {
     const after = (await query('SELECT id,seq,created_at,sender_user_id,content FROM chat.messages WHERE id=$1',[message]))[0]
     expect({ ...after,content:before.content }).toEqual(before)
     expect(after.content).toMatch(/^\{"v":1,"type":"question","text":/)
+    expect(after.content.slice(0,100)).toBe(before.content.slice(0,100))
     expect(JSON.parse(after.content)).toEqual({ ...JSON.parse(before.content),settled:first })
     expect((await query('SELECT count(*)::int AS n FROM chat.messages WHERE chat_id=$1',[room]))[0].n).toBe(1)
-    await query('SELECT chat.flush_pending_user_revisions()')
+    await query(FLUSH_REVISIONS)
     await actor(colleague)
     const page = (await query('SELECT chat.sync_since($1,500) AS page',[head]))[0].page
     expect(page.operations).toHaveLength(1)
@@ -162,7 +164,7 @@ describe('owner settlement of an agent question card', () => {
 
   it('does not publish an old card to a member whose visible history begins after it', async () => {
     await actor(owner,'postgres')
-    await query('SELECT chat.flush_pending_user_revisions()')
+    await query(FLUSH_REVISIONS)
     await query("UPDATE chat.chat_members SET hide_history_before=clock_timestamp()+interval '1 second' WHERE chat_id=$1 AND user_id=$2",[room,colleague])
     await actor(owner); await query(sql,[message,'answered','[{"selected":["A"]}]'])
     const operations = await revisions(colleague)
@@ -192,7 +194,7 @@ describe('owner settlement of an agent question card', () => {
     await actor(owner)
     const topic = (await query("SELECT chat_id FROM chat.create_topic($1,$2,'Question topic',NULL,NULL)",[room,message]))[0].chat_id
     await actor(owner,'postgres')
-    await query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member'),($1,$3,'member')",[topic,colleague,agent])
+    await query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member'),($1,$3,'member') ON CONFLICT DO NOTHING",[topic,colleague,agent])
     const question = await post({},agent,topic)
     await actor(owner); await query(sql,[question,'answered','[{"selected":["A"]}]'])
     expect((await revisions(colleague)).find(row => row.payload.message_id===question)).toMatchObject({ event:'chat_changed',payload:{ chat_id:topic } })
