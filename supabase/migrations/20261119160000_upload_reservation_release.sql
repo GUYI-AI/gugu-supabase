@@ -38,17 +38,17 @@ ALTER FUNCTION chat.file_upload_release_bound() OWNER TO postgres;
 REVOKE ALL ON FUNCTION chat.file_upload_release_bound() FROM PUBLIC,anon,authenticated;
 
 -- Back up every hold this migration can stop counting, before any change, and print what it releases.
-CREATE TABLE chat_private.file_upload_release_backup_20261119 AS
+CREATE TABLE file_private.upload_release_backup_20261119 AS
 SELECT r.*,now() AS backed_up_at FROM chat.file_transfer_reservations r
  WHERE r.kind='upload' AND r.state IN ('reserved','issued');
-REVOKE ALL ON chat_private.file_upload_release_backup_20261119 FROM PUBLIC,anon,authenticated,service_role,gugu_files;
+REVOKE ALL ON file_private.upload_release_backup_20261119 FROM PUBLIC,anon,authenticated,service_role,gugu_files;
 
 ALTER TABLE chat.file_transfer_reservations ADD COLUMN release_at timestamptz;
 DO $backfill$
 DECLARE bound interval; held_rows bigint; held bigint; released_rows bigint; released bigint; accounts bigint;
 BEGIN
     SELECT count(*),COALESCE(sum(greatest(0,bytes-actual_bytes)),0),count(DISTINCT account_id)
-      INTO held_rows,held,accounts FROM chat_private.file_upload_release_backup_20261119;
+      INTO held_rows,held,accounts FROM file_private.upload_release_backup_20261119;
     RAISE NOTICE 'upload release backup: % reservations, % held bytes, % accounts',held_rows,held,accounts;
     IF NOT EXISTS(SELECT 1 FROM chat.file_transfer_reservations WHERE kind='upload') THEN RETURN; END IF;
     bound:=chat.file_upload_release_bound();
@@ -134,16 +134,16 @@ BEGIN
         PERFORM cron.unschedule('file-staging-cleanup-kick');
     END IF;
 END $unschedule$;
-CREATE TABLE chat_private.file_staging_cleanup_backup_20261119 AS SELECT q.*,now() AS backed_up_at FROM chat.file_staging_cleanup q;
-CREATE TABLE chat_private.file_staging_cleanup_control_backup_20261119 AS SELECT c.*,now() AS backed_up_at FROM chat.file_staging_cleanup_control c;
-REVOKE ALL ON chat_private.file_staging_cleanup_backup_20261119,chat_private.file_staging_cleanup_control_backup_20261119
+CREATE TABLE file_private.staging_cleanup_backup_20261119 AS SELECT q.*,now() AS backed_up_at FROM chat.file_staging_cleanup q;
+CREATE TABLE file_private.staging_cleanup_control_backup_20261119 AS SELECT c.*,now() AS backed_up_at FROM chat.file_staging_cleanup_control c;
+REVOKE ALL ON file_private.staging_cleanup_backup_20261119,file_private.staging_cleanup_control_backup_20261119
     FROM PUBLIC,anon,authenticated,service_role,gugu_files;
 DO $backup$
 BEGIN
     RAISE NOTICE 'staging cleanup backup: % queue rows (% pending or failed), % control rows',
-        (SELECT count(*) FROM chat_private.file_staging_cleanup_backup_20261119),
-        (SELECT count(*) FROM chat_private.file_staging_cleanup_backup_20261119 WHERE state IN ('pending','failed','running')),
-        (SELECT count(*) FROM chat_private.file_staging_cleanup_control_backup_20261119);
+        (SELECT count(*) FROM file_private.staging_cleanup_backup_20261119),
+        (SELECT count(*) FROM file_private.staging_cleanup_backup_20261119 WHERE state IN ('pending','failed','running')),
+        (SELECT count(*) FROM file_private.staging_cleanup_control_backup_20261119);
 END $backup$;
 DROP TRIGGER file_staging_cleanup_committed ON chat.file_blob_uploads;
 DROP TRIGGER file_staging_cleanup_registered ON chat.file_transfer_uploads;
