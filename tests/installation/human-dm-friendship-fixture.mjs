@@ -161,6 +161,11 @@ export async function installHumanDmFriendshipWithEvidence({ db, query, sql, url
       await refused(db, () => db.query("UPDATE chat.message_reactions SET emoji='🔥' WHERE message_id=$1 AND user_id=$2", [f.oldB, f.a]))
       await refused(db, () => db.query("UPDATE chat.messages SET encrypted_content=decode('01','hex') WHERE id=$1", [f.oldA]))
     })
+    await check('a trusted role carrying a non-member subject cannot use the RLS-denial exemption', { id: f.outsider, role: 'service_role' }, async () => {
+      await refused(db, () => db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content) VALUES($1,$2,$3,'claimed service path')", [randomUUID(), f.dm, f.a]))
+      await refused(db, () => db.query("UPDATE chat.messages SET content='claimed service edit' WHERE id=$1", [f.oldA]))
+      await refused(db, () => db.query("UPDATE chat.message_reactions SET emoji='🔥' WHERE message_id=$1 AND user_id=$2", [f.oldB, f.a]))
+    })
     await check('server notices and existing metadata maintenance keep their old authority', { role: 'service_role' }, async () => {
       await db.query("INSERT INTO chat.messages(id,chat_id,sender_user_id,content,content_type) VALUES($1,$2,NULL,'server notice','system')", [randomUUID(), f.dm])
       await db.query('UPDATE chat.messages SET to_user_ids=ARRAY[]::text[],file_blob_id=NULL WHERE id=$1', [f.oldA])

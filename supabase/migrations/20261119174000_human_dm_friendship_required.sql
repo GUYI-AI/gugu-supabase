@@ -37,8 +37,10 @@ LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = '' AS $$
 DECLARE people text[]; has_agent boolean; all_humans boolean;
 BEGIN
   -- Do not turn a rejected insert/reaction into a probe of somebody else's DM.
-  -- Trusted server writes without an end-user claim are still checked below.
-  IF auth.uid() IS NOT NULL
+  -- Only ordinary API roles can rely on the original RLS denial. A trusted
+  -- role bypasses RLS, including when its request still carries a human sub.
+  IF current_setting('role', true) IN ('anon', 'authenticated')
+     AND auth.uid() IS NOT NULL
      AND NOT chat.is_chat_member(p_chat_id, auth.uid()::text) THEN RETURN; END IF;
 
   SELECT array_agg(m.user_id ORDER BY m.user_id),
