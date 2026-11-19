@@ -20,7 +20,7 @@ describe('team member HTTP authorization boundary', () => {
         method: 'OPTIONS', headers: { Origin: 'https://site.example.invalid', 'Access-Control-Request-Method': method,
           'Access-Control-Request-Headers': headers.join(',') },
       }))
-      expect(response.status).toBe(200)
+      expect(response.status).toBe(204)
       expect(response.headers.get('access-control-allow-origin')).toBe('*')
       const allowed = response.headers.get('access-control-allow-headers')?.split(',').map(value => value.trim())
       for (const header of headers) expect(allowed).toContain(header)
