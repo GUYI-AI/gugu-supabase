@@ -109,13 +109,16 @@ describe('historical readers keep bytes through archive and the one collector', 
     expect(await collected(blob)).toEqual([])
   })
 
-  it('a group archived by its owner\'s account erasure releases its files the same way', async () => {
+  it('an erased self-only group cascades its content and releases bytes while shared groups remain', async () => {
     const solo = randomUUID()
     await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'group','solo',$2)", [solo, owner])
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner')", [solo, owner])
-    const { blob } = await send(solo, owner)
+    const { blob, message, item } = await send(solo, owner)
     await db.query('DELETE FROM auth.users WHERE id=$1::uuid', [owner])
-    expect((await db.query('SELECT status FROM chat.chats WHERE id=$1', [solo])).rows).toEqual([{ status: 'archived' }])
+    expect((await db.query('SELECT id FROM chat.chats WHERE id=$1', [solo])).rows).toEqual([])
+    expect((await db.query('SELECT id FROM chat.messages WHERE id=$1', [message])).rows).toEqual([])
+    expect((await db.query('SELECT id FROM chat.workspace_items WHERE id=$1', [item])).rows).toEqual([])
+    expect((await db.query('SELECT id FROM chat.chats WHERE id=ANY($1)', [[group, other]])).rows).toHaveLength(2)
     expect(await collected(blob)).toMatchObject([{ blob_id: blob }])
   })
 
