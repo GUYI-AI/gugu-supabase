@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
 import { beginDeletionFixture, endDeletionFixture } from './accountDeletionFixtureLock'
@@ -176,5 +177,32 @@ it.each(['principal', 'operation_gate', 'preparation_gate', 'allowlist'])('reche
     expect(await pending).toMatchObject({ ok: false, error: changed === 'principal' ? 'personal_account_required'
       : changed === 'allowlist' ? 'rollout_unavailable' : changed === 'operation_gate' ? 'operation_unavailable' : 'preparation_unavailable' })
     expect((await db.query('SELECT count(*)::int n FROM account_deletion_private.operations WHERE operation_digest=$1', [f.p_operation_digest])).rows[0].n).toBe(0)
+  })
+})
+it('rehearses and applies only the fixed recent fixture, then closes gates without discarding pending custody', async () => {
+  const open = readFileSync(new URL('../../../ops/open-account-deletion-v2-test-gates.sql', import.meta.url), 'utf8')
+  const close = readFileSync(new URL('../../../ops/close-account-deletion-v2-test-gates.sql', import.meta.url), 'utf8')
+  const count = readFileSync(new URL('../../../ops/count-account-deletion-v2-test-gates.sql', import.meta.url), 'utf8')
+  await committedFixture(async (f, a) => {
+    await expect(a.query(open)).rejects.toThrow('Exactly one new verified V2 fixture is required')
+    await a.query('ROLLBACK')
+    await a.query(`UPDATE auth.users SET raw_app_meta_data='{"gugu_self_deletion_fixture":"v2"}' WHERE id=$1`, [f.p_user_id])
+    await a.query('UPDATE account_deletion_private.access SET test_user_id=NULL')
+    await a.query('UPDATE account_deletion_private.operation_access SET enabled=false')
+    await a.query('UPDATE account_deletion_private.device_preparation_access SET enabled=false')
+    expect(open.match(/^COMMIT;$/gm)).toHaveLength(1)
+    await a.query(open.replace(/^COMMIT;$/m, 'ROLLBACK;'))
+    expect((await flow('status', f, a)).policy.available).toBe(false)
+    await a.query(open)
+    expect((await flow('status', f, a)).policy.available).toBe(true)
+    const registered = await flow('register', f, a)
+    expect(registered.ok).toBe(true)
+    await a.query(close)
+    expect((await flow('status', f, a)).policy.available).toBe(false)
+    expect((await flow('result', f, a)).operation).toMatchObject({ operation_id: registered.operation.operation_id, state: 'open' })
+    await expect(a.query(open)).rejects.toThrow('Reconcile pending deletion custody before opening admission')
+    await a.query('ROLLBACK')
+    await a.query(count)
+    expect((await flow('cancel_operation', { ...f, p_server_generation: null }, a)).operation.can_release_preparation).toBe(true)
   })
 })
