@@ -30,7 +30,8 @@ async function member(teamId: string, name: string, email: string, role = 'membe
   await db.query('UPDATE identity.users SET display_name=$2 WHERE id=$1', [principal, name])
   await db.query('UPDATE team_private.members SET principal_user_id=$2,state=$3 WHERE id=$1', [id, principal, state])
   await db.query('INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())', [session, principal])
-  return { id, principal, session }
+  const gugu_number = (await db.query('SELECT gugu_number FROM identity.users WHERE id=$1', [principal])).rows[0].gugu_number as number
+  return { id, principal, session, gugu_number }
 }
 type Actor = Awaited<ReturnType<typeof member>>
 async function page(actor: Actor, query: string | null = null, cursor: string | null = null, limit: number | null = 50, target: string | null = null) {
@@ -61,15 +62,45 @@ it('exposes only active same-team people to both ordinary members and administra
   expect(result).toMatchObject({ team_id: id, total_count: 2, matching_count: 2, next_cursor: null })
   expect(result.members.map((row: any) => row.id).sort()).toEqual([owner.id, ordinary.id].sort())
   for (const row of result.members) {
-    expect(Object.keys(row).sort()).toEqual(['avatar', 'id', 'identity_id', 'name', 'revision', 'role'])
+    expect(Object.keys(row).sort()).toEqual(['avatar', 'gugu_number', 'id', 'identity_id', 'name', 'revision', 'role'])
   }
   for (const row of administrator.members) {
-    expect(Object.keys(row).sort()).toEqual(['avatar', 'email', 'id', 'identity_id', 'name', 'revision', 'role'])
+    expect(Object.keys(row).sort()).toEqual(['avatar', 'email', 'gugu_number', 'id', 'identity_id', 'name', 'revision', 'role'])
     expect(row.email).not.toContain('team.gugu.invalid')
+    expect(row.gugu_number).toBe(row.id === owner.id ? owner.gugu_number : ordinary.gugu_number)
   }
   const existing = (await db.query("SELECT public.team_account_read('directory',$1,$2) r", [ordinary.principal, ordinary.session])).rows[0].r
   expect(existing).toEqual(result)
   expect((await refused(() => db.query("SELECT public.team_account_read('members',$1,$2)", [ordinary.principal, ordinary.session]))).hint).toBe('forbidden')
+})
+
+it('returns canonical Gugu numbers to all roles and searches complete numbers without exposing emails', async () => {
+  const id = await team(), ordinary = await member(id, 'Caller', 'caller@directory.invalid')
+  const peer = await member(id, 'Peer', 'private-peer@directory.invalid')
+  const administrator = await member(id, 'Administrator', 'admin@directory.invalid', 'admin')
+  for (const actor of [ordinary, administrator]) {
+    const result = await page(actor, ` ${peer.gugu_number} `, null, 1)
+    expect(result).toMatchObject({ total_count: 3, matching_count: 1, next_cursor: null,
+      members: [{ id: peer.id, gugu_number: peer.gugu_number }] })
+    if (actor === ordinary) expect(result.members[0]).not.toHaveProperty('email')
+    else expect(result.members[0].email).toBe('private-peer@directory.invalid')
+  }
+  expect((await page(ordinary, 'private-peer')).matching_count).toBe(0)
+  // A numeric prefix, malformed number or overflowing query is neither an ID
+  // substring search nor a cast error. These fixture names contain no digits.
+  for (const query of [String(peer.gugu_number).slice(0, -1), '9999999999', '999999999999999999999999', 'gugu:' + peer.gugu_number])
+    expect((await page(ordinary, query))).toMatchObject({ matching_count: 0, members: [], next_cursor: null })
+})
+
+it('keeps Gugu-number discovery inside active same-team human rows', async () => {
+  const id = await team(), ordinary = await member(id, 'Caller', 'caller@directory.invalid')
+  const hidden = [await member(await team(), 'Other', 'other@directory.invalid'),
+    await member(id, 'Disabled', 'disabled@directory.invalid', 'member', 'disabled'),
+    await member(id, 'Invited', 'invited@directory.invalid', 'member', 'invited')]
+  const removed = await member(id, 'Removed', 'removed@directory.invalid')
+  await db.query('UPDATE identity.users SET removed_at=now() WHERE id=$1', [removed.principal])
+  for (const person of [...hidden, removed])
+    expect((await page(ordinary, String(person.gugu_number)))).toMatchObject({ total_count: 1, matching_count: 0, members: [], next_cursor: null })
 })
 
 it('searches names and canonical emails case-insensitively without treating wildcards as patterns', async () => {
@@ -112,6 +143,24 @@ it('continues only when another matching row exists and keeps counts independent
   expect((await page(actor, 'One', null, 1))).toMatchObject({ matching_count: 1, next_cursor: null })
 })
 
+it('uses native UUID ordering for both directory and administrator-member cursor selection', async () => {
+  const id = await team(), actor = await member(id, 'Owner', 'owner@directory.invalid', 'superadmin')
+  await member(id, 'Second', 'second@directory.invalid')
+  await member(id, 'Third', 'third@directory.invalid')
+  const expected = (await db.query('SELECT id FROM team_private.members WHERE team_id=$1 ORDER BY id', [id])).rows.map(row => row.id)
+  const directory = await page(actor, null, null, 2)
+  const members = (await db.query("SELECT public.team_account_read('members',$1,$2,$3) r",
+    [actor.principal, actor.session, { limit: 2 }])).rows[0].r
+  for (const result of [directory, members]) {
+    expect(result.members.map((row: any) => row.id)).toEqual(expected.slice(0, 2))
+    expect(result.next_cursor).toBe(expected[1])
+  }
+  const continued = (await db.query("SELECT public.team_account_read('members',$1,$2,$3) r",
+    [actor.principal, actor.session, { limit: 2, cursor: members.next_cursor }])).rows[0].r
+  expect(continued.members.map((row: any) => row.id)).toEqual(expected.slice(2))
+  expect(continued.next_cursor).toBeNull()
+})
+
 it('pages a 128-person team and finds an email outside the first page', async () => {
   const id = await team(), actor = await member(id, 'Caller', 'caller@directory.invalid', 'admin')
   const principals = Array.from({ length: 127 }, () => randomUUID())
@@ -133,6 +182,11 @@ it('pages a 128-person team and finds an email outside the first page', async ()
   const found = await page(actor, last.members[27].email)
   expect(found).toMatchObject({ total_count: 128, matching_count: 1, next_cursor: null })
   expect(found.members.map((row: any) => row.id)).toEqual([last.members[27].id])
+  await db.query("UPDATE team_private.members SET role='member',revision=revision+1 WHERE id=$1", [actor.id])
+  const foundByNumber = await page(actor, String(last.members[27].gugu_number))
+  expect(foundByNumber).toMatchObject({ total_count: 128, matching_count: 1, next_cursor: null,
+    members: [{ id: last.members[27].id, gugu_number: last.members[27].gugu_number }] })
+  expect(foundByNumber.members[0]).not.toHaveProperty('email')
 })
 
 it.each([0, 101, -1, null])('refuses invalid page size %s instead of silently clamping it', async limit => {
