@@ -236,6 +236,22 @@ describe('reversible agent session archival', () => {
     expect((await db.query('SELECT * FROM identity.agent_lifecycle_tombstones WHERE agent_user_id=$1', [agent])).rows).toHaveLength(0)
   })
 
+  it('leaves the live directory while archived and returns on restore, keeping the identity live', async () => {
+    const directory = async () => {
+      await asUser()
+      const listed = (await db.query("SELECT id FROM identity.active_users WHERE type='agent' AND owner_user_id=$1 AND id=$2", [owner, agent])).rowCount
+      const retained = (await db.query('SELECT id FROM identity.users WHERE id=$1', [agent])).rowCount
+      const live = (await db.query('SELECT identity.user_is_live($1) AS live', [agent])).rows[0].live
+      await db.query('RESET ROLE')
+      return { listed, retained, live }
+    }
+    expect(await directory()).toEqual({ listed: 1, retained: 1, live: true })
+    await archive()
+    expect(await directory()).toEqual({ listed: 0, retained: 1, live: true })
+    await restore()
+    expect(await directory()).toEqual({ listed: 1, retained: 1, live: true })
+  })
+
   it('still creates a distinct identity and serial name for a genuinely new session', async () => {
     await archive()
     await asUser()
@@ -267,8 +283,10 @@ describe('reversible agent session archival', () => {
     await db.query("INSERT INTO chat.chats(id,kind) VALUES($1,'dm')", [dm])
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [dm, owner, agent])
     await archive()
+    // The DM has left both lists, so nothing in it addresses the agent; the archive interval alone
+    // keeps the message out of its inbox after restore.
     const message = await send([], { chat: dm, at: archivedAt })
-    expect(await facts(message)).toEqual({ wake: false, blocked: true, command: false, receipt: false })
+    expect(await facts(message)).toEqual({ wake: false, blocked: false, command: false, receipt: false })
     await restore()
     expect(await pull()).toEqual([])
     await asUser()
@@ -318,14 +336,16 @@ describe('reversible agent session archival', () => {
     })).toContain('Not authenticated')
   })
 
-  it('exposes the archived state through presence, snapshot and durable display revisions', async () => {
+  it('exposes the archived state through presence and durable display revisions, and leaves the snapshot', async () => {
     await archive()
     const presence = (await db.query('SELECT identity.build_agent_presence_payload($1) AS payload', [agent])).rows[0].payload
     expect(presence.presence.session_archived_at).not.toBeNull()
     expect(presence.presence.session_lifecycle_revision).toBe(1)
     await asUser()
     const snapshot = (await db.query('SELECT chat.sync_snapshot() AS snapshot')).rows[0].snapshot
-    expect(snapshot.identities.find((item: { id: string }) => item.id === agent)).toEqual(expect.objectContaining({ session_lifecycle_revision: 1, session_archived_at: expect.any(String) }))
+    // Asked by id it still answers; the account snapshot no longer carries it or its presence.
+    expect(snapshot.identities.find((item: { id: string }) => item.id === agent)).toBeUndefined()
+    expect(snapshot.presence[agent]).toBeUndefined()
     await db.query('RESET ROLE')
     expect((await db.query("SELECT * FROM chat.account_revisions WHERE user_id=$1 AND event='agent_changed' AND resource_key->>'agent_user_id'=$2", [outsider, agent])).rows.length).toBeGreaterThan(0)
   })
@@ -462,12 +482,15 @@ describe('an archived agent has left its groups', () => {
     expect((await db.query('SELECT 1 FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2', [group, agent])).rowCount).toBe(1)
     // A direct table read by a peer follows the same rule as the view.
     expect(await seatRows(group, outsider)).toEqual(all.filter((id) => id !== agent))
-    // Counterexample: the DM with the archived agent keeps both members.
-    expect(await members(dm)).toEqual({ ids: [owner, agent].sort(), counted: 2 })
-    expect(await seatRows(dm, owner)).toEqual([owner, agent].sort())
+    // Its DM has left every member's list too: neither seat is visible, the physical rows stay.
+    expect(await members(dm)).toEqual({ ids: [], counted: 0 })
+    expect(await seatRows(dm, owner)).toEqual([])
+    expect((await db.query('SELECT count(*)::int AS n FROM chat.chat_members WHERE chat_id=$1', [dm])).rows[0].n).toBe(2)
     await restore()
     expect(await members()).toEqual({ ids: all, counted: 4 })
     expect(await seatRows(group, outsider)).toEqual(all)
+    expect(await members(dm)).toEqual({ ids: [owner, agent].sort(), counted: 2 })
+    expect(await seatRows(dm, owner)).toEqual([owner, agent].sort())
     await db.query('SET CONSTRAINTS ALL IMMEDIATE')
   })
 
@@ -552,24 +575,41 @@ describe('an archived agent has left its groups', () => {
     expect((await facts(await send(['*']), peer)).wake).toBe(true)
   })
 
-  it('keeps a DM with the archived agent private while refusing delivery', async () => {
+  it('closes its DM for the other side while archived, tells them, and reopens it with its history on restore', async () => {
     const dm = await directChat()
+    const before = await send([], { chat: dm, sender: owner, at: new Date(Date.parse(archivedAt) - 1).toISOString() })
+    const own = async () => (await db.query(`SELECT tombstone FROM chat.account_revisions WHERE user_id=$1 AND event='chat_members_changed'
+      AND resource_key=jsonb_build_object('chat_id',$2::text,'user_id',$1::text,'kind','own') ORDER BY revision DESC LIMIT 1`, [owner, dm])).rows[0]?.tombstone
     await archive()
+    expect(await own()).toBe(true)
     await asUser()
-    const id = randomUUID()
-    const sent = (await db.query(`SELECT chat.send_message_with_overlays($1,$2,$3,$4,'DM after archive','text',NULL,NULL,false,false) AS result`,
-      [id, dm, owner, [agent]])).rows[0].result
+    // Not listed and not readable: no membership, preview or unread row comes back for it.
+    expect((await db.query('SELECT chat_id FROM chat.list_conversation_memberships($1)', [[dm]])).rows).toEqual([])
+    expect((await db.query('SELECT chat_id FROM chat.list_unread_locators_for_chats($1)', [[dm]])).rows).toEqual([])
+    expect((await db.query('SELECT id FROM chat.messages WHERE id=$1', [before])).rows).toEqual([])
+    const snapshot = (await db.query('SELECT chat.sync_snapshot() AS s')).rows[0].s
+    expect(snapshot.chats.map(({ id }: { id: string }) => id)).not.toContain(dm)
+    expect(snapshot.identities.map(({ id }: { id: string }) => id)).not.toContain(agent)
+    expect(Object.keys(snapshot.presence)).not.toContain(agent)
     await db.query('RESET ROLE')
-    expect(sent.delivery_blocks).toEqual([{ message_id: id, agent_user_id: agent, reason: 'agent_archived' }])
-    expect(await facts(id)).toEqual({ wake: false, blocked: true, command: false, receipt: false })
-    await asUser(outsider)
-    for (const sql of ['SELECT id FROM chat.messages WHERE id=$1', 'SELECT 1 FROM chat.message_agent_delivery_blocks WHERE message_id=$1']) {
-      expect((await db.query(sql, [id])).rows).toEqual([])
-    }
-    expect((await db.query('SELECT user_id FROM chat.chat_members WHERE chat_id=$1', [dm])).rows).toEqual([])
-    expect((await db.query('SELECT user_id FROM chat.active_members WHERE chat_id=$1', [dm])).rows).toEqual([])
+    await restore()
+    expect(await own()).toBe(false)
+    await asUser()
+    expect((await db.query('SELECT user_id FROM chat.list_conversation_memberships($1) ORDER BY user_id', [[dm]])).rows.map(({ user_id }) => user_id))
+      .toEqual([owner, agent].sort())
+    expect((await db.query('SELECT id FROM chat.messages WHERE id=$1', [before])).rows).toEqual([{ id: before }])
+    const restored = (await db.query('SELECT chat.sync_snapshot() AS s')).rows[0].s
+    expect(restored.identities.map(({ id }: { id: string }) => id)).toContain(agent)
     await db.query('RESET ROLE')
-    expect((await db.query("SELECT 1 FROM chat.account_revisions WHERE user_id=$1 AND event='delivery_changed' AND resource_key->>'entity_id'=$2", [outsider, id])).rowCount).toBe(0)
+  })
+
+  it('reads no removed owned identity in the account snapshot', async () => {
+    await db.query('UPDATE identity.users SET removed_at=now() WHERE id=$1', [agent])
+    await asUser()
+    const snapshot = (await db.query('SELECT chat.sync_snapshot() AS s')).rows[0].s
+    await db.query('RESET ROLE')
+    expect(snapshot.identities.map(({ id }: { id: string }) => id)).not.toContain(agent)
+    expect(Object.keys(snapshot.presence)).not.toContain(agent)
   })
 
   it('keeps the new helpers closed to the Data API and the internal seat view ungranted', async () => {
@@ -593,7 +633,7 @@ describe('an archived agent has left its groups', () => {
     expect(exposed).not.toContain('chat_private')
   })
 
-  it('keeps direct chats, sender history and topic invariants', async () => {
+  it('closes direct chats and keeps sender history and topic invariants', async () => {
     const authored = await send([], { sender: agent })
     const dm = randomUUID()
     await db.query(`INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'dm','Archive DM',$2)`, [dm, owner])
@@ -604,7 +644,7 @@ describe('an archived agent has left its groups', () => {
     await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member'),($1,$3,'member')`, [topic, owner, agent])
     await db.query('SET CONSTRAINTS ALL IMMEDIATE')
     await archive()
-    expect((await members(dm)).ids).toEqual([owner, agent].sort())
+    expect((await members(dm)).ids).toEqual([])
     expect((await members(topic)).ids).toEqual([owner])
     await db.query(`INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'member')`, [topic, peer])
     await db.query('SET CONSTRAINTS ALL IMMEDIATE')
@@ -616,7 +656,7 @@ describe('an archived agent has left its groups', () => {
     await db.query("DO $$ BEGIN EXECUTE format('GRANT gugu_files TO %I', current_user); END $$")
     await db.query('SET LOCAL ROLE gugu_files')
     expect((await db.query('SELECT user_id FROM chat.active_members WHERE chat_id=ANY($1) ORDER BY chat_id,user_id', [[group, dm]])).rows.map(({ user_id }) => user_id).sort())
-      .toEqual([owner, outsider, peer, owner, agent].sort())
+      .toEqual([owner, outsider, peer].sort())
     await db.query('RESET ROLE')
     await restore()
     expect((await members(topic)).ids).toEqual([owner, agent, peer].sort())
