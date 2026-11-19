@@ -76,14 +76,25 @@ beforeEach(async()=>{
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')",[id,host,member])
   }
   await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'fixture','fixture','linux')",[device,host])
-  await db.query("INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at,chat_id) VALUES($1,$2,'root','fixture','/fixture',now(),$3)",[device,host,project])
-  // What publish_device_projects records for a bound project (20261109210000_project_groups).
-  await db.query('INSERT INTO chat.project_groups(chat_id) VALUES($1) ON CONFLICT DO NOTHING',[project])
+  // The host keeps files on its own machine in this group: one of its folders is bound here (20261120130000_group_folders).
+  await db.query("INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) VALUES($1,$2,'root',$3,'/fixture',1,now())",[device,host,project])
+  // The member keeps files on its own machine in this group too, so its images follow its own image retention.
+  const memberDevice=randomUUID()
+  await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Laptop','fixture','linux')",[memberDevice,member])
+  await db.query("INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) VALUES($1,$2,'notes',$3,'/notes',1,now())",[memberDevice,member,project])
   const baseline=Number((await db.query("SELECT chat.file_transfer_usage('upload','global','*') AS n")).rows[0].n)
   await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=EXCLUDED.settings",[{...settings,storage_global_bytes:baseline+settings.storage_global_bytes}])
 })
 afterEach(async()=>{await db.query('ROLLBACK')})
 describe('project chat images expire on their sender\'s global setting',()=>{
+  it('applies only to a sender who keeps files on its own machine in the group (control: with a folder bound, it applies)',async()=>{
+    await service();await db.query('DELETE FROM identity.chat_folders WHERE user_id=$1',[member])
+    const kept=await send()
+    expect((await ref(kept.stored)).seconds).toBeNull()
+    await service();await db.query("INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) SELECT device_id,$1,'again',$2,'/again',2,now() FROM identity.gugu_devices WHERE user_id=$1 LIMIT 1",[member,project])
+    const timed=await send()
+    expect(Number((await ref(timed.stored)).seconds)).toBeGreaterThan(7*86400-60)
+  })
   it('fixes the expiry when an image is stored, from its sender\'s setting, only for project chats',async()=>{
     // Another account's setting, the project owner's included, does not apply to what this member sends.
     await storage({image_retention:'30d'},host)

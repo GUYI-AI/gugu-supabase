@@ -67,8 +67,8 @@ describe('atomic owner/machine/tier registration', () => {
     await register(input)
     await db.query('SELECT identity.rename_device($1,$2)', [input.device_id, 'Chosen name'])
     await db.query('RESET ROLE')
-    await db.query(`INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at)
-      VALUES($1,$2,'retained','Retained project','/fixture',now())`, [input.device_id, owner])
+    await db.query(`WITH g AS (INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES(gen_random_uuid()::text,'group','fixture',$2::text) RETURNING id)
+      INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) SELECT $1,$2::uuid,'retained',g.id,'/fixture',1,now() FROM g`, [input.device_id, owner])
     const agent = randomUUID()
     await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','Retained agent',$2,$3)",
       [agent, owner, input.device_id])
@@ -80,7 +80,7 @@ describe('atomic owner/machine/tier registration', () => {
     expect(row).toMatchObject({ label: 'Chosen name', created_at: created, status: 'online', session_digest: [{ id: 'retained' }] })
     expect(row.capabilities).toEqual(changed.capabilities)
     await db.query('RESET ROLE')
-    expect((await db.query('SELECT device_id FROM identity.device_projects WHERE user_id=$1', [owner])).rows).toEqual([{ device_id: input.device_id }])
+    expect((await db.query('SELECT device_id FROM identity.chat_folders WHERE user_id=$1', [owner])).rows).toEqual([{ device_id: input.device_id }])
     expect((await db.query('SELECT device_id FROM identity.users WHERE id=$1', [agent])).rows).toEqual([{ device_id: input.device_id }])
   })
 

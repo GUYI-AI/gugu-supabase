@@ -43,12 +43,12 @@ afterEach(async () => { await db.query('ROLLBACK') })
 
 it('no API call deletes a device unseen for 30 days or its project folders; only remove_device does', async () => {
   await device(laptop, `machine-${laptop}`, "now() - interval '31 days'")
-  await db.query(`INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at)
-    VALUES($1,$2,'p1','Holiday project','/home/me/p1',now())`, [laptop, owner])
+  await db.query(`WITH g AS (INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES(gen_random_uuid()::text,'group','fixture',$2::text) RETURNING id)
+      INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) SELECT $1,$2::uuid,'p1',g.id,'/home/me/p1',1,now() FROM g`, [laptop, owner])
   // The released clients' startup call: it still answers, and deletes nothing.
   expect(await asOwner<{ n: number }>('SELECT identity.cleanup_legacy_gugu_devices($1,$2) AS n', [here, 'same-host'])).toEqual([{ n: 0 }])
   expect(await devices()).toEqual([here, laptop].sort())
-  expect((await db.query('SELECT local_project_id FROM identity.device_projects WHERE device_id=$1', [laptop])).rows).toHaveLength(1)
+  expect((await db.query('SELECT folder_id FROM identity.chat_folders WHERE device_id=$1', [laptop])).rows).toHaveLength(1)
   await asOwner('SELECT identity.remove_device($1)', [laptop])
   expect(await devices()).toEqual([here])
 })

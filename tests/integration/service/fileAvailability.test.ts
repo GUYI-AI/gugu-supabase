@@ -62,7 +62,7 @@ beforeEach(async () => {
   await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'group','availability fixture',$2)", [group, owner])
   await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [group, owner, member])
   await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'owned fixture','fixture','linux')", [device, owner])
-  await db.query("INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at,chat_id) VALUES($1,$2,'root','fixture','/private/fixture',now(),$3)", [device, owner, group])
+  await db.query("INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) VALUES($1,$2,'root',$3,'/fixture',1,now())", [device, owner, group])
   const baseline = Number(await value("SELECT chat.file_transfer_usage('upload','global','*') AS v"))
   await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=EXCLUDED.settings", [{
     inventory_ready: true, storage_global_bytes: baseline + 100000, storage_account_bytes: 100000, storage_group_bytes: 100000,
@@ -102,7 +102,7 @@ describe('overall readable file availability', () => {
     const file = await cloud(); await db.query("UPDATE chat.file_transfer_storage SET state='gone' WHERE id=$1", [file.stored])
     for (const row of Object.values(await readers(file.id))) expect(state(row)).toEqual({ availability: 'unavailable', expired_at: null })
     await admin(); const held = await local()
-    await db.query('DELETE FROM identity.device_projects WHERE device_id=$1', [device])
+    await db.query('DELETE FROM identity.chat_folders WHERE device_id=$1', [device])
     for (const row of Object.values(await readers(held.id))) expect(state(row)).toEqual({ availability: 'unavailable', expired_at: null })
   })
   it('keeps valid device-held bytes available while offline and computes older cloud versions independently', async () => {
