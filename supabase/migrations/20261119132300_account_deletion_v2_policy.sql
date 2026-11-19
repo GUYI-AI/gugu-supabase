@@ -1,5 +1,6 @@
 -- A read-only V2 admission policy, and a personal-identity check after the
 -- existing account/operation waits. No installation or API role opens a gate.
+ALTER TABLE account_deletion_private.operations ADD COLUMN unprepared_native_generation uuid;
 CREATE FUNCTION account_deletion_private.operation_personal_is_eligible(p_actor uuid)
 RETURNS boolean LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE eligible boolean;
@@ -90,7 +91,11 @@ $guard$||anchor);
       ||COALESCE((SELECT jsonb_build_object('preparation',jsonb_build_object(
         'prepared',p.state='prepared','cancelled',p.state='released',
         'native_generation',p.native_generation,'server_generation',p.server_generation))
-        FROM account_deletion_private.device_preparations p WHERE p.operation_id=o.id),'{}'::jsonb);
+        FROM account_deletion_private.device_preparations p WHERE p.operation_id=o.id),
+        CASE WHEN o.state='closed_before_confirm' AND o.confirm_started_at IS NULL AND o.preparation_cancelled
+          AND o.unprepared_native_generation IS NOT NULL THEN jsonb_build_object('preparation',jsonb_build_object(
+            'cancelled',true,'native_generation',o.unprepared_native_generation,'server_generation',NULL))
+          ELSE '{}'::jsonb END);
   END IF;
 
   IF p_action IN ('prepare_device','read_preparation','cancel_preparation') THEN$result$);
@@ -115,6 +120,47 @@ $guard$||anchor);
 
   SELECT pg_get_functiondef('public.account_deletion_operation_flow(text,text,text,uuid,uuid,text,text,integer,uuid,uuid,text,text,uuid,uuid)'::regprocedure)
     INTO definition;
+  anchor:=$missing$  IF op.id IS NULL OR op.receipt_digest IS DISTINCT FROM p_receipt_digest THEN
+    RETURN jsonb_build_object('ok',false,'error','not_found','status',404);
+  END IF;$missing$;
+  IF length(definition)-length(replace(definition,anchor,''))<>length(anchor) THEN
+    RAISE EXCEPTION 'Unexpected V2 unregistered cancellation predecessor';
+  END IF;
+  -- The original actor/SID and both row/advisory fences are already verified.
+  -- A cancel that wins before register creates only a terminal tombstone. A
+  -- delayed register must see that same binding, never create an open operation.
+  definition:=replace(definition,anchor,$missing$  IF op.id IS NULL THEN
+    IF p_server_generation IS NOT NULL THEN
+      RETURN jsonb_build_object('ok',false,'error','scope_conflict','status',409);
+    END IF;
+    IF EXISTS(SELECT 1 FROM account_deletion_private.operations WHERE user_id=p_user_id
+      AND state NOT IN ('deleted','closed_before_confirm')) THEN
+      RETURN jsonb_build_object('ok',false,'error','request_active','status',409);
+    END IF;
+    INSERT INTO account_deletion_private.operations(operation_digest,receipt_digest,user_id,session_id,email_digest,
+      consent_version,state,preparation_cancelled,unprepared_native_generation)
+      VALUES(p_operation_digest,p_receipt_digest,p_user_id,p_session_id,p_email_digest,
+        'immediate-forfeit-v1','closed_before_confirm',true,p_native_generation)
+      ON CONFLICT(operation_digest) DO NOTHING RETURNING * INTO op;
+    IF NOT FOUND THEN
+      SELECT * INTO op FROM account_deletion_private.operations WHERE operation_digest=p_operation_digest FOR UPDATE;
+    END IF;
+  END IF;
+  IF op.id IS NULL OR op.receipt_digest IS DISTINCT FROM p_receipt_digest THEN
+    RETURN jsonb_build_object('ok',false,'error','not_found','status',404);
+  END IF;$missing$);
+  anchor:='  IF op.state=''open'' THEN';
+  IF length(definition)-length(replace(definition,anchor,''))<>length(anchor) THEN
+    RAISE EXCEPTION 'Unexpected V2 unprepared generation predecessor';
+  END IF;
+  definition:=replace(definition,anchor,$generation$  IF op.unprepared_native_generation IS NOT NULL AND op.unprepared_native_generation<>p_native_generation THEN
+    RETURN jsonb_build_object('ok',false,'error','scope_conflict','status',409);
+  END IF;
+  IF op.unprepared_native_generation IS NULL THEN
+    UPDATE account_deletion_private.operations SET unprepared_native_generation=p_native_generation
+      WHERE id=op.id RETURNING * INTO op;
+  END IF;
+$generation$||anchor);
   anchor:='  IF p_action<>''cancel_operation'' THEN';
   IF length(definition)-length(replace(definition,anchor,''))<>length(anchor)
     OR position('native runtime stopped' IN definition)=0 THEN

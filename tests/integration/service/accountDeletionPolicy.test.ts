@@ -148,6 +148,38 @@ it('allows authoritative cancel after rejected verification but never releases o
   expect((await db.query('SELECT state FROM account_deletion_private.device_preparations WHERE operation_id=$1', [cancelled.operation.operation_id])).rows[0].state).toBe('released')
   expect((await db.query('SELECT count(*)::int n FROM auth.users WHERE id=$1', [f.p_user_id])).rows[0].n).toBe(1)
 })
+it('closes an unregistered capture with disabled gates and recovers a lost cancel ACK without reopening', async () => {
+  const f = { ...await fixture(), p_server_generation: null }
+  await db.query('UPDATE account_deletion_private.operation_access SET enabled=false')
+  await db.query('UPDATE account_deletion_private.device_preparation_access SET enabled=false')
+  const proof = { p_operation_digest: f.p_operation_digest, p_receipt_digest: f.p_receipt_digest }
+  expect((await flow('result', proof)).error).toBe('not_found')
+  expect((await flow('cancel_operation', { ...f, p_server_generation: randomUUID() })).error).toBe('scope_conflict')
+  const closed = await flow('cancel_operation', f)
+  expect(closed.operation).toMatchObject({ state: 'closed_before_confirm', can_release_preparation: true })
+  expect(closed.preparation).toEqual({ cancelled: true, native_generation: f.p_native_generation, server_generation: null })
+  expect((await flow('cancel_operation', f)).operation.revision).toBe(closed.operation.revision)
+  const recovered = await flow('result', proof)
+  expect(recovered.operation).toEqual(closed.operation)
+  expect(recovered.preparation).toEqual(closed.preparation)
+  expect((await flow('cancel_operation', { ...f, p_receipt_digest: hash('wrong') })).error).toBe('not_found')
+  expect((await flow('cancel_operation', { ...f, p_native_generation: randomUUID() })).error).toBe('scope_conflict')
+  const sid = randomUUID()
+  await db.query('INSERT INTO auth.sessions(id,user_id,created_at,updated_at) VALUES($1,$2,now(),now())', [sid, f.p_user_id])
+  expect((await flow('cancel_operation', { ...f, p_session_id: sid })).error).toBe('scope_conflict')
+  await db.query('UPDATE account_deletion_private.operation_access SET enabled=true')
+  await db.query('UPDATE account_deletion_private.device_preparation_access SET enabled=true')
+  expect((await flow('register', f)).operation).toEqual(closed.operation)
+  expect((await flow('begin', f)).error).toBe('request_active')
+  expect((await db.query('SELECT count(*)::int n FROM account_deletion_private.requests WHERE user_id=$1', [f.p_user_id])).rows[0].n).toBe(0)
+})
+it('does not replace another active operation when cancelling a missing capture', async () => {
+  const f = await fixture(), registered = await flow('register', f)
+  const missing = { ...f, p_operation_digest: hash(randomUUID()), p_receipt_digest: hash(randomUUID()), p_server_generation: null }
+  expect((await flow('cancel_operation', missing)).error).toBe('request_active')
+  expect((await flow('result', f)).operation.operation_id).toBe(registered.operation.operation_id)
+  expect((await db.query('SELECT count(*)::int n FROM account_deletion_private.operations WHERE user_id=$1', [f.p_user_id])).rows[0].n).toBe(1)
+})
 
 async function committedFixture(run: (f: Args, a: pg.Client, b: pg.Client) => Promise<void>) {
   const a = new pg.Client({ connectionString: database }), b = new pg.Client({ connectionString: database })
@@ -202,6 +234,28 @@ it.each(['principal', 'operation_gate', 'preparation_gate', 'allowlist'])('reche
     expect(await pending).toMatchObject({ ok: false, error: changed === 'principal' ? 'personal_account_required'
       : changed === 'allowlist' ? 'rollout_unavailable' : changed === 'operation_gate' ? 'operation_unavailable' : 'preparation_unavailable' })
     expect((await db.query('SELECT count(*)::int n FROM account_deletion_private.operations WHERE operation_digest=$1', [f.p_operation_digest])).rows[0].n).toBe(0)
+  })
+})
+it.each(['cancel_operation', 'register'])('serializes %s winning against a late unregistered cancel/register', async first => {
+  await committedFixture(async (f, a, b) => {
+    const bound = { ...f, p_server_generation: null }
+    const holder = (await a.query('SELECT pg_backend_pid() pid')).rows[0].pid
+    const waiter = (await b.query('SELECT pg_backend_pid() pid')).rows[0].pid
+    await a.query('BEGIN')
+    expect((await flow(first, bound, a)).ok).toBe(true)
+    await b.query("SET statement_timeout='5s'")
+    const second = first === 'register' ? 'cancel_operation' : 'register'
+    const pending = flow(second, bound, b)
+    let blocked = false
+    for (let n = 0; n < 200; n++) {
+      if ((await db.query('SELECT $1::int=ANY(pg_blocking_pids($2::int)) blocked', [holder, waiter])).rows[0].blocked) { blocked = true; break }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect(blocked).toBe(true)
+    await a.query('COMMIT')
+    expect((await pending).operation).toMatchObject({ state: 'closed_before_confirm', can_release_preparation: true })
+    expect((await flow('result', bound, a)).preparation).toEqual({ cancelled: true, native_generation: f.p_native_generation, server_generation: null })
+    expect((await db.query('SELECT count(*)::int n FROM account_deletion_private.operations WHERE user_id=$1', [f.p_user_id])).rows[0].n).toBe(1)
   })
 })
 it('rehearses and applies only the fixed recent fixture, then closes gates without discarding pending custody', async () => {
