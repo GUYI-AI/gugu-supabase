@@ -7,6 +7,24 @@ on:
 permissions:
   contents: read
 jobs:
+  push-worker-image:
+    name: Push worker image without credentials
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the frozen worker runtime
+        run: docker build -f services/push/Dockerfile -t gugu-push-ci .
+      - name: Exercise the packaged entry point without network or credentials
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' gugu-push-ci)" = node
+          set +e
+          docker run --rm --network none --read-only --tmpfs /tmp gugu-push-ci > worker.stdout 2> worker.stderr
+          code=$?
+          set -e
+          test "$code" = 1
+          test ! -s worker.stdout
+          test "$(cat worker.stderr)" = '{"event":"push_worker_failed","phase":"configuration"}'
   migration-source:
     runs-on: ubuntu-24.04
     timeout-minutes: 5

@@ -66,6 +66,12 @@ importers:
         specifier: 13.6.33
         version: 13.6.33
 
+  services/push:
+    dependencies:
+      pg:
+        specifier: 8.16.3
+        version: 8.16.3
+
 packages:
 
   '@hocuspocus/common@4.7.1':
