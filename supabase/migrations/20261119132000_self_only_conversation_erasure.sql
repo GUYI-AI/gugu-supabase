@@ -99,15 +99,17 @@ ALTER FUNCTION identity.erase_self_only_conversations(text[]) OWNER TO postgres;
 REVOKE ALL ON FUNCTION identity.erase_self_only_conversations(text[]) FROM PUBLIC,anon,authenticated,service_role;
 
 -- The preceding unified release owns the trusted two-argument body and one-argument compatibility
--- wrapper. Patch only that body, after registration and before the original
+-- wrapper. Patch only that body after the installed personal-list lock-order
+-- release, before its snapshot/prelock prelude and the original
 -- shared-chat/command/identity/storage cleanup; fail closed on an unknown shape.
 DO $upgrade$
 DECLARE definition text;
-    anchor text:='    FOR affected_chat_id IN';
+    anchor text:='    SELECT COALESCE(array_agg(DISTINCT cm.chat_id ORDER BY cm.chat_id),ARRAY[]::text[])';
 BEGIN
     SELECT pg_get_functiondef('identity.erase_human_account(text,text)'::regprocedure) INTO definition;
     IF position('identity.enqueue_account_audit_redaction(delete_user_ids,p_auth_email)' IN definition)=0
       OR position('identity.command_erasure_references_v1' IN definition)=0
+      OR position('FOREACH affected_chat_id IN ARRAY locked_chat_ids' IN definition)=0
       OR length(definition)-length(replace(definition,anchor,''))<>length(anchor)
       OR position('identity.erase_self_only_conversations' IN definition)<>0 THEN
         RAISE EXCEPTION 'Unexpected registered account erasure predecessor';

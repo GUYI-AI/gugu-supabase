@@ -64,6 +64,9 @@ beforeAll(async()=>{
   db=new pg.Client({connectionString:database});await db.connect()
   definition=(await row("SELECT pg_get_functiondef('identity.erase_human_account(text,text)'::regprocedure) body")).body
   expect(definition.split(call)).toHaveLength(2)
+  const prelock=definition.indexOf('    SELECT COALESCE(array_agg(DISTINCT cm.chat_id ORDER BY cm.chat_id),ARRAY[]::text[])')
+  expect(prelock).toBeGreaterThan(definition.indexOf(call))
+  expect(definition).toContain('FOREACH affected_chat_id IN ARRAY locked_chat_ids')
   schedules=(await db.query("SELECT jobname,schedule,command FROM cron.job WHERE jobname LIKE 'account-audit-redaction-%'")).rows
   for(const schedule of schedules)await db.query('SELECT cron.unschedule($1)',[schedule.jobname])
 })

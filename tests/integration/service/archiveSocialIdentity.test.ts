@@ -138,7 +138,11 @@ describe('archive terminates identity without touching its seats or history', ()
     // removed agent is still outside the complete erased identity set. This is
     // a closed maintenance capability, never a live-membership authorization.
     const physical = new Set(['chat.chats_membership_invariants','chat.chats_status_invariants','chat.historical_dm_peer','chat.delete_my_dm_conversation',
-      'chat.conversation_release_on_change','identity.erase_self_only_conversations'])
+      'chat.conversation_release_on_change','identity.erase_self_only_conversations',
+      'chat.restore_conversation_list_rows','chat.hide_my_conversation',
+      'chat.publish_native_conversation_message','chat.list_conversation_memberships',
+      // The additive clear wrapper retains the predecessor, private and uncallable by clients.
+      'chat.conversation_memberships_before_clear','identity.erase_human_account'])
     const erased=(await db.query(`SELECT pg_get_userbyid(p.proowner) owner,p.prosecdef,p.proconfig,p.prosrc
       FROM pg_proc p WHERE p.oid='identity.erase_self_only_conversations(text[])'::regprocedure`)).rows[0]
     expect(erased).toMatchObject({owner:'postgres',prosecdef:true,proconfig:['search_path=pg_catalog']})
