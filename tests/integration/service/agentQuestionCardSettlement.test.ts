@@ -93,6 +93,16 @@ describe('owner settlement of an agent question card', () => {
     expect((await query(sql,[legacy,'answered','[{"selected":["B"]}]']))[0].settled.state).toBe('answered')
   })
 
+  it('publishes all three answers, preserving single choice, multiple choices and the owner’s own words', async () => {
+    const questions = [one[0],{ ...one[0],question:'Where?',multiSelect:true },{ question:'Anything else?',multiSelect:false,options:[] }]
+    const complete = await post({ questions,options:[] })
+    const answers = [{ selected:['A'] },{ selected:['A','B'] },{ selected:[],other:'Keep the original card' }]
+    await actor(owner)
+    expect((await query(sql,[complete,'answered',JSON.stringify(answers)]))[0].settled).toMatchObject({ state:'answered',answers })
+    const event = (await revisions(colleague)).find(row => row.payload.message_id===complete)
+    expect(JSON.parse((event!.payload.message as { content:string }).content)).toMatchObject({ questions,settled:{ state:'answered',answers } })
+  })
+
   it('refuses another person, an agent of another owner, non-question cards and deleted cards', async () => {
     await actor(colleague); await refused(() => query(sql,[message,'answered','[{"selected":["A"]}]']))
     await actor(stranger); await refused(() => query(sql,[message,'withdrawn',null]))
