@@ -5,6 +5,23 @@ import {
 import { type AttachmentObjectStorage, type MultipartStorage, ObjectStorageError } from './object-storage.ts'
 import { type Inspector, inspectFileStream } from './file-inspection.ts'
 
+/**
+ * The one HEAD that reads an object's size; null when there is no object. It asks for identity encoding: asked for gzip
+ * (the fetch default), a store answers a compressible object compressed and without Content-Length. A missing length is
+ * an error, never 0.
+ */
+async function sizedHead(send: (headers: Record<string, string>) => Promise<Response>, what: string) {
+  const response = await send({ 'Accept-Encoding': 'identity' })
+  await response.body?.cancel()
+  if (response.status === 404) return null
+  const length = response.headers.get('content-length')
+  const size = length === null ? NaN : Number(length)
+  if (response.status !== 200 || !Number.isSafeInteger(size)) {
+    throw new ObjectStorageError(response.status === 200 ? 502 : response.status, null, `${what}: HTTP ${response.status}${length === null ? ' without Content-Length' : ''}`)
+  }
+  return { size, headers: response.headers }
+}
+
 /** Bytes are read by the file service (`inspector`) from a request signed here; this Edge worker only copies by ETag. */
 export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch: FetchLike; inspector: Inspector; directSign?:AttachmentObjectStorage['sign'] }): AttachmentObjectStorage {
   const { oss, cdn, fetch } = config
@@ -39,15 +56,11 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
     exists: (key, signal) => ossExists(oss, signal ? (input, init) => fetch(input, { ...init, signal }) : fetch, key),
     // OSS keeps x-oss-hash-crc64ecma on every object, and CopyObject keeps it.
     fingerprint: async (key) => {
-      const response = await ossRequest(oss, fetch, { method: 'HEAD', key, internal: true })
-      await response.body?.cancel()
-      if (response.status === 404) return null
-      const size = Number(response.headers.get('content-length'))
-      const checksum = response.headers.get('x-oss-hash-crc64ecma')
-      if (response.status !== 200 || !Number.isSafeInteger(size) || !checksum) {
-        throw new ObjectStorageError(response.status === 200 ? 502 : response.status, null, `OSS HEAD ${key}: ${response.status}`)
-      }
-      return { size, checksum }
+      const head = await sizedHead((headers) => ossRequest(oss, fetch, { method: 'HEAD', key, internal: true, headers }), `OSS HEAD ${key}`)
+      if (!head) return null
+      const checksum = head.headers.get('x-oss-hash-crc64ecma')
+      if (!checksum) throw new ObjectStorageError(502, null, `OSS HEAD ${key}: no checksum`)
+      return { size: head.size, checksum }
     },
     remove: (key, signal) => ossDelete(oss, signal ? (input, init) => fetch(input, { ...init, signal }) : fetch, key),
     sign: async (key, image, now, permit) => {
@@ -126,12 +139,7 @@ function ossMultipart(oss: OssConfig, fetch: FetchLike): MultipartStorage {
       const joined = await ossRequest(oss, fetch, { method: 'POST', key, query: { uploadId }, internal: true,
         headers: { 'x-oss-complete-all': 'yes', 'x-oss-forbid-overwrite': 'true' } })
       await answer(joined, [200, 404, 409], 'complete multipart upload')
-      const head = await ossRequest(oss, fetch, { method: 'HEAD', key, internal: true })
-      await head.body?.cancel()
-      if (head.status === 404) return null
-      const size = Number(head.headers.get('content-length'))
-      if (head.status !== 200 || !Number.isSafeInteger(size)) throw new ObjectStorageError(head.status === 200 ? 502 : head.status, null, `OSS HEAD ${key}: ${head.status}`)
-      return size
+      return (await sizedHead((headers) => ossRequest(oss, fetch, { method: 'HEAD', key, internal: true, headers }), `OSS HEAD ${key}`))?.size ?? null
     },
     abandon: async (key, uploadId) => {
       await answer(await ossRequest(oss, fetch, { method: 'DELETE', key, query: { uploadId }, internal: true }), [204, 404], 'abort multipart upload')
@@ -274,17 +282,11 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
     },
     // Storage answers a HEAD with the object's size and ETag, the MD5 of its content, which a server-side copy keeps.
     fingerprint: async (key) => {
-      const response = await request(objectUrl(key), { method: 'HEAD' })
-      try { await check(response) }
-      catch (error) {
-        if (error instanceof ObjectStorageError && error.status === 404) return null
-        throw error
-      }
-      await response.body?.cancel()
-      const size = Number(response.headers.get('content-length'))
-      const checksum = response.headers.get('etag')
-      if (!Number.isSafeInteger(size) || !checksum) throw new ObjectStorageError(502, null, 'Supabase Storage HEAD answered without size or ETag')
-      return { size, checksum }
+      const head = await sizedHead((headers) => request(objectUrl(key), { method: 'HEAD', headers }), 'Supabase Storage HEAD')
+      if (!head) return null
+      const checksum = head.headers.get('etag')
+      if (!checksum) throw new ObjectStorageError(502, null, 'Supabase Storage HEAD answered without ETag')
+      return { size: head.size, checksum }
     },
     remove: async (key, signal) => {
       const response = await request(base + '/storage/v1/object/' + encodeURIComponent(config.bucket), {
