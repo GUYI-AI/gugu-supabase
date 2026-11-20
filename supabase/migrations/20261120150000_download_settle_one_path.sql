@@ -13,7 +13,7 @@ BEGIN
     END IF;
     -- A missing window compares as NULL and refuses, like a cutoff inside it.
     EXECUTE replace(replace(definition,unobserved,';'),cutoff,'OR (p_until > now()-make_interval(secs=>(SELECT '
-        ||'(settings->>''download_log_window_seconds'')::integer FROM chat.file_transfer_limits WHERE scope=''global''))) IS NOT FALSE THEN');
+        ||'(settings->>''download_log_window_seconds'')::integer FROM chat.file_transfer_limits WHERE scope=''global'' AND scope_id=''*''))) IS NOT FALSE THEN');
 END $closed$;
 
 DROP FUNCTION chat.file_transfer_settle(uuid);
