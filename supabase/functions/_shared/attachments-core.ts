@@ -156,12 +156,15 @@ export async function call(rpc: Rpc, fn: string, args: Record<string, unknown>):
   return data
 }
 
-async function writeFile(deps: AttachmentsDeps, fn: string, args: Record<string, unknown>) {
+async function writeFile(deps: AttachmentsDeps, fn: string, args: Record<string, unknown>, verifyReplacement?: () => Promise<void>) {
   const item = args.p_item_id as string | undefined
   const actor = (args.p_sender_user_id ?? args.p_as_user_id) as string
   const entry = item ? await call(deps.userRpc, 'workspace_get_as', { p_item_id: item, p_as_user_id: actor }) as { kind: string }[] : []
   if (entry[0]?.kind !== 'document') return await call(deps.userRpc, fn, args)
   if (!deps.documentReplacement) throw new Refusal(503, 'not_configured', 'Document replacement requires the file service')
+  // Replacing a live document needs its inspected text, unlike a new attachment
+  // whose message may precede its bytes. Do not race the independent finish.
+  await verifyReplacement?.()
   const body = { key: args.p_staging_key as string, expected: args.p_expected_version as number, finish: false }
   await deps.documentReplacement!(item!, actor, body)
   try { return await call(deps.userRpc, fn, args) }
@@ -399,7 +402,18 @@ export async function handleCommit(deps: AttachmentsDeps, userId: string, body: 
       ...(width != null && height != null ? { p_width: width, p_height: height } : {}), ...(keep ? { p_keep: keep } : {}) })
   }
   else await registerStaged(deps, userId, stagingKey, str(body, 'content_type', false), str(body, 'file_name')!)
-  const rows = (await writeFile(deps, 'attachment_commit', commitArgs)) as unknown[]
+  const rows = (await writeFile(deps, 'attachment_commit', commitArgs, declared ? async () => {
+    try {
+      await registerStaged(deps, userId, stagingKey, str(body, 'content_type', false), str(body, 'file_name')!, { pendingKey: stagingKey })
+    } catch (error) {
+      // Keep the original document and the same declaration. Released clients
+      // can retry a busy service while the independent byte upload completes.
+      if (error instanceof Refusal && error.code === 'upload_missing') {
+        throw new Refusal(503, 'upload_pending', 'The replacement bytes have not arrived yet; try again after the upload completes')
+      }
+      throw error
+    }
+  } : undefined)) as unknown[]
   const message = rows[0] as { id?: string } | undefined
   if (!declared && message?.id) await keepAs(deps, keep, { message_id: message.id }, commitArgs.p_sender_user_id)
   return message ?? null
