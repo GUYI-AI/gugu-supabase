@@ -43,6 +43,7 @@ Downloads do not acquire the installation-wide storage/inventory/GC advisory loc
 | `download_link_bits_per_second` (optional) | Omit for no declared request-rate limit. If present, use 819200–838860800 bit/s; direct OSS signatures bind it. CDN/Storage edge throttles are independently provisioned and are not installed or proved by this value. |
 | `sign_window_seconds`, `sign_account_count`, `sign_group_count` | New download-signature rate window and count limits |
 | `download_log_window_seconds` | The provider log delivery window; a download closure cutoff must be at least this far in the past. Required by closure, not by signing |
+| `download_log_since` | When provider log collection began (ISO timestamp). A closure settles only downloads signed at or after it; older holds stay counted as signed. Required by closure |
 | `inventory_ready` | Initially absent/false; enable only after a complete trusted physical inventory and scope audit |
 | `paused` | Stop new upload/download reservations immediately; already issued bearer capabilities remain usable within their provider rules |
 
@@ -79,7 +80,7 @@ HEAD requests are excluded. OSS CDN-origin requests (`sync_request='cdn'`) are e
 
 If logs are late or incomplete, keep outstanding reservations and pause issuance before unsafe headroom accumulates. Do not refund on expiry, one successful log record, a client completion message, or a partial range. A reservation that is never settled counts its signed bytes in the UTC month it was signed and stops counting the month after, so stopped imports cost accuracy, never a budget that does not come back.
 
-The service role settles downloads with `chat.file_transfer_downloads_closed(p_until, p_sources, p_evidence)`. It settles **every outstanding eligible reservation that expired before the cutoff, from the beginning of the ledger**, observed or not; a settled download counts only its observations. The cutoff is exclusive and must lie at least `download_log_window_seconds` in the past. Pass the watermark your own imports cover, minus that window. Verify complete imports for the whole prefix, including the final bytes of responses admitted before link expiry. An export covering only a recent interval cannot justify closing older outstanding rows. A failed or interrupted import leaves the holds in place.
+The service role settles downloads with `chat.file_transfer_downloads_closed(p_until, p_sources, p_evidence)`. It settles **every outstanding eligible reservation signed at or after `download_log_since` that expired before the cutoff**, observed or not; a settled download counts only its observations. The cutoff is exclusive and must lie at least `download_log_window_seconds` in the past. Pass the watermark your own imports cover, minus that window. Verify complete imports for the whole prefix, including the final bytes of responses admitted before link expiry. An export covering only a recent interval cannot justify closing older outstanding rows. A failed or interrupted import leaves the holds in place.
 
 | Logical object bucket | Sources the operator must verify |
 | --- | --- |

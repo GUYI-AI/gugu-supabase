@@ -8,6 +8,7 @@ const settings = {
   download_global_bytes: 1000, download_account_bytes: 800, download_group_bytes: 700,
   upload_permit_seconds: 120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600,
   sign_window_seconds: 60, sign_account_count: 100, sign_group_count: 100, download_log_window_seconds: 3600,
+  download_log_since: '2000-01-01T00:00:00Z',
   file_max_bytes: 600,
 }
 let db: pg.Client
@@ -189,6 +190,16 @@ describe('atomic transfer budgets', () => {
     const open = async () => Number((await db.query("SELECT count(*) AS n FROM chat.file_transfer_reservations WHERE id=ANY($1) AND state IN ('reserved','issued')",[[permanent,temporary]])).rows[0].n)
     const initial = await held()
     expect(await open()).toBe(2)
+    // Logs cover only downloads signed at or after collection began; a missing start or a cutoff not after it refuses.
+    const since = (value: unknown) => db.query("UPDATE chat.file_transfer_limits SET settings=settings||jsonb_build_object('download_log_since',$1::text) WHERE scope='global'",[value])
+    await db.query("UPDATE chat.file_transfer_limits SET settings=settings-'download_log_since' WHERE scope='global'")
+    expect((await reject(close,[['cdn','oss'],'logs:test'])).message).toMatch(/cutoff/)
+    await db.query(`UPDATE chat.file_transfer_limits SET settings=settings||jsonb_build_object('download_log_since',(${cutoff})::text) WHERE scope='global'`)
+    expect((await reject(close,[['cdn','oss'],'logs:test'])).message).toMatch(/cutoff/)
+    await db.query(`UPDATE chat.file_transfer_limits SET settings=settings||jsonb_build_object('download_log_since',((${cutoff})-interval '1 day')::text) WHERE scope='global'`)
+    expect((await db.query(close,[['cdn','oss'],'logs:before-coverage'])).rows[0].n).toBe(0)
+    expect(await open()).toBe(2)
+    await since('2000-01-01T00:00:00Z')
     expect((await db.query(close,[['cdn'],'logs:cdn'])).rows[0].n).toBe(0)
     expect((await db.query(close,[['oss'],'logs:direct'])).rows[0].n).toBe(1)
     expect(await open()).toBe(1)

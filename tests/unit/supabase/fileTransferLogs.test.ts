@@ -12,7 +12,7 @@ describe('trusted provider log ingestion',()=>{
     expect(JSON.stringify(parsed)).not.toContain('auth_key')
   })
   it('does not double-charge CDN origin fetches; direct OSS bytes keep their own request identity',()=>{
-    const oss={http_method:'GET',sync_request:'-',host:options.domain,request_uri:'/fixture/ab/hash?gugu-download-id='+id+'&x-oss-signature=secret',request_id:'oss-1',response_body_length:'80',__time__:'1792846800'}
+    const oss={http_method:'GET',sync_request:'-',host:options.domain,request_uri:'/fixture/ab/hash?gugu-download-id='+id+'&x-oss-signature=secret HTTP/1.1',request_id:'oss-1',response_body_length:'80',__time__:'1792846800'}
     expect(parseTransferLog('oss',oss,options)).toMatchObject({event_id:'oss:oss-1',download_id:id,bytes:80,object_name:'ab/hash'})
     expect(parseTransferLog('oss',{...oss,sync_request:'cdn'},options)).toBeNull()
     expect(parseTransferLog('cdn',{...cdn,method:'HEAD'},options)).toBeNull()
