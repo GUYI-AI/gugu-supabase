@@ -12,6 +12,7 @@ import {
   handleForward,
   handleShare,
   handleGc,
+  auditUploadCopies,
   handleUpload,
   handleUploadComplete,
   handleUploadParts,
@@ -168,13 +169,20 @@ Deno.serve(async (request) => {
       if (route==='document-import') return json(await handleDocumentImport(deps,body))
       return json(await (route==='usage-import'?handleUsageImport(deps.serviceRpc,body):handleStorageInventory(deps.serviceRpc,body)))
     }
+    if (route === 'gc-audit') {
+      if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY'))) {
+        return json({ error: 'denied', message: 'gc-audit is restricted to the service' }, 401)
+      }
+      const body = (await request.json().catch(() => ({}))) as { after?: unknown; limit?: unknown }
+      return json(await auditUploadCopies(deps, typeof body.after === 'string' ? body.after : null, Number(body.limit) || 200))
+    }
     if (route === 'gc') {
       if (!sameSecret(authorization.replace(/^Bearer\s+/i, ''), env('SUPABASE_SERVICE_ROLE_KEY'))) {
         return json({ error: 'denied', message: 'gc is the server\'s own job' }, 401)
       }
       let stagingDeleted = 0
       const result = await handleGc(deps, 'kick', async (remaining, guard) => {
-        // Community Storage staging; OSS staging is removed by the bucket lifecycle rule.
+        // Community Storage also lists its staging prefix, which catches copies the ledger no longer names.
         if (storage.kind === 'oss') return
         const service = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { db: { schema: 'chat' }, auth: { persistSession: false } })
         const { data: expired, error } = await service.rpc('attachment_expired_staging', { p_bucket: storage.bucket })

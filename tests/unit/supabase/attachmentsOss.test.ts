@@ -315,7 +315,7 @@ function fakes(opts: {
       if (fn === 'file_blob_gc_run_begin') return { data: { acquired: true, token: '11111111-1111-4111-8111-111111111111', batch_limit: 50, concurrency: 1 }, error: null }
       if (fn === 'file_blob_gc_run_renew' || fn === 'file_blob_gc_run_end') return { data: true, error: null }
       if (fn==='file_managed_upload_for') {controls.push({as:'service',fn,args});return {data:{max_bytes:MAX_ATTACHMENT_BYTES},error:null}}
-      if (fn==='file_managed_upload_registered'||fn==='file_managed_upload_closed'||fn==='file_transfer_expire'||fn==='file_temporary_expire'||fn==='file_managed_upload_parts_claim'||fn==='file_direct_upload_cleanup_claim') {controls.push({as:'service',fn,args});return {data:null,error:null}}
+      if (fn==='file_managed_upload_registered'||fn==='file_managed_upload_closed'||fn==='file_transfer_expire'||fn==='file_temporary_expire'||fn==='file_managed_upload_parts_claim'||fn==='file_upload_cleanup_claim') {controls.push({as:'service',fn,args});return {data:null,error:null}}
       if (fn==='file_transfer_settings') {controls.push({as:'service',fn,args});return {data:{},error:null}}
       rpcs.push({ as: 'service', fn, args })
       if (fn === 'file_blob_register') {
@@ -339,19 +339,17 @@ function fakes(opts: {
   }
   return { deps, calls, rpcs, controls, logs, events, removed, bucket, order }
 }
-/** The quota/actor guard must precede every byte read. Registration settles the reservation; the staging copy is then
- *  deleted and recorded as gone only after the provider confirms it is absent. */
+/** The quota/actor guard must precede every byte read. Registration settles the reservation; the staging copy stays
+ *  until GC removes it after the permit expires, so commit never deletes or closes it. */
 function expectManagedCommit(f: ReturnType<typeof fakes>, publication: string, start = 0) {
   if (start) expect(f.order.slice(0, start)).toEqual(['user:file_managed_upload_prepare','object:GET','user:file_managed_upload_as'])
   expect(f.order.slice(start, start + 3)).toEqual(['user:file_managed_upload_scope', 'service:file_managed_upload_for', 'object:GET'])
   const registered = f.order.indexOf('service:file_managed_upload_registered')
   expect(registered).toBeGreaterThan(f.order.indexOf('service:file_blob_register'))
   expect(f.order.indexOf('user:' + publication)).toBeGreaterThan(registered)
-  const closed = f.order.indexOf('service:file_managed_upload_closed')
-  expect(closed).toBeGreaterThan(registered)
-  expect(f.controls.find(r => r.fn === 'file_managed_upload_closed')?.args).toEqual({ p_key: expect.stringMatching(/^staging\//), p_evidence: 'staging-absent' })
-  expect(f.calls.some(c => c.method === 'DELETE' && c.url.includes('/staging/'))).toBe(true)
-  expect(f.bucket.staging).toBeNull()
+  expect(f.controls.some(r => r.fn === 'file_managed_upload_closed')).toBe(false)
+  expect(f.calls.some(c => c.method === 'DELETE' && c.url.includes('/staging/'))).toBe(false)
+  expect(f.bucket.staging).not.toBeNull()
 }
 const pngBytes = () => {
   const b = new Uint8Array(64)
@@ -453,7 +451,7 @@ describe('提交', () => {
     expect(rpcs[0]!.args).toMatchObject({ p_sha256: createHash('sha256').update(bytes).digest('hex'), p_size_bytes: size })
   })
 
-  it('读暂存(内网)→ 自己算 sha256 → 复制到 u/<上传者>/<sha256>(图片类型、一年 immutable)→ 登记 → 删掉暂存、预留已结清 → 以调用者身份发消息', async () => {
+  it('读暂存(内网)→ 自己算 sha256 → 复制到 u/<上传者>/<sha256>(图片类型、一年 immutable)→ 登记、预留已结清(暂存留给过期后的 gc)→ 以调用者身份发消息', async () => {
     const bytes = pngBytes()
     const f = fakes({ object: bytes })
     const { deps, calls, rpcs } = f
@@ -461,7 +459,7 @@ describe('提交', () => {
     expectManagedCommit(f, 'attachment_commit')
     expect(message).toEqual({ id: 'm1', file_version: 1 })
     const sha = createHash('sha256').update(bytes).digest('hex')
-    expect(calls.slice(3).map((c) => `${c.method} ${new URL(c.url).pathname}`)).toEqual([`DELETE /${STAGING}`, `HEAD /${STAGING}`])
+    expect(calls.slice(3)).toEqual([])
     expect(calls.slice(0, 3).map((c) => `${c.method} ${c.url.replace(/\?.*$/, '')}`)).toEqual([
       `GET https://gugu-files-test.oss-cn-wulanchabu-internal.aliyuncs.com/${STAGING}`,
       `PUT https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/u/${USER}/${sha}`,
@@ -531,23 +529,12 @@ describe('提交', () => {
     const raced = fakes({ object: bytes, afterRegister: (b) => void b.finals.clear() })
     await handleCommit(raced.deps, USER, commitBody())
     expectManagedCommit(raced, 'attachment_commit')
-    expect(raced.calls.map((c) => c.method)).toEqual(['GET', 'PUT', 'HEAD', 'PUT', 'DELETE', 'HEAD'])
+    expect(raced.calls.map((c) => c.method)).toEqual(['GET', 'PUT', 'HEAD', 'PUT'])
     expect(raced.bucket.finals.get(final)).toEqual(bytes)
-    expect(raced.bucket.staging).toBeNull()
     const reused = fakes({ object: bytes, registerCreated: false })
     await handleCommit(reused.deps, USER, commitBody())
     expectManagedCommit(reused, 'attachment_commit')
-    expect(reused.calls.map((c) => c.method)).toEqual(['GET', 'PUT', 'DELETE', 'HEAD'])
-  })
-
-  it('a staging copy that cannot be deleted leaves the commit successful and is not recorded as gone', async () => {
-    const f = fakes({ object: pngBytes() })
-    const fetch = f.deps.fetch
-    f.deps.fetch = (url, init) => init?.method === 'DELETE' ? Promise.resolve(new Response('', { status: 500 })) : fetch(url, init)
-    expect(await handleCommit(f.deps, USER, commitBody())).toEqual({ id: 'm1', file_version: 1 })
-    expect(f.logs).toContain('staging_delete_failed')
-    expect(f.controls.some(r => r.fn === 'file_managed_upload_closed')).toBe(false)
-    expect(f.bucket.staging).not.toBeNull()
+    expect(reused.calls.map((c) => c.method)).toEqual(['GET', 'PUT'])
   })
 
   it('暂存没了(上一次已经登记、删了暂存):不复制不登记,交给库认那次登记;超过许可的 25 MiB:413,什么都不登记;暂存不是自己的:400', async () => {

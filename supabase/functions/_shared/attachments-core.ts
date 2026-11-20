@@ -565,9 +565,8 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
     if (created && !(await objectStorage(deps).exists(finalKey))) await copy()
     if (!settle) await call(deps.serviceRpc,'file_managed_upload_registered',{p_key:stagingKey,p_user:userId,
       p_document:document.kind === 'document' ? {text:document.text,content_type:document.contentType} : null})
-    // Registration settled the reservation, so the staging copy is redundant. A replay of the still-valid signature can
-    // recreate it uncounted until the staging lifecycle removes it. A failed delete leaves it to that lifecycle.
-    await dropStaging(deps, stagingKey)
+    // Registration settled the reservation; the staging copy is now redundant. GC removes it once the permit has expired
+    // (a replay of the still-valid signature could recreate a copy deleted earlier) and its blob's object is verified.
   }
 }
 
@@ -620,17 +619,6 @@ async function registerDirect(deps: AttachmentsDeps, userId: string, key: string
   }
   if (!settle) await call(deps.serviceRpc, 'file_managed_upload_registered', { p_key: key, p_user: userId,
     p_document: document.kind === 'document' ? { text: document.text, content_type: document.contentType } : null })
-}
-
-async function dropStaging(deps: AttachmentsDeps, stagingKey: string) {
-  try {
-    const store = objectStorage(deps)
-    await store.remove(stagingKey)
-    if (await store.exists(stagingKey)) throw new Error('staging object still present after delete')
-    await call(deps.serviceRpc, 'file_managed_upload_closed', { p_key: stagingKey, p_evidence: 'staging-absent' })
-  } catch (error) {
-    deps.log('staging_delete_failed', { key: stagingKey, error: String(error) })
-  }
 }
 
 // ── forward ──────────────────────────────────────────────────────────────────────
@@ -747,36 +735,75 @@ async function abandonExpiredParts(deps: AttachmentsDeps, remaining: number, gua
   return stale.length
 }
 
+type CopyLeftover = { staging_key: string; kind: 'abandoned' | 'registered' | 'orphaned'; copy_key: string; upload_id: string | null
+  object_owned: boolean; blob_object: string | null; blob_size: number | null }
+
 /**
- * Direct uploads abandoned past their release time may have left bytes at their final object. Each claimed permit's
- * multipart upload is aborted, its object deleted unless a blob owns it, and the outcome recorded only once the store
- * confirms it; a failure is tried again in a later round.
+ * An upload's leftover copy (file_private.upload_copy_leftovers): an abandoned upload's bytes, a registered upload's
+ * staging copy, or the staging copy of a collected blob. A registered copy is removed only when its blob's object holds
+ * the same bytes: both exist with the blob's size and the same provider checksum, which a server-side copy keeps.
+ * Otherwise it is kept and logged. The outcome is recorded only once the store confirms it.
  */
-async function cleanupDirectUploads(deps: AttachmentsDeps, remaining: number, guard: () => Promise<void>) {
+async function verdictFor(store: AttachmentObjectStorage, row: CopyLeftover): Promise<{ remove: boolean; evidence: string }> {
+  if (row.kind === 'abandoned') {
+    return row.object_owned ? { remove: false, evidence: 'abandoned:object-owned' }
+      : { remove: true, evidence: row.copy_key.startsWith('u/') ? 'abandoned:object-deleted' : 'abandoned:staging-deleted' }
+  }
+  if (row.kind === 'orphaned') return { remove: true, evidence: 'orphaned:deleted' }
+  if (!store.fingerprint || !row.blob_object || row.blob_size == null) throw new Error('a registered copy on a store that cannot verify it')
+  const copy = await store.fingerprint(row.copy_key)
+  if (!copy) return { remove: false, evidence: 'copy:absent' }
+  const kept = await store.fingerprint(row.blob_object)
+  if (!kept) return { remove: false, evidence: 'kept:object-missing' }
+  if (copy.size !== row.blob_size || kept.size !== row.blob_size) return { remove: false, evidence: 'kept:size-mismatch' }
+  if (copy.checksum !== kept.checksum) return { remove: false, evidence: 'kept:checksum-mismatch' }
+  return { remove: true, evidence: 'copy:verified-deleted' }
+}
+
+async function cleanupUploadCopies(deps: AttachmentsDeps, remaining: number, guard: () => Promise<void>) {
   if (remaining <= 0) return 0
   await guard()
   const limit = Math.min(remaining, 50)
-  const rows = ((await call(deps.serviceRpc, 'file_direct_upload_cleanup_claim', { p_limit: limit })) ?? []) as
-    Array<{ staging_key: string; object_key: string; upload_id: string | null; object_owned: boolean }>
-  if (!Array.isArray(rows) || rows.length > limit) throw new Refusal(503, 'not_configured', 'Direct upload GC claim exceeds its bound')
   const store = objectStorage(deps)
+  const rows = ((await call(deps.serviceRpc, 'file_upload_cleanup_claim', { p_limit: limit, p_registered: !!store.fingerprint })) ?? []) as CopyLeftover[]
+  if (!Array.isArray(rows) || rows.length > limit) throw new Refusal(503, 'not_configured', 'Upload cleanup claim exceeds its bound')
   for (const row of rows) {
     await guard()
     try {
-      if (row.upload_id) {
+      if (row.kind === 'abandoned' && row.upload_id) {
         if (!store.parts) throw new Error('a multipart upload on a store without parts')
-        await store.parts.abandon(row.object_key, row.upload_id)
+        await store.parts.abandon(row.copy_key, row.upload_id)
       }
-      if (!row.object_owned) {
-        await store.remove(row.object_key)
-        if (await store.exists(row.object_key)) throw new Error('object still present after delete')
+      const verdict = await verdictFor(store, row)
+      if (verdict.evidence.startsWith('kept:')) { deps.log('gc_copy_kept', { key: row.staging_key, reason: verdict.evidence }); continue }
+      if (verdict.remove) {
+        await store.remove(row.copy_key)
+        if (await store.exists(row.copy_key)) throw new Error('copy still present after delete')
       }
-      await call(deps.serviceRpc, 'file_direct_upload_cleanup_done', { p_key: row.staging_key, p_object_deleted: !row.object_owned })
+      await call(deps.serviceRpc, 'file_upload_cleanup_done', { p_key: row.staging_key, p_evidence: verdict.evidence })
     } catch (error) {
-      deps.log('gc_direct_cleanup_failed', { key: row.staging_key, error: String(error) })
+      deps.log('gc_copy_cleanup_failed', { key: row.staging_key, error: String(error) })
     }
   }
   return rows.length
+}
+
+/**
+ * A dry run of the copy cleanup for an operator: the next page of candidates in key order with the verdict each would
+ * get. Reads metadata only; removes and records nothing.
+ */
+export async function auditUploadCopies(deps: AttachmentsDeps, after: string | null, limit: number) {
+  const store = objectStorage(deps)
+  const rows = ((await call(deps.serviceRpc, 'file_upload_cleanup_audit', { p_after: after, p_limit: limit })) ?? []) as CopyLeftover[]
+  const out = []
+  for (const row of rows) {
+    let verdict: string
+    try {
+      verdict = row.kind === 'registered' && !store.fingerprint ? 'kept:unverifiable' : (await verdictFor(store, row)).evidence
+    } catch (error) { verdict = 'error:' + String(error).slice(0, 200) }
+    out.push({ staging_key: row.staging_key, kind: row.kind, bytes: row.blob_size, verdict })
+  }
+  return { rows: out, next: rows.length ? rows[rows.length - 1].staging_key : null }
 }
 
 export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-accept' = 'kick',
@@ -835,7 +862,7 @@ export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-acce
     // A disabled or busy collector cannot delete via this second path either.
     const remaining = run.batch_limit - claimed.length
     const abandoned = await abandonExpiredParts(deps, remaining, guard)
-    const cleaned = await cleanupDirectUploads(deps, remaining - abandoned, guard)
+    const cleaned = await cleanupUploadCopies(deps, remaining - abandoned, guard)
     if (sweepStaging && remaining > abandoned + cleaned) await sweepStaging(remaining - abandoned - cleaned, guard)
     completed = true
     return result

@@ -105,12 +105,13 @@ describe('direct upload', () => {
     expect(Number.isNaN(Date.parse(error.detail ?? ''))).toBe(false)
     // Past its release time the abandoned permit is claimed for cleanup; once recorded, a new permit is issued.
     await db.query("UPDATE chat.file_transfer_reservations SET release_at=now()-interval '1 second' WHERE id=$1", [first.id])
-    const claimed = (await db.query('SELECT * FROM chat.file_direct_upload_cleanup_claim(50)')).rows.filter(r => r.staging_key === first.staging_key)
-    expect(claimed).toEqual([{ staging_key: first.staging_key, object_key: 'u/' + owner + '/' + digest, upload_id: null, object_owned: false }])
+    const claimed = (await db.query('SELECT * FROM chat.file_upload_cleanup_claim(50,true)')).rows.filter(r => r.staging_key === first.staging_key)
+    expect(claimed).toEqual([{ staging_key: first.staging_key, kind: 'abandoned', copy_key: 'u/' + owner + '/' + digest, upload_id: null,
+      object_owned: false, blob_object: null, blob_size: null }])
     await user(owner)
     expect((await reject(ISSUE, [randomUUID(), group, owner, 60, 'application/octet-stream', digest])).hint).toBe('file_transfer_upload_in_progress')
     await service()
-    await db.query('SELECT chat.file_direct_upload_cleanup_done($1,true)', [first.staging_key])
+    await db.query("SELECT chat.file_upload_cleanup_done($1,'abandoned:object-deleted')", [first.staging_key])
     expect((await db.query('SELECT staging_deleted,close_evidence FROM chat.file_transfer_uploads WHERE staging_key=$1', [first.staging_key])).rows[0])
       .toEqual({ staging_deleted: true, close_evidence: 'abandoned:object-deleted' })
     expect((await issue(digest)).status).toBe('upload')
@@ -120,7 +121,7 @@ describe('direct upload', () => {
     const digest = sha()
     const direct = await issue(digest)
     await db.query("UPDATE chat.file_transfer_reservations SET release_at=now()-interval '1 second' WHERE id=$1", [direct.id])
-    expect((await db.query('SELECT * FROM chat.file_direct_upload_cleanup_claim(50)')).rows.some(r => r.staging_key === direct.staging_key)).toBe(true)
+    expect((await db.query('SELECT * FROM chat.file_upload_cleanup_claim(50,true)')).rows.some(r => r.staging_key === direct.staging_key)).toBe(true)
     // An older client of the same account registers the same bytes through staging while the cleanup is deleting.
     await user(owner)
     const legacy = (await db.query('SELECT chat.file_managed_upload_as($1,$2,$3,$4) AS r', [randomUUID(), group, owner, 60])).rows[0].r.staging_key
@@ -128,7 +129,7 @@ describe('direct upload', () => {
     const refused = await reject('SELECT * FROM chat.file_blob_register($1,$2,$3,$4,$5)', [owner, legacy, digest, 60, 'application/octet-stream'])
     expect(refused.hint).toBe('file_transfer_upload_in_progress')
     expect((await db.query("SELECT count(*)::int AS n FROM chat.file_blobs WHERE bucket_id='oss' AND object_name=$1", ['u/' + owner + '/' + digest])).rows[0].n).toBe(0)
-    await db.query('SELECT chat.file_direct_upload_cleanup_done($1,true)', [direct.staging_key])
+    await db.query("SELECT chat.file_upload_cleanup_done($1,'abandoned:object-deleted')", [direct.staging_key])
     const blob = await register(legacy, digest)
     expect(blob).toMatchObject({ object_name: 'u/' + owner + '/' + digest, created: true })
   })

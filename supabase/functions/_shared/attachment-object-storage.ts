@@ -37,6 +37,18 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
       if (response.status !== 200) throw new ObjectStorageError(response.status, null, 'Could not stage attachment bytes')
     },
     exists: (key, signal) => ossExists(oss, signal ? (input, init) => fetch(input, { ...init, signal }) : fetch, key),
+    // OSS keeps x-oss-hash-crc64ecma on every object, and CopyObject keeps it.
+    fingerprint: async (key) => {
+      const response = await ossRequest(oss, fetch, { method: 'HEAD', key, internal: true })
+      await response.body?.cancel()
+      if (response.status === 404) return null
+      const size = Number(response.headers.get('content-length'))
+      const checksum = response.headers.get('x-oss-hash-crc64ecma')
+      if (response.status !== 200 || !Number.isSafeInteger(size) || !checksum) {
+        throw new ObjectStorageError(response.status === 200 ? 502 : response.status, null, `OSS HEAD ${key}: ${response.status}`)
+      }
+      return { size, checksum }
+    },
     remove: (key, signal) => ossDelete(oss, signal ? (input, init) => fetch(input, { ...init, signal }) : fetch, key),
     sign: async (key, image, now, permit) => {
       if(permit?.direct) {
@@ -259,6 +271,20 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
       }
       await response.body?.cancel()
       return true
+    },
+    // Storage answers a HEAD with the object's size and ETag, the MD5 of its content, which a server-side copy keeps.
+    fingerprint: async (key) => {
+      const response = await request(objectUrl(key), { method: 'HEAD' })
+      try { await check(response) }
+      catch (error) {
+        if (error instanceof ObjectStorageError && error.status === 404) return null
+        throw error
+      }
+      await response.body?.cancel()
+      const size = Number(response.headers.get('content-length'))
+      const checksum = response.headers.get('etag')
+      if (!Number.isSafeInteger(size) || !checksum) throw new ObjectStorageError(502, null, 'Supabase Storage HEAD answered without size or ETag')
+      return { size, checksum }
     },
     remove: async (key, signal) => {
       const response = await request(base + '/storage/v1/object/' + encodeURIComponent(config.bucket), {
