@@ -5,8 +5,10 @@
 from `auth.uid()`, never a payload owner. The caller must be a live human Auth
 principal. `created` is true only for the transaction that inserts the row.
 
-Required nonempty strings are `device_id`, `machine_id`, `tier`, `label`,
-`hostname` and `platform`. `capabilities` is an object. `session_digest` is an
+Required nonempty strings are `device_id`, `machine_id`, `tier`, `hostname`
+and `platform`. `label` is a required string that may be empty: an empty label
+on a new row takes the platform default name (`Linux 1`), and an existing row
+keeps its stored name. `capabilities` is an object. `session_digest` is an
 optional array; omitting it on an existing row preserves the stored digest.
 `reserve_only` is an optional boolean, default false. Owner, timestamps, status,
 custom-label markers and Auth session IDs are not accepted from the caller.
