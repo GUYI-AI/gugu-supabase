@@ -138,7 +138,7 @@ export interface PostForm {
  * x-oss-forbid-overwrite:暂存对象写进去以后同一张表单不能再换掉它(重传回 409 FileAlreadyExists,客户端当作已经传好)——
  * 否则提交读完、复制之前能换内容(复核 L11 实测,gugu-base notes/reviews/2026-10-16-attachments-fn-sb126-982ebb88.md)。
  */
-export async function postObjectForm(cfg: OssConfig, opts: { key: string; maxBytes?: number; expiresInSeconds?: number; date?: Date }): Promise<PostForm> {
+export async function postObjectForm(cfg: OssConfig, opts: { key: string; maxBytes?: number; minBytes?: number; expiresInSeconds?: number; date?: Date }): Promise<PostForm> {
   const key = objectKey(cfg, opts.key)
   const date = opts.date ?? new Date()
   const ts = isoBasic(date)
@@ -152,7 +152,7 @@ export async function postObjectForm(cfg: OssConfig, opts: { key: string; maxByt
       { 'x-oss-signature-version': 'OSS4-HMAC-SHA256' },
       { 'x-oss-credential': credential },
       { 'x-oss-date': ts },
-      ['content-length-range', 1, opts.maxBytes ?? MAX_ATTACHMENT_BYTES],
+      ['content-length-range', opts.minBytes ?? 1, opts.maxBytes ?? MAX_ATTACHMENT_BYTES],
       ['eq', '$key', key],
       { 'x-oss-forbid-overwrite': 'true' },
     ],

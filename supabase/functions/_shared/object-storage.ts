@@ -39,8 +39,13 @@ export interface MultipartStorage {
 /** Primary blob storage. Database bucket tag "oss" is retained for existing records. */
 export interface AttachmentObjectStorage {
   uploadBounds(requestedBytes: number, requestedSeconds: number): Promise<{maxBytes:number;expiresSeconds:number}>
-  upload(key: string, now: Date, limits?: { maxBytes: number; expiresSeconds: number }): Promise<UploadPlan>
+  /** `minBytes` (default 1) is the provider's lower size bound, where it enforces one. */
+  upload(key: string, now: Date, limits?: { maxBytes: number; minBytes?: number; expiresSeconds: number }): Promise<UploadPlan>
+  /** Whether the provider enforces an upload's size bounds itself (signed policy); otherwise only a later read checks it. */
+  sizeEnforced?: boolean
   inspect(key: string, limit: number, retainBytes?: number): Promise<InspectedObject>
+  /** A ranged read of the object's first `bytes` bytes and its whole size; null when there is no object. */
+  head(key: string, bytes: number): Promise<{ size: number; head: Uint8Array } | null>
   /** Server-side copy of the inspected revision; a source that is no longer that revision fails with status 412. */
   promote(source: string, destination: string, revision: string, headers: Record<string, string>): Promise<void>
   put(key: string, bytes: Uint8Array): Promise<void>

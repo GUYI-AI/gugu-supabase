@@ -12,7 +12,7 @@ function fixture() {
   const serviceRpc=vi.fn<AttachmentsDeps['serviceRpc']>(async(fn)=>({data:fn==='file_temporary_host_for'
     ?{object_name:object,ciphertext_bytes:128,state:'uploading'}:fn==='file_temporary_key_for'?key:{},error:null}))
   const objects={uploadBounds:vi.fn(async()=>({maxBytes:128,expiresSeconds:120})),upload:vi.fn(async()=>({url:'https://origin.test',fields:{key:object},expiresAt:'2026-10-24T00:02:00Z'})),
-    inspect:vi.fn(async()=>({bytes:new Uint8Array(128),sizeBytes:128,sha256:sha,revision:'immutable'})),promote:vi.fn(),put:vi.fn(),exists:vi.fn(),remove:vi.fn(),
+    inspect:vi.fn(async()=>({bytes:new Uint8Array(128),sizeBytes:128,sha256:sha,revision:'immutable'})),promote:vi.fn(),head:vi.fn(),put:vi.fn(),exists:vi.fn(),remove:vi.fn(),
     sign:vi.fn(async()=>({url:'https://origin.test/cipher',thumbUrl:null,expiresAt:'2026-10-24T00:01:00Z'})),invalidate:vi.fn()}
   const deps:AttachmentsDeps={objects,userRpc,serviceRpc,fetch:vi.fn(),storageSignedUrl:vi.fn(),storageRemove:vi.fn(),now:()=>new Date('2026-10-24T00:00:00Z'),uuid:()=>download,log:vi.fn()}
   return {deps,objects,userRpc,serviceRpc}

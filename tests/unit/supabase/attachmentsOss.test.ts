@@ -315,7 +315,7 @@ function fakes(opts: {
       if (fn === 'file_blob_gc_run_begin') return { data: { acquired: true, token: '11111111-1111-4111-8111-111111111111', batch_limit: 50, concurrency: 1 }, error: null }
       if (fn === 'file_blob_gc_run_renew' || fn === 'file_blob_gc_run_end') return { data: true, error: null }
       if (fn==='file_managed_upload_for') {controls.push({as:'service',fn,args});return {data:{max_bytes:MAX_ATTACHMENT_BYTES},error:null}}
-      if (fn==='file_managed_upload_registered'||fn==='file_managed_upload_closed'||fn==='file_transfer_expire'||fn==='file_temporary_expire'||fn==='file_managed_upload_parts_claim') {controls.push({as:'service',fn,args});return {data:null,error:null}}
+      if (fn==='file_managed_upload_registered'||fn==='file_managed_upload_closed'||fn==='file_transfer_expire'||fn==='file_temporary_expire'||fn==='file_managed_upload_parts_claim'||fn==='file_direct_upload_cleanup_claim') {controls.push({as:'service',fn,args});return {data:null,error:null}}
       if (fn==='file_transfer_settings') {controls.push({as:'service',fn,args});return {data:{},error:null}}
       rpcs.push({ as: 'service', fn, args })
       if (fn === 'file_blob_register') {
@@ -453,7 +453,7 @@ describe('提交', () => {
     expect(rpcs[0]!.args).toMatchObject({ p_sha256: createHash('sha256').update(bytes).digest('hex'), p_size_bytes: size })
   })
 
-  it('读暂存(内网)→ 自己算 sha256 → 复制到 <aa>/<sha256>(图片类型、一年 immutable)→ 登记 → 删掉暂存、预留已结清 → 以调用者身份发消息', async () => {
+  it('读暂存(内网)→ 自己算 sha256 → 复制到 u/<上传者>/<sha256>(图片类型、一年 immutable)→ 登记 → 删掉暂存、预留已结清 → 以调用者身份发消息', async () => {
     const bytes = pngBytes()
     const f = fakes({ object: bytes })
     const { deps, calls, rpcs } = f
@@ -464,8 +464,8 @@ describe('提交', () => {
     expect(calls.slice(3).map((c) => `${c.method} ${new URL(c.url).pathname}`)).toEqual([`DELETE /${STAGING}`, `HEAD /${STAGING}`])
     expect(calls.slice(0, 3).map((c) => `${c.method} ${c.url.replace(/\?.*$/, '')}`)).toEqual([
       `GET https://gugu-files-test.oss-cn-wulanchabu-internal.aliyuncs.com/${STAGING}`,
-      `PUT https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/${sha.slice(0, 2)}/${sha}`,
-      `HEAD https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/${sha.slice(0, 2)}/${sha}`,
+      `PUT https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/u/${USER}/${sha}`,
+      `HEAD https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/u/${USER}/${sha}`,
     ])
     expect(calls[1]!.headers).toMatchObject({
       'x-oss-copy-source': `/gugu-files-test/${STAGING}`, 'x-oss-copy-source-if-match': '"E1"', 'x-oss-metadata-directive': 'REPLACE', 'Content-Type': 'image/png', 'Cache-Control': IMMUTABLE,
@@ -527,7 +527,7 @@ describe('提交', () => {
   it('复制和登记之间回收把同一个 sha 的旧 blob 收完、删了对象(登记新建一行):发布前看一眼,不在就再复制一次;复用已有的行不看', async () => {
     const bytes = pngBytes()
     const sha = createHash('sha256').update(bytes).digest('hex')
-    const final = `${sha.slice(0, 2)}/${sha}`
+    const final = `u/${USER}/${sha}`
     const raced = fakes({ object: bytes, afterRegister: (b) => void b.finals.clear() })
     await handleCommit(raced.deps, USER, commitBody())
     expectManagedCommit(raced, 'attachment_commit')
@@ -703,7 +703,7 @@ describe('直传表单、签名链接、回收', () => {
   it('isolates upload, commit, signatures and GC in the configured directory while keeping database keys logical', async () => {
     const bytes = pngBytes()
     const sha = await sha256Hex(bytes)
-    const logical = `${sha.slice(0, 2)}/${sha}`
+    const logical = `u/${USER}/${sha}`
     const f = fakes({ object: bytes, claimed: [{ blob_id: 'b1', claim_token: 't1', bucket_id: 'oss', object_name: logical, content_type: 'image/png' }] })
     f.deps.oss = { ...OSS, objectPrefix: 'production' }
     f.deps.cdn = { ...CDN, objectPrefix: 'production' }
