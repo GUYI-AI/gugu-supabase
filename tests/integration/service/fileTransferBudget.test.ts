@@ -7,7 +7,7 @@ const settings = {
   storage_global_bytes: 1000, storage_account_bytes: 800, storage_group_bytes: 700,
   download_global_bytes: 1000, download_account_bytes: 800, download_group_bytes: 700,
   upload_permit_seconds: 120, upload_edge_seconds:400, upload_sign_seconds:900, upload_inflight_seconds:600,
-  sign_window_seconds: 60, sign_account_count: 100, sign_group_count: 100,
+  sign_window_seconds: 60, sign_account_count: 100, sign_group_count: 100, download_log_window_seconds: 3600,
   file_max_bytes: 600,
 }
 let db: pg.Client
@@ -35,6 +35,12 @@ async function object(bytes: number, _days=0) {
   await db.query("INSERT INTO chat.file_transfer_storage(id,bucket_id,object_name,size_bytes) VALUES($1,'oss',$2,$3)", [id, randomUUID(), bytes])
   await db.query('INSERT INTO chat.file_transfer_storage_refs(storage_id,chat_id,account_id) VALUES($1,$2,$3)', [id, group, owner])
   return id
+}
+// The operator closure, with a cutoff just after this capability's expiry so other suites' rows are left alone.
+async function settleDownload(id: string) {
+  await db.query("UPDATE chat.file_transfer_reservations SET expires_at=now()-interval '1 year' WHERE id=$1",[id])
+  await db.query(`SELECT chat.file_transfer_downloads_closed((SELECT expires_at+interval '1 millisecond'
+    FROM chat.file_transfer_reservations WHERE id=$1),ARRAY['cdn','oss'],'logs:test')`,[id])
 }
 async function registeredUpload(sha = 'ab'.repeat(32), bytes = 60, actor = owner) {
   await user(actor)
@@ -80,15 +86,14 @@ describe('atomic transfer budgets', () => {
   })
   it('keeps ledger usage equal to holds and UTC-month observations through reconciliation and deletion',async()=>{
     const id=randomUUID()
-    await reserve(100,'download',owner,group,id,'ledger lifecycle')
+    await reserve(100,'download',owner,group,id,'object:'+await object(100))
     const usage=async()=>Promise.all(['global','account','group'].map(async(scope)=>Number((await db.query(
       'SELECT chat.file_transfer_usage($1,$2,$3) AS n',['download',scope,scope==='global'?'*':scope==='account'?owner:group])).rows[0].n)))
     const initial=await usage()
     const at=(await db.query('SELECT now() AS t')).rows[0].t
     await db.query('SELECT chat.file_transfer_observe($1,$2,40,$3)',['ledger-first',id,at])
     expect(await usage()).toEqual(initial)
-    await db.query("UPDATE chat.file_transfer_reservations SET expires_at=now()-interval '1 second' WHERE id=$1",[id])
-    await db.query('SELECT chat.file_transfer_settle($1)',[id])
+    await settleDownload(id)
     expect(await usage()).toEqual(initial.map(n=>n-60))
     await db.query('SELECT chat.file_transfer_observe($1,$2,80,$3)',['ledger-late',id,at])
     expect(await usage()).toEqual(initial.map(n=>n+20))
@@ -103,11 +108,11 @@ describe('atomic transfer budgets', () => {
   it('releases settled holds into the observation month and releases cancelled pending holds',async()=>{
     const id=randomUUID(),cancelled=randomUUID()
     const baseline=Number((await db.query("SELECT chat.file_transfer_usage('download','account',$1) AS n",[owner])).rows[0].n)
-    await reserve(100,'download',owner,group,id,'monthly ledger')
-    await db.query("UPDATE chat.file_transfer_reservations SET created_at=now()-interval '40 days',expires_at=now()-interval '1 second' WHERE id=$1",[id])
+    await reserve(100,'download',owner,group,id,'object:'+await object(100))
+    await db.query("UPDATE chat.file_transfer_reservations SET created_at=now()-interval '40 days' WHERE id=$1",[id])
     await db.query("SELECT chat.file_transfer_observe($1,$2,40,now()-interval '39 days')",['ledger-old-month',id])
     await db.query("SELECT chat.file_transfer_observe($1,$2,20,now())",['ledger-this-month',id])
-    await db.query('SELECT chat.file_transfer_settle($1)',[id])
+    await settleDownload(id)
     expect(Number((await db.query("SELECT chat.file_transfer_usage('download','account',$1) AS n",[owner])).rows[0].n)).toBe(baseline+20)
     await reserve(100,'download',owner,group,cancelled,'cancelled ledger')
     await db.query("UPDATE chat.file_transfer_reservations SET state='cancelled' WHERE id=$1",[cancelled])
@@ -142,7 +147,7 @@ describe('atomic transfer budgets', () => {
     expect((await db.query('SELECT staging_deleted,close_evidence FROM chat.file_transfer_uploads WHERE staging_key=$1',[permit.staging_key])).rows[0]).toEqual({staging_deleted:true,close_evidence:'provider-terminal-and-absence:fixture'})
     expect(Number((await db.query("SELECT chat.file_transfer_usage('upload','global','*') AS n")).rows[0].n)-baselineGlobalStorage).toBe(0)
   })
-  it('closes only expired unobserved downloads whose signing paths the operator covered', async () => {
+  it('settles expired downloads, observed or not, whose signing paths the operator covered', async () => {
     // Keep every boundary relative to the transaction clock, including an expiry exactly at the cutoff.
     const cutoff = "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' - interval '1 day'"
     const close = `SELECT chat.file_transfer_downloads_closed((${cutoff}), $1, $2) AS n`
@@ -172,9 +177,13 @@ describe('atomic transfer budgets', () => {
     for (const evidence of [null, '', '  ', 'x'.repeat(161)]) {
       expect((await reject(close,[['oss'],evidence])).message).toMatch(/evidence/)
     }
-    for (const until of [null, 'infinity', 'tomorrow']) {
+    // A cutoff inside the provider log delivery window could leave a late record out.
+    for (const until of [null, 'infinity', 'tomorrow', new Date(Date.now()-30*60_000).toISOString()]) {
       expect((await reject('SELECT chat.file_transfer_downloads_closed($1,$2,$3)',[until,['oss'],'logs:test'])).message).toMatch(/cutoff/)
     }
+    await db.query("UPDATE chat.file_transfer_limits SET settings=settings-'download_log_window_seconds' WHERE scope='global'")
+    expect((await reject(close,[['oss'],'logs:test'])).message).toMatch(/cutoff/)
+    await db.query("UPDATE chat.file_transfer_limits SET settings=settings||$1::jsonb WHERE scope='global'",[{download_log_window_seconds:3600}])
     // Signed before this UTC month, these unsettled holds no longer count against it; closure settles them.
     const held = async () => Number((await db.query("SELECT chat.file_transfer_usage('download','account',$1) AS n",[owner])).rows[0].n)
     const open = async () => Number((await db.query("SELECT count(*) AS n FROM chat.file_transfer_reservations WHERE id=ANY($1) AND state IN ('reserved','issued')",[[permanent,temporary]])).rows[0].n)
@@ -183,17 +192,16 @@ describe('atomic transfer budgets', () => {
     expect((await db.query(close,[['cdn'],'logs:cdn'])).rows[0].n).toBe(0)
     expect((await db.query(close,[['oss'],'logs:direct'])).rows[0].n).toBe(1)
     expect(await open()).toBe(1)
-    expect((await db.query(close,[['cdn','oss'],'logs:both'])).rows[0].n).toBe(1)
+    expect((await db.query(close,[['cdn','oss'],'logs:both'])).rows[0].n).toBe(2)
     expect((await db.query(close,[['oss','cdn'],'logs:retry'])).rows[0].n).toBe(0)
     expect(await open()).toBe(0)
     expect(await held()).toBe(initial)
     const state = async (id: string) => (await db.query('SELECT state,close_evidence FROM chat.file_transfer_reservations WHERE id=$1',[id])).rows[0]
     expect(await state(temporary)).toEqual({state:'settled',close_evidence:'logs:direct'})
-    for (const id of [...excluded, observed]) expect(await state(id)).toEqual({state:'issued',close_evidence:null})
+    expect(await state(observed)).toEqual({state:'settled',close_evidence:'logs:both'})
+    for (const id of excluded) expect(await state(id)).toEqual({state:'issued',close_evidence:null})
 
     // Settled downloads count only their observations in this UTC month.
-    await db.query('SELECT chat.file_transfer_settle($1)',[observed])
-    expect(await held()).toBe(initial)
     await db.query(`SELECT chat.file_transfer_observe('prior-month',$1,12,(${cutoff}))`,[permanent])
     expect(await held()).toBe(initial)
     await db.query("SELECT chat.file_transfer_observe('current-month',$1,18,now())",[permanent])

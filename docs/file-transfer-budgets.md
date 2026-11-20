@@ -6,7 +6,7 @@ This release adds the budget boundary to the existing attachments service. It do
 
 | Rule | Enforcement | Evidence |
 | --- | --- | --- |
-| Global monthly download budget | Reserve the object's verified length before signing; one transaction checks global, account and source-group headroom. UTC months. Pending capabilities remain held across month boundaries. | `fileTransferBudget.test.ts`, `fileTransferConcurrency.test.ts` |
+| Global monthly download budget | Reserve the object's verified length before signing; one transaction checks global, account and source-group headroom. UTC months. A pending capability is held in the UTC month it was signed. | `fileTransferBudget.test.ts`, `fileTransferConcurrency.test.ts` |
 | Account/group budgets | The authenticated human account pays for its Agents. Topics use the source group. Failed reservations leave no partial debit. | Same integration suites, `topicSourceResources.test.ts` |
 | Global/account/group storage | Count physical inventory, referenced objects and pending upload capacity before issuing a permit. Forwarding and publication also check receiving scope. | Same integration suites |
 | Short-lived downloads | The existing CDN Type A / Storage signer issues a 60-second capability after reservation. CDN authentication lifetime must be declared correctly; a request-rate limit is optional. | `fileTransferCore.test.ts`, `attachmentStorageConfig.test.ts` |
@@ -42,6 +42,7 @@ Downloads do not acquire the installation-wide storage/inventory/GC advisory loc
 | `upload_edge_seconds`, `upload_sign_seconds`, `upload_inflight_seconds` | The three bounds that end an upload hold; see [release time](#upload-release-time). Required before issuing and before migration `20261120000000` |
 | `download_link_bits_per_second` (optional) | Omit for no declared request-rate limit. If present, use 819200–838860800 bit/s; direct OSS signatures bind it. CDN/Storage edge throttles are independently provisioned and are not installed or proved by this value. |
 | `sign_window_seconds`, `sign_account_count`, `sign_group_count` | New download-signature rate window and count limits |
+| `download_log_window_seconds` | The provider log delivery window; a download closure cutoff must be at least this far in the past. Required by closure, not by signing |
 | `inventory_ready` | Initially absent/false; enable only after a complete trusted physical inventory and scope audit |
 | `paused` | Stop new upload/download reservations immediately; already issued bearer capabilities remain usable within their provider rules |
 
@@ -76,9 +77,9 @@ Set `GUGU_FILE_LOG_DOMAIN` to the exact source domain and `GUGU_FILE_LOG_OBJECT_
 
 HEAD requests are excluded. OSS CDN-origin requests (`sync_request='cdn'`) are excluded from the user's download ledger to avoid charging the same transfer twice; reconcile origin charges separately. Response-body bytes do not equal every provider billing item: headers, CDN billing adjustments, origin traffic, requests and storage belong in the provider invoice comparison. Do not describe this ledger as a hard currency cap.
 
-If logs are late or incomplete, keep outstanding reservations and pause issuance before unsafe headroom accumulates. Do not refund on expiry, one successful log record, a client completion message, or a partial range. After the provider's complete delivery window is independently verified, an operator may call service-only `chat.file_transfer_settle(download_id)` for an expired capability with observations. That call is an operational assertion of finality, not a log-completeness detector. Later observations are still accepted and charged in their observed UTC month. Downloads with no final evidence remain conservatively held.
+If logs are late or incomplete, keep outstanding reservations and pause issuance before unsafe headroom accumulates. Do not refund on expiry, one successful log record, a client completion message, or a partial range. A reservation that is never settled counts its signed bytes in the UTC month it was signed and stops counting the month after, so stopped imports cost accuracy, never a budget that does not come back.
 
-For expired downloads with **no observation records**, the service role can call `chat.file_transfer_downloads_closed(p_until, p_sources, p_evidence)`. The cutoff is exclusive and cannot be in the future. The call covers **all outstanding eligible reservations from the beginning of the ledger up to that cutoff**. Verify complete imports for the whole prefix, including the final bytes of responses admitted before link expiry. An export covering only a recent interval cannot justify closing older outstanding rows. A failed or interrupted import leaves the holds in place.
+The service role settles downloads with `chat.file_transfer_downloads_closed(p_until, p_sources, p_evidence)`. It settles **every outstanding eligible reservation that expired before the cutoff, from the beginning of the ledger**, observed or not; a settled download counts only its observations. The cutoff is exclusive and must lie at least `download_log_window_seconds` in the past. Pass the watermark your own imports cover, minus that window. Verify complete imports for the whole prefix, including the final bytes of responses admitted before link expiry. An export covering only a recent interval cannot justify closing older outstanding rows. A failed or interrupted import leaves the holds in place.
 
 | Logical object bucket | Sources the operator must verify |
 | --- | --- |
@@ -88,7 +89,7 @@ For expired downloads with **no observation records**, the service role can call
 
 The database records a logical bucket. The community adapter can sign native Storage reads even for the logical `oss` bucket. Check the **physical provider history** for every candidate across all signing deployments, domains and prefixes. If any candidate used native Storage signing during the covered period, or the deployment history is unknown, do not call this function. For a provider or domain change, verify both sides before advancing the cutoff across it. A CDN-free period may count as covered only with independent evidence that no CDN served that period. Exclude CDN-to-origin fetches from end-user bytes as described above.
 
-Supply distinct verified source names and a nonsecret audit reference of 1–160 characters, for example `logs:phys=oss,cdn=on:<period>:<export IDs>:<verifier>`. Keep the full verification record outside the ledger. The call returns the number of newly settled rows and preserves that reference in `close_evidence`. A retry leaves the first reference intact. A zero-byte observation still belongs to the observed-download settlement path. Late provider records continue to debit their observed UTC month. To disable this operation, apply `ops/rollback-file-download-closure.sql`; previously settled rows and evidence are preserved.
+Supply distinct verified source names and a nonsecret audit reference of 1–160 characters, for example `logs:phys=oss,cdn=on:<period>:<export IDs>:<verifier>`. Keep the full verification record outside the ledger. The call returns the number of newly settled rows and preserves that reference in `close_evidence`. A retry leaves the first reference intact. Late provider records continue to debit their observed UTC month. To disable this operation, apply `ops/rollback-file-download-closure.sql`; previously settled rows and evidence are preserved.
 
 ## Direct upload to the owned object
 
