@@ -14,7 +14,7 @@ export function parseTransferLog(source,row,options) {
   if (source==='oss'&&row.sync_request==='cdn') return null // origin cost is reconciled separately, not charged as a second download
   const domain=source==='cdn'?row.domain:row.host
   if (domain!==options.domain) throw new Error('Provider domain differs from the configured source')
-  const raw=source==='cdn'?String(row.uri)+(row.uri_param&&row.uri_param!=='-'?'?'+row.uri_param:''):String(row.request_uri)
+  const raw=source==='cdn'?String(row.uri)+'?'+String(row.uri_param??'').replace(/^\?/,''):String(row.request_uri).replace(/ HTTP\/[\d.]+$/,'') // logs keep the '?' and the protocol
   let url
   try { url=new URL(raw,'https://'+domain) } catch { throw new Error('Invalid provider URI') }
   if(url.hostname!==domain) throw new Error('Provider URI differs from its source domain')
