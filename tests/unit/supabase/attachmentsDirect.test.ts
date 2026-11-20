@@ -42,6 +42,8 @@ function world(opts: { stored?: boolean; busy?: boolean; object?: Uint8Array; si
     const end = Math.min(Number(to), bytes.length - 1)
     return new Response(bytes.slice(Number(from), end + 1), { status: 206, headers: { 'content-range': `bytes ${from}-${end}/${bytes.length}` } })
   }
+  // A content checksum as the provider reports it: equal bytes, equal checksum.
+  const checksum = (bytes: Uint8Array) => String(bytes.reduce((a, b, i) => (a * 31 + b + i) % 1_000_000_007, bytes.length))
   const ossFetch = async (input: string, init: RequestInit = {}) => {
     const url = new URL(input), method = init.method ?? 'GET', headers = Object.fromEntries(new Headers(init.headers).entries())
     if (url.searchParams.has('versioning')) return new Response('<VersioningConfiguration/>', { status: 200 })
@@ -67,7 +69,8 @@ function world(opts: { stored?: boolean; busy?: boolean; object?: Uint8Array; si
     if (method === 'DELETE' && upload) { upload.state = 'aborted'; return new Response(null, { status: 204 }) }
     if (method === 'DELETE') { objects.delete(key); return new Response(null, { status: 204 }) }
     if (method === 'HEAD') return objects.has(key)
-      ? new Response(null, { status: 200, headers: { 'content-length': String(objects.get(key)!.length) } }) : new Response(null, { status: 404 })
+      ? new Response(null, { status: 200, headers: { 'content-length': String(objects.get(key)!.length), 'x-oss-hash-crc64ecma': checksum(objects.get(key)!) } })
+      : new Response(null, { status: 404 })
     if (method === 'GET') return ranged(objects.get(key), headers.range ?? null) ?? new Response('<Error><Code>NoSuchKey</Code></Error>', { status: 404 })
     return new Response('unexpected', { status: 500 })
   }
@@ -82,7 +85,7 @@ function world(opts: { stored?: boolean; busy?: boolean; object?: Uint8Array; si
     }
     const bytes = objects.get(key)
     if (!bytes) return new Response('{"statusCode":"404"}', { status: 400 })
-    if (method === 'HEAD') return new Response(null, { status: 200 })
+    if (method === 'HEAD') return new Response(null, { status: 200, headers: { 'content-length': String(bytes.length), etag: `"${checksum(bytes)}"` } })
     return ranged(bytes, headers.range ?? null)!
   }
   const row = opts.stored ? null : {
@@ -109,7 +112,7 @@ function world(opts: { stored?: boolean; busy?: boolean; object?: Uint8Array; si
     if (fn === 'file_blob_gc_run_begin') return { data: { acquired: true, token: '11111111-1111-4111-8111-111111111111', batch_limit: 50, concurrency: 1 }, error: null }
     if (fn === 'file_blob_gc_run_renew' || fn === 'file_blob_gc_run_end') return { data: true, error: null }
     if (fn === 'file_blob_gc_run_claim' || fn === 'file_managed_upload_parts_claim') return { data: [], error: null }
-    if (fn === 'file_direct_upload_cleanup_claim') return { data: opts.cleanup ?? [], error: null }
+    if (fn === 'file_upload_cleanup_claim') return { data: opts.cleanup ?? [], error: null }
     return { data: null, error: null }
   }
   const userRpc = async (fn: string, args: Record<string, unknown>) => {
@@ -274,31 +277,69 @@ describe('multipart on a direct permit', () => {
   })
 })
 
-describe('gc cleans abandoned direct uploads', () => {
+describe('gc removes upload copies from the ledger', () => {
   const OTHER = `direct/${USER}/44444444-4444-4444-8444-444444444444`, OWNED = `u/${USER}/${'cd'.repeat(32)}`
-  const rows = [
-    { staging_key: KEY, object_key: OBJECT, upload_id: 'U9', object_owned: false },
-    { staging_key: OTHER, object_key: OWNED, upload_id: null, object_owned: true },
-  ]
-  it('aborts the upload, deletes only an object no blob owns, confirms it gone, then records each outcome', async () => {
-    const f = world({ object: png(), cleanup: rows })
+  const STAGED = `staging/${USER}/55555555-5555-4555-8555-555555555555`, FINAL = `ef/${'ef'.repeat(32)}`
+  const abandoned = (key: string, copy: string, owned: boolean, upload: string | null = null) =>
+    ({ staging_key: key, kind: 'abandoned', copy_key: copy, upload_id: upload, object_owned: owned, blob_object: null, blob_size: null })
+  const registered = (key = STAGED) => ({ staging_key: key, kind: 'registered', copy_key: key, upload_id: null, object_owned: false, blob_object: FINAL, blob_size: 64 })
+  it('aborts an abandoned upload, deletes only an object no blob owns, confirms it gone, then records each outcome', async () => {
+    const f = world({ object: png(), cleanup: [abandoned(KEY, OBJECT, false, 'U9'), abandoned(OTHER, OWNED, true)] })
     f.objects.set(OWNED, png())
     await handleGc(f.deps)
-    expect(f.of('file_direct_upload_cleanup_claim')).toEqual([{ p_limit: 50 }])
+    expect(f.of('file_upload_cleanup_claim')).toEqual([{ p_limit: 50, p_registered: true }])
     expect(f.calls.map(c => `${c.method} ${c.key}${c.query.get('uploadId') ? ' ' + c.query.get('uploadId') : ''}`))
       .toEqual([`DELETE ${OBJECT} U9`, `DELETE ${OBJECT}`, `HEAD ${OBJECT}`])
     expect(f.objects.has(OBJECT)).toBe(false)
     expect(f.objects.has(OWNED)).toBe(true)
-    expect(f.of('file_direct_upload_cleanup_done')).toEqual([{ p_key: KEY, p_object_deleted: true }, { p_key: OTHER, p_object_deleted: false }])
+    expect(f.of('file_upload_cleanup_done')).toEqual([{ p_key: KEY, p_evidence: 'abandoned:object-deleted' }, { p_key: OTHER, p_evidence: 'abandoned:object-owned' }])
+  })
+  it('removes a registered staging copy only when its blob object holds the same bytes', async () => {
+    const f = world({ object: png(), cleanup: [registered()] })
+    f.objects.set(STAGED, png()); f.objects.set(FINAL, png())
+    await handleGc(f.deps)
+    expect(f.objects.has(STAGED)).toBe(false)
+    expect(f.objects.has(FINAL)).toBe(true)
+    expect(f.of('file_upload_cleanup_done')).toEqual([{ p_key: STAGED, p_evidence: 'copy:verified-deleted' }])
+  })
+  for (const [why, setup] of [
+    ['its blob object is missing', (o: Map<string, Uint8Array>) => o.delete(FINAL)],
+    ['its blob object is another size', (o: Map<string, Uint8Array>) => o.set(FINAL, new Uint8Array(63))],
+    ['its blob object holds other bytes', (o: Map<string, Uint8Array>) => o.set(FINAL, new Uint8Array(64))],
+  ] as const) {
+    it(`keeps a registered staging copy when ${why}, records nothing and logs it`, async () => {
+      const f = world({ object: png(), cleanup: [registered()] })
+      f.objects.set(STAGED, png()); f.objects.set(FINAL, png())
+      setup(f.objects)
+      await handleGc(f.deps)
+      expect(f.objects.has(STAGED)).toBe(true)
+      expect(f.calls.some(c => c.method === 'DELETE')).toBe(false)
+      expect(f.of('file_upload_cleanup_done')).toEqual([])
+      expect(f.logs).toContain('gc_copy_kept')
+    })
+  }
+  it('records a registered staging copy that is already gone without deleting anything', async () => {
+    const f = world({ object: png(), cleanup: [registered()] })
+    f.objects.set(FINAL, png())
+    await handleGc(f.deps)
+    expect(f.calls.some(c => c.method === 'DELETE')).toBe(false)
+    expect(f.of('file_upload_cleanup_done')).toEqual([{ p_key: STAGED, p_evidence: 'copy:absent' }])
+  })
+  it('verifies a registered copy on Supabase Storage the same way', async () => {
+    const f = world({ object: png(), supabase: true, cleanup: [registered()] })
+    f.objects.set(STAGED, png()); f.objects.set(FINAL, png())
+    await handleGc(f.deps)
+    expect(f.objects.has(STAGED)).toBe(false)
+    expect(f.of('file_upload_cleanup_done')).toEqual([{ p_key: STAGED, p_evidence: 'copy:verified-deleted' }])
   })
   it('a delete the store does not confirm is not recorded, and the next row still runs', async () => {
-    const f = world({ object: png(), cleanup: rows })
+    const f = world({ object: png(), cleanup: [abandoned(KEY, OBJECT, false, 'U9'), abandoned(OTHER, OWNED, true)] })
     const fetch = f.deps.fetch
     f.deps.objects = ossObjectStorage({ oss: OSS, cdn: CDN, inspector: async () => { throw new Error('x') }, fetch: async (url, init) =>
       init?.method === 'DELETE' && !new URL(url).searchParams.has('uploadId') ? new Response('<Error><Code>InternalError</Code></Error>', { status: 500 }) : fetch(url, init) })
     await handleGc(f.deps)
-    expect(f.logs).toContain('gc_direct_cleanup_failed')
-    expect(f.of('file_direct_upload_cleanup_done')).toEqual([{ p_key: OTHER, p_object_deleted: false }])
+    expect(f.logs).toContain('gc_copy_cleanup_failed')
+    expect(f.of('file_upload_cleanup_done')).toEqual([{ p_key: OTHER, p_evidence: 'abandoned:object-owned' }])
   })
 })
 

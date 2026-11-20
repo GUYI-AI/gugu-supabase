@@ -11,8 +11,8 @@ const request = (route: string, body: unknown, token = 'service-fixture-only') =
   method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify(body),
 })
 beforeEach(() => { fixture.rpc.mockReset(); fixture.remove.mockReset() })
-it('restricts GC configuration and status to the service capability', async () => {
-  for (const route of ['gc-configure', 'gc-status']) expect((await fixture.handler!(request(route, {}, 'ordinary-user'))).status).toBe(401)
+it('restricts GC configuration, status and the cleanup dry run to the service capability', async () => {
+  for (const route of ['gc-configure', 'gc-status', 'gc-audit']) expect((await fixture.handler!(request(route, {}, 'ordinary-user'))).status).toBe(401)
   expect(fixture.rpc).not.toHaveBeenCalled()
 })
 it('derives GC credentials at the server and does not accept request replacements', async () => {

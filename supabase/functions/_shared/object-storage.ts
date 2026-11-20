@@ -50,6 +50,11 @@ export interface AttachmentObjectStorage {
   promote(source: string, destination: string, revision: string, headers: Record<string, string>): Promise<void>
   put(key: string, bytes: Uint8Array): Promise<void>
   exists(key: string, signal?: AbortSignal): Promise<boolean>
+  /**
+   * The object's size and the provider's content checksum, from metadata alone (no bytes read); null when there is no
+   * object. Only a store whose server-side copy keeps the checksum has this: a copy and its source then compare equal.
+   */
+  fingerprint?(key: string): Promise<{ size: number; checksum: string } | null>
   remove(key: string, signal?: AbortSignal): Promise<void>
   sign(key: string, image: boolean, now: Date, permit?: DownloadPermit): Promise<{ url: string; thumbUrl: string | null; expiresAt: string; originAvailable?: boolean }>
   invalidate(key: string, image: boolean): Promise<void>
