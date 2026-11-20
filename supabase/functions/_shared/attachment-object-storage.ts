@@ -34,6 +34,7 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
         || /<Status>\s*(Enabled|Suspended)\s*<\/Status>/.test(body)) throw new ObjectStorageError(503,'not_configured','Immutable OSS uploads require a bucket that has never enabled versioning')
       return {maxBytes:requestedBytes,expiresSeconds:requestedSeconds}
     },
+    thumbnails: true,
     upload: (key, date, limits) => postObjectForm(oss, { key, date, maxBytes: limits?.maxBytes ?? MAX_ATTACHMENT_BYTES,
       minBytes: limits?.minBytes, expiresInSeconds: limits?.expiresSeconds }),
     sizeEnforced: true,

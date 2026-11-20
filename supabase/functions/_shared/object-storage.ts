@@ -57,6 +57,8 @@ export interface AttachmentObjectStorage {
   fingerprint?(key: string): Promise<{ size: number; checksum: string } | null>
   remove(key: string, signal?: AbortSignal): Promise<void>
   sign(key: string, image: boolean, now: Date, permit?: DownloadPermit): Promise<{ url: string; thumbUrl: string | null; expiresAt: string; originAvailable?: boolean }>
+  /** The store signs image thumbnails (OSS image processing); a store without this signs originals only. */
+  thumbnails?: true
   invalidate(key: string, image: boolean): Promise<void>
   /** Only a store that can sign each part has this; the others are always uploaded in one request. */
   parts?: MultipartStorage
