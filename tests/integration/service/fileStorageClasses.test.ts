@@ -72,9 +72,12 @@ beforeEach(async()=>{
     await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')",[id,host,member])
   }
   await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Studio Mac','fixture','linux')",[device,host])
-  await db.query("INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at,chat_id) VALUES($1,$2,'root','fixture','/fixture',now(),$3)",[device,host,project])
-  // What publish_device_projects records for a bound project (20261109210000_project_groups).
-  await db.query('INSERT INTO chat.project_groups(chat_id) VALUES($1) ON CONFLICT DO NOTHING',[project])
+  // The host keeps files on its own machine in this group: one of its folders is bound here (20261120130000_group_folders).
+  await db.query("INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) VALUES($1,$2,'root',$3,'/fixture',1,now())",[device,host,project])
+  // The member keeps files on its own machine in this group too, so its images follow its own image retention.
+  const memberDevice=randomUUID()
+  await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'Laptop','fixture','linux')",[memberDevice,member])
+  await db.query("INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) VALUES($1,$2,'notes',$3,'/notes',1,now())",[memberDevice,member,project])
   const baseline=Number((await db.query("SELECT chat.file_transfer_usage('upload','global','*') AS n")).rows[0].n)
   await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=EXCLUDED.settings",[{...settings,storage_global_bytes:baseline+settings.storage_global_bytes}])
 })
@@ -154,7 +157,8 @@ describe('temporary and kept copies on the reference ledger',()=>{
       expect.objectContaining({chat_id:project,project:true,bytes:60,count:1})])
     expect(r.expiring.map((e:{class:string})=>e.class)).toEqual(['image','temporary'])
     expect(r.expiring[0]).toMatchObject({chat_id:project,item_id:expect.any(String),file_name:expect.any(String)})
-    expect(r.machines).toEqual([])
+    // The member's own laptop, holding nothing on it.
+    expect(r.machines).toEqual([{device_id:expect.any(String),label:'Laptop',files:0,bytes:0,temporary_copy_bytes:0}])
     // The idle-expiry policy the panel states: none set → null; set → exactly what chat.file_transfer_expire reads.
     expect(r.expiry).toBeNull()
     await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"large_file_bytes\":1048576,\"large_file_idle_seconds\":2592000}' WHERE scope='global' AND scope_id='*'")

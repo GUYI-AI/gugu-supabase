@@ -57,8 +57,8 @@ beforeEach(async () => {
     VALUES($1,'authenticated','authenticated',$2,now(),now())`, [id, `${id}@remove-device.invalid`])
   for (const id of [device, otherDevice]) await db.query(`INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform)
     VALUES($1,$2,'Device removal fixture','fixture','linux')`, [id, owner])
-  await db.query(`INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at)
-    VALUES($1,$2,'fixture','Fixture','/fixture',now())`, [device, owner])
+  await db.query(`WITH g AS (INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES(gen_random_uuid()::text,'group','fixture',$2::text) RETURNING id)
+      INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) SELECT $1,$2::uuid,'fixture',g.id,'/fixture',1,now() FROM g`, [device, owner])
 })
 afterEach(async () => { if (db) { await db.query('ROLLBACK'); await admin() } })
 
@@ -76,7 +76,7 @@ describe('remove_device with retained archived identities', () => {
     const before = await identities(ids)
     await remove(cascade)
     expect((await db.query('SELECT device_id FROM identity.gugu_devices WHERE device_id=$1', [device])).rows).toEqual([])
-    expect((await db.query('SELECT device_id FROM identity.device_projects WHERE device_id=$1', [device])).rows).toEqual([])
+    expect((await db.query('SELECT device_id FROM identity.chat_folders WHERE device_id=$1', [device])).rows).toEqual([])
     const rows = await identities(ids)
     expect(rows).toHaveLength(ids.length)
     for (const row of rows) {
@@ -164,7 +164,7 @@ describe('remove_device with retained archived identities', () => {
     expect(error.code).toBe('P0001')
     expect(error.message).toBe('DEVICE_HAS_REFERENCES: device still referenced by users')
     expect(await identities([own, foreign])).toEqual(before)
-    expect((await db.query('SELECT device_id FROM identity.device_projects WHERE device_id=$1', [device])).rows).toHaveLength(1)
+    expect((await db.query('SELECT device_id FROM identity.chat_folders WHERE device_id=$1', [device])).rows).toHaveLength(1)
   })
 
   it('a failure after archive and detach rolls back the entire call', async () => {
@@ -174,7 +174,7 @@ describe('remove_device with retained archived identities', () => {
     await db.query('CREATE TRIGGER remove_device_failure BEFORE DELETE ON identity.gugu_devices FOR EACH ROW EXECUTE FUNCTION pg_temp.fail_device_delete()')
     expect((await rejected(() => remove(true))).message).toBe('injected device delete failure')
     expect(await identities([id])).toEqual(before)
-    expect((await db.query('SELECT device_id FROM identity.device_projects WHERE device_id=$1', [device])).rows).toHaveLength(1)
+    expect((await db.query('SELECT device_id FROM identity.chat_folders WHERE device_id=$1', [device])).rows).toHaveLength(1)
     expect((await db.query("SELECT payload FROM realtime.messages WHERE event='identity_removed' AND payload->>'id'=$1", [id])).rows).toEqual([])
   })
 

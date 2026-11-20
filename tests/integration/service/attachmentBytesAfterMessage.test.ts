@@ -109,7 +109,10 @@ describe('the message is there before its bytes', ()=>{
   })
   it('project-image defaults do not replace a declared permanent keep on a repeated registration', async()=>{
     await service()
-    await db.query('INSERT INTO chat.project_groups(chat_id) VALUES($1)',[group])
+    // The sender keeps files on its own machine in this group (20261120130000_group_folders): the image default applies.
+    const machine=randomUUID()
+    await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'fixture','fixture','linux')",[machine,sender])
+    await db.query("INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) VALUES($1,$2,'root',$3,'/fixture',1,now())",[machine,sender,group])
     const send=await declaredSend(sha(),60,false,'permanent')
     await settle(send.key,send.digest)
     expect(await retention(send.message,'permanent')).toBe(true)

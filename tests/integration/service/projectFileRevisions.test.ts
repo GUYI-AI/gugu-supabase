@@ -47,8 +47,7 @@ beforeEach(async()=>{
   await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member'),($1,$4,'member')",[group,owner,member,hiddenReader])
   for(const [id,account] of [[device,owner],[otherDevice,member]]) await db.query(`INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform)
     VALUES($1,$2,'fixture','fixture','linux')`,[id,account])
-  await db.query(`INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at,chat_id)
-    VALUES($1,$2,'root','fixture','/private/root',now(),$3)`,[device,owner,group])
+  await db.query("INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) VALUES($1,$2,'root',$3,'/fixture',1,now())",[device,owner,group])
   await user()
 })
 afterEach(async()=>{await db.query('ROLLBACK')})
@@ -317,20 +316,24 @@ describe('project local metadata and exact references, kept by the device that s
     await user()
     expect(await fails(SHARE,[item,2,randomUUID(),other,owner])).toMatchObject({hint:'file_transfer_read_only',message:'file.bin is kept on the computer that sent it: it can be sent only in its own chat'})
   })
-  it('reads a version as gone while its project is not bound to the chat, and again when it is bound again',async()=>{
+  it('reads a version as gone while its folder is not bound to the chat, and again when it is bound again',async()=>{
     await publish();await service()
-    await db.query('UPDATE identity.device_projects SET chat_id=NULL WHERE device_id=$1',[device])
+    const other=randomUUID()
+    await db.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'group','elsewhere',$2)",[other,owner])
+    await db.query('UPDATE identity.chat_folders SET chat_id=$2 WHERE device_id=$1',[device,other])
     expect(await resolve()).toEqual({status:'gone',availability:'unavailable',expired_at:null})
-    await service();await db.query('UPDATE identity.device_projects SET chat_id=$2 WHERE device_id=$1',[device,group])
+    await service();await db.query('UPDATE identity.chat_folders SET chat_id=$2 WHERE device_id=$1',[device,group])
     expect(await resolve()).toMatchObject({status:'ready'})
-    await service();await db.query('DELETE FROM identity.device_projects WHERE device_id=$1',[device])
+    await service();await db.query('DELETE FROM identity.chat_folders WHERE device_id=$1',[device])
     expect(await resolve()).toEqual({status:'gone',availability:'unavailable',expired_at:null})
     await service()
     expect((await db.query('SELECT item_id FROM chat.workspace_item_versions WHERE item_id=$1',[item])).rows).toHaveLength(1)
   })
   it('reads a device\'s files again when one publication of its projects left the project out and it is back',async()=>{
     await publish();await service()
-    const project={local_project_id:'root',name:'fixture',root_path:'/private/root',created_at:new Date().toISOString(),chat_id:group,group_representative:true,folders:[]}
+    // A released client's project: its root folder holds the versions it named ('root').
+    const project={local_project_id:'root',name:'fixture',root_path:'/private/root',created_at:new Date().toISOString(),chat_id:group,group_representative:true,
+      folders:[{workspace_id:'ws-root',kind:'root',path:'/private/root',attached_at:null}]}
     const PROJECTS='SELECT identity.publish_device_projects($1,$2::jsonb) AS r'
     await user();await db.query(PROJECTS,[device,JSON.stringify([])])
     expect(await resolve()).toEqual({status:'gone',availability:'unavailable',expired_at:null})
@@ -620,7 +623,7 @@ describe('temporary generations reuse managed budgets and private key issuance',
     const transfer=await ready(),before=await generation(transfer)
     if(reason==='expiry') await db.query("UPDATE chat.file_temporary_transfers SET serve_until=now()-interval '1 second' WHERE id=$1",[transfer])
     if(reason==='removal') await db.query('DELETE FROM chat.chat_members WHERE chat_id=$1 AND user_id=$2',[group,member])
-    if(reason==='unbinding') await db.query('UPDATE identity.device_projects SET chat_id=NULL WHERE device_id=$1',[device])
+    if(reason==='unbinding') await db.query('DELETE FROM identity.chat_folders WHERE device_id=$1',[device])
     if(reason==='policy') await storage({temporary_transfer:false})
     expect(await expireTemporary()).toBe(1)
     expect(await generation(transfer)).toMatchObject({state:'retired',data_key:null})

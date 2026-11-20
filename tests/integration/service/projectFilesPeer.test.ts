@@ -48,8 +48,7 @@ beforeEach(async()=>{
   // The owner's two machines, one with the project bound to the chat and one without; the member's machine has none.
   for(const [id,account,label] of [[bound,owner,'Studio Mac'],[unbound,owner,'Laptop'],[theirs,member,'Linux 1']]) await db.query(
     `INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,$3,'fixture','linux')`,[id,account,label])
-  await db.query(`INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at,chat_id)
-    VALUES($1,$2,'root','fixture','/private/root',now(),$3)`,[bound,owner,group])
+  await db.query("INSERT INTO identity.chat_folders(device_id,user_id,folder_id,chat_id,path,position,created_at) VALUES($1,$2,'root',$3,'/fixture',1,now())",[bound,owner,group])
 })
 afterEach(async()=>{await db.query('ROLLBACK')})
 
