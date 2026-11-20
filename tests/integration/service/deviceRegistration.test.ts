@@ -136,8 +136,21 @@ describe('atomic owner/machine/tier registration', () => {
     expect(await register(input)).toEqual({ device_id: input.device_id, created: false })
   })
 
+  it('names an unlabeled machine with the platform default and keeps that name on later registrations', async () => {
+    const reserved = payload({ label: '', reserve_only: true })
+    expect(await register(reserved)).toEqual({ device_id: reserved.device_id, created: true })
+    const named = (await snapshot(reserved.device_id)).row.label
+    expect(named).toMatch(/^Linux \d+$/)
+    expect(await register(payload({ machine_id: reserved.machine_id, label: '' })))
+      .toEqual({ device_id: reserved.device_id, created: false })
+    expect((await snapshot(reserved.device_id)).row).toMatchObject({ label: named, status: 'online' })
+    const full = payload({ label: '' })
+    expect(await register(full)).toEqual({ device_id: full.device_id, created: true })
+    expect((await snapshot(full.device_id)).row.label).toMatch(/^Linux \d+$/)
+  })
+
   it.each([
-    null, [], { machine_id: null }, { tier: '' }, { label: '' }, { user_id: 'forged' },
+    null, [], { machine_id: null }, { tier: '' }, { label: null }, { user_id: 'forged' },
     { status: 'online' }, { auth_session_id: 'forged' }, { reserve_only: 'true' },
     { reserve_only: true, capabilities: {} },
     { reserve_only: true, capabilities: { host_kind: 'desktop', runtimes: ['not-empty'] } },
