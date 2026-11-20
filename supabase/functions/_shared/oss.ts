@@ -17,6 +17,12 @@ export const IMMUTABLE = 'public, max-age=31536000, immutable'
  * 边长 ≥ 16384 回 400 ZoomSizeInvalid、转 webp 边长 ≥ 16383 回 400 WebpExceedRange —— 只限宽时,长截图(1170×40000)和
  * 比 560 还窄的长条(不放大,8×30001)都会撞上(devdb 实测)。 */
 export const THUMB_PROCESS = 'image/resize,m_lfit,w_560,h_16000/format,webp'
+/** The image viewer's first pixels: sharp at a window's size, a fraction of a large original's bytes (devdb, a 1 MB
+ * 2560×3241 PNG: 242 KB, 1.39 s against the original's 1.80 s on a cold edge). The viewer swaps in the original once it
+ * arrives. Same height bound as the bubble's; OSS never enlarges, so a smaller image keeps its own size. */
+export const VIEW_PROCESS = 'image/resize,m_lfit,w_2048,h_16000/format,webp'
+/** The image processing a signed link may carry: the bubble's thumbnail or the viewer's preview. */
+export type ImageProcess = typeof THUMB_PROCESS | typeof VIEW_PROCESS
 /** CDN 鉴权 A 的有效期(在 CDN 上配的;签名只带签发时间,过期由 CDN 判)。 */
 export const CDN_SIGN_TTL_SECONDS = 1800
 
@@ -252,13 +258,13 @@ export function cdnAuthKey(path: string, key: string, opts: { ts: number; rand: 
 
 export interface CdnUrl {
   url: string
-  /** 图片才有:同一个签名加上 x-oss-process。 */
+  /** 图片才有:同一个签名加上 x-oss-process(`process`)。 */
   thumbUrl: string | null
   expiresAt: string
 }
 
 /** 一个对象的 CDN 签名链接;签发时间用服务器时钟(CDN 也认将来的时间戳,所以这里的钟要准 —— 依赖 NTP)。 */
-export function cdnSignedUrl(cdn: CdnConfig, objectName: string, opts: { image: boolean; now?: Date; rand?: string; expiresSeconds?: number }): CdnUrl {
+export function cdnSignedUrl(cdn: CdnConfig, objectName: string, opts: { process: ImageProcess | null; now?: Date; rand?: string; expiresSeconds?: number }): CdnUrl {
   const now = opts.now ?? new Date()
   const edgeTtl=cdn.authTtlSeconds
   const lifetime=opts.expiresSeconds??edgeTtl
@@ -270,7 +276,7 @@ export function cdnSignedUrl(cdn: CdnConfig, objectName: string, opts: { image: 
   const url = `https://${cdn.domain}${uriEncode(path, true)}?auth_key=${cdnAuthKey(path, cdn.authKey, { ts, rand })}`
   return {
     url,
-    thumbUrl: opts.image ? `${url}&x-oss-process=${THUMB_PROCESS}` : null,
+    thumbUrl: opts.process ? `${url}&x-oss-process=${opts.process}` : null,
     expiresAt: new Date((ts + edgeTtl) * 1000).toISOString(),
   }
 }

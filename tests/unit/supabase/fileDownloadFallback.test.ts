@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { handleFileDownload } from '../../../supabase/functions/_shared/file-transfer-core'
 import { ossObjectStorage } from '../../../supabase/functions/_shared/attachment-object-storage'
+import { THUMB_PROCESS } from '../../../supabase/functions/_shared/oss'
 import type { AttachmentsDeps } from '../../../supabase/functions/_shared/attachments-core'
 import type { AttachmentObjectStorage } from '../../../supabase/functions/_shared/object-storage'
 
@@ -30,7 +31,7 @@ describe('authorized CDN and origin download capabilities', () => {
     const row = await handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request, origin: true })
     expect(row).toMatchObject({ url: 'https://origin.example/same-object?x-oss-signature=fixture', expires_at: '2026-11-03T00:00:30Z' })
     expect(f.userRpc.mock.calls).toEqual(Array(2).fill(['file_transfer_download_as', { p_ref: { message_id: 'message' }, p_as: 'reader', p_id: request }]))
-    expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', false, at, { requestId: request, expiresSeconds: 60, trafficBits: 819200, direct: true })
+    expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', null, at, { requestId: request, expiresSeconds: 60, trafficBits: 819200, direct: true })
   })
   it.each(['application/octet-stream', 'image/png'])('can start a new %s read at the origin with one reservation request', async contentType => {
     const freshRequest = '22222222-2222-4222-8222-222222222222', image = contentType === 'image/png'
@@ -40,7 +41,7 @@ describe('authorized CDN and origin download capabilities', () => {
     expect(row).toMatchObject({ download_id: freshRequest, url: 'https://origin.example/same-object?original',
       thumb_url: image ? 'https://origin.example/same-object?thumbnail' : null, expires_at: '2026-11-03T00:00:30Z' })
     expect(f.userRpc).toHaveBeenCalledExactlyOnceWith('file_transfer_download_as', { p_ref: { message_id: 'message' }, p_as: 'reader', p_id: freshRequest })
-    expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', image, at, { requestId: freshRequest, expiresSeconds: 60, trafficBits: 819200, direct: true })
+    expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', image ? THUMB_PROCESS : null, at, { requestId: freshRequest, expiresSeconds: 60, trafficBits: 819200, direct: true })
   })
   it('lazily returns the authorized image thumbnail in the existing fallback response', async () => {
     const f = fixture({ content_type: 'image/png', width: 640, height: 480 })
@@ -54,7 +55,7 @@ describe('authorized CDN and origin download capabilities', () => {
     })
     expect(fallback).toMatchObject({ thumb_url: 'https://origin.example/same-object?thumbnail', expires_at: '2026-11-03T00:00:30Z' })
     expect(f.userRpc.mock.calls).toEqual(Array(2).fill(['file_transfer_download_as', { p_ref: { message_id: 'message' }, p_as: 'reader', p_id: request }]))
-    expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', true, at, { requestId: request, expiresSeconds: 60, trafficBits: 819200, direct: true })
+    expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', THUMB_PROCESS, at, { requestId: request, expiresSeconds: 60, trafficBits: 819200, direct: true })
   })
   it.each([
     { content_type: 'image/svg+xml' },
@@ -63,12 +64,12 @@ describe('authorized CDN and origin download capabilities', () => {
   ])('keeps ineligible image metadata on the untransformed origin path: %j', async metadata => {
     const f = fixture(metadata)
     expect(await handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request, origin: true })).toMatchObject({ thumb_url: null })
-    expect(f.directSign.mock.calls[0]?.[1]).toBe(false)
+    expect(f.directSign.mock.calls[0]?.[1]).toBeNull()
   })
   it('never transforms temporary ciphertext even when its declared media type is an image', async () => {
     const f = fixture({ bucket_id: 'temporary', content_type: 'image/png', width: 640, height: 480 })
     expect(await handleFileDownload(f.deps, 'reader', { ref: { message_id: 'message' }, request_id: request })).toMatchObject({ thumb_url: null })
-    expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', false, at, { requestId: request, expiresSeconds: 60, trafficBits: 819200, direct: true })
+    expect(f.directSign).toHaveBeenCalledExactlyOnceWith('same-object', null, at, { requestId: request, expiresSeconds: 60, trafficBits: 819200, direct: true })
   })
   it.each([false, true])('checks the ACL and unavailable state before signing (origin=%s)', async origin => {
     const f = fixture({ content_type: 'image/png' })

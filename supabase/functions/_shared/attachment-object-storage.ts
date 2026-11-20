@@ -31,12 +31,12 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
     },
     exists: (key, signal) => ossExists(oss, signal ? (input, init) => fetch(input, { ...init, signal }) : fetch, key),
     remove: (key, signal) => ossDelete(oss, signal ? (input, init) => fetch(input, { ...init, signal }) : fetch, key),
-    sign: async (key, image, now, permit) => {
+    sign: async (key, process, now, permit) => {
       if(permit?.direct) {
         if(!config.directSign) throw new ObjectStorageError(503,'not_configured','Origin signing is not configured')
-        return config.directSign(key,image,now,permit)
+        return config.directSign(key,process,now,permit)
       }
-      const signed=cdnSignedUrl(cdn,key,{image,now,rand:permit?.requestId.replace(/-/g,''),expiresSeconds:permit?.expiresSeconds})
+      const signed=cdnSignedUrl(cdn,key,{process,now,rand:permit?.requestId.replace(/-/g,''),expiresSeconds:permit?.expiresSeconds})
       // Advertise the existing direct signer; never invoke it on the primary CDN path.
       return {...signed,...(permit&&config.directSign?{originAvailable:true}:{})}
     },
@@ -222,7 +222,7 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
       await check(response)
       await response.body?.cancel()
     },
-    sign: async (key, _image, now, permit) => ({
+    sign: async (key, _process, now, permit) => ({
       url: await config.signDownload(key, permit?.expiresSeconds ?? CDN_SIGN_TTL_SECONDS,permit?.trafficBits), thumbUrl: null,
       expiresAt: new Date(now.getTime() + (permit?.expiresSeconds ?? CDN_SIGN_TTL_SECONDS) * 1000).toISOString(),
     }),

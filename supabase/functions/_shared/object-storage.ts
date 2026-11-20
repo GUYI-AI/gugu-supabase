@@ -1,3 +1,5 @@
+import type { ImageProcess } from './oss.ts'
+
 export class ObjectStorageError extends Error {
   constructor(readonly status: number, readonly code: string | null, message: string) { super(message) }
 }
@@ -46,7 +48,8 @@ export interface AttachmentObjectStorage {
   put(key: string, bytes: Uint8Array): Promise<void>
   exists(key: string, signal?: AbortSignal): Promise<boolean>
   remove(key: string, signal?: AbortSignal): Promise<void>
-  sign(key: string, image: boolean, now: Date, permit?: DownloadPermit): Promise<{ url: string; thumbUrl: string | null; expiresAt: string; originAvailable?: boolean }>
+  /** `process`: the image processing its `thumbUrl` carries; null = no thumbnail. */
+  sign(key: string, process: ImageProcess | null, now: Date, permit?: DownloadPermit): Promise<{ url: string; thumbUrl: string | null; expiresAt: string; originAvailable?: boolean }>
   invalidate(key: string, image: boolean): Promise<void>
   /** Only a store that can sign each part has this; the others are always uploaded in one request. */
   parts?: MultipartStorage

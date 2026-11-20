@@ -14,6 +14,7 @@ import {
   postObjectForm,
   sha256Hex,
   THUMB_PROCESS,
+  VIEW_PROCESS,
 } from '../../../supabase/functions/_shared/oss'
 import { hasThumbnail, objectHeaders, sniff } from '../../../supabase/functions/_shared/blob-sniff'
 import {
@@ -80,12 +81,13 @@ describe('签名', () => {
       .toBe('1444435200-0-0-23bf85053008f5c0e791667a313e28ce')
     const sha = 'ab'.repeat(32)
     const now = new Date('2026-10-16T12:00:00Z')
-    const signed = cdnSignedUrl(CDN, `ab/${sha}`, { image: true, now, rand: 'r0' })
+    const signed = cdnSignedUrl(CDN, `ab/${sha}`, { process: THUMB_PROCESS, now, rand: 'r0' })
     const ts = Math.floor(now.getTime() / 1000)
     expect(signed.url).toBe(`https://${CDN.domain}/ab/${sha}?auth_key=${ts}-r0-0-${md5Hex(`/ab/${sha}-${ts}-r0-0-${CDN.authKey}`)}`)
     expect(signed.thumbUrl).toBe(`${signed.url}&x-oss-process=${THUMB_PROCESS}`)
     expect(signed.expiresAt).toBe('2026-10-16T12:30:00.000Z')
-    expect(cdnSignedUrl(CDN, `ab/${sha}`, { image: false, now, rand: 'r0' }).thumbUrl).toBeNull()
+    expect(cdnSignedUrl(CDN, `ab/${sha}`, { process: VIEW_PROCESS, now, rand: 'r0' }).thumbUrl).toBe(`${signed.url}&x-oss-process=${VIEW_PROCESS}`)
+    expect(cdnSignedUrl(CDN, `ab/${sha}`, { process: null, now, rand: 'r0' }).thumbUrl).toBeNull()
   })
 
   it('OSS V4:规范请求对阿里云文档的样例(签名钥匙那一步文档用的是示意值,实测请求全过)', async () => {

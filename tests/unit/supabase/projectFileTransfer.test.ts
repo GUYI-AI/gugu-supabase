@@ -124,7 +124,7 @@ describe('temporary file HTTP protocol',()=>{
       signed_at:'2026-10-24T00:00:00Z',expires_at:'2026-10-24T00:01:00Z',content_type:'application/octet-stream'},error:null})
     const row=await handleProjectFiles(f.deps,host,'file-download',{ref:{message_id:'message'},request_id:download})
     expect(row).toMatchObject({codec:'secretstream-v1',key,url:'https://origin.test/cipher'})
-    expect(f.objects.sign).toHaveBeenCalledWith(object,false,new Date('2026-10-24T00:00:00Z'),{requestId:download,expiresSeconds:60,direct:true})
+    expect(f.objects.sign).toHaveBeenCalledWith(object,null,new Date('2026-10-24T00:00:00Z'),{requestId:download,expiresSeconds:60,direct:true})
     expect(f.serviceRpc).toHaveBeenLastCalledWith('file_temporary_key_for',{p_download:download,p_account:host})
   })
   it('never returns a key when signing fails closed, and never signs a pending or gone file',async()=>{
