@@ -110,6 +110,23 @@ async function fixture(type = 'text/markdown') {
 }
 
 describe('text replacement commit and finish order (#378)', () => {
+  it('reproduces the old declare-then-prepare refusal with real RPCs; finish makes the same receipt recoverable', async () => {
+    const f = await fixture('application/json')
+    const declared = await caller.rpc('attachment_declare', { p_staging_key: f.key, p_sha256: f.digest, p_size_bytes: f.bytes.length, p_content_type: f.type })
+    if (declared.error) throw declared.error
+    // The predecessor called this immediately after declaration, with no verification.
+    const refused = await fetch(`${svc.url}/${f.item}/replace`, { method: 'POST', headers: {
+      Authorization: `Bearer ${token}`, 'content-type': 'application/json',
+    }, body: JSON.stringify({ key: f.key, expected: 1, finish: false }) })
+    await refused.body?.cancel()
+    expect(refused.status).toBe(500)
+    expect(await f.receipt()).toMatchObject({ document: null, item_id: null, message_id: null })
+    expect((await fx.row(f.item))!.version).toBe(1)
+    await handleFinish(f.deps, user, f.body)
+    await handleCommit(f.deps, user, f.body)
+    await f.verify()
+  })
+
   it.each(['text/markdown', 'application/json'])('finish before declaration cannot strand a %s replacement', async type => {
     const f = await fixture(type)
     await expect(handleFinish(f.deps, user, f.body)).rejects.toMatchObject({ status: 404, code: 'upload_not_found' })
