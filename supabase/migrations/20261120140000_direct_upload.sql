@@ -58,13 +58,23 @@ END $place$;
 ALTER TABLE chat.file_blobs DROP CONSTRAINT file_blobs_sha256_key;
 -- Lookups by content hash (integrity checks, document import) keep an index.
 CREATE INDEX file_blobs_sha256_idx ON chat.file_blobs(sha256) WHERE sha256 IS NOT NULL;
--- A managed object is named by its sha: legacy '<aa>/<sha>' or owned 'u/<account>/<sha>'. New managed rows are owned only;
--- NOT VALID leaves existing legacy rows as they are.
+-- A managed object is named by its sha: legacy '<aa>/<sha>' or owned 'u/<account>/<sha>'.
 ALTER TABLE chat.file_blobs DROP CONSTRAINT file_blobs_oss_shape;
 ALTER TABLE chat.file_blobs ADD CONSTRAINT file_blobs_oss_shape CHECK (bucket_id<>'oss' OR sha256 IS NOT NULL AND size_bytes IS NOT NULL
     AND (object_name = substr(sha256,1,2)||'/'||sha256
          OR split_part(object_name,'/',1)='u' AND split_part(object_name,'/',2)<>'' AND object_name='u/'||split_part(object_name,'/',2)||'/'||sha256));
-ALTER TABLE chat.file_blobs ADD CONSTRAINT file_blobs_oss_owned CHECK (bucket_id<>'oss' OR object_name LIKE 'u/%') NOT VALID;
+-- New managed rows are owned only. This is a rule about inserting, not about the row: legacy rows stay valid and are still
+-- updated (dimensions, GC state, settlement), which a CHECK, even NOT VALID, would refuse. Nothing updates object_name.
+CREATE FUNCTION chat.file_blobs_oss_owned() RETURNS trigger LANGUAGE plpgsql SET search_path = '' AS $$
+BEGIN
+    IF NEW.bucket_id = 'oss' AND NEW.object_name NOT LIKE 'u/%' THEN
+        RAISE EXCEPTION 'A new managed object is named u/<account>/<sha256>' USING ERRCODE = 'check_violation',
+            CONSTRAINT = 'file_blobs_oss_owned', TABLE = 'file_blobs', SCHEMA = 'chat';
+    END IF;
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION chat.file_blobs_oss_owned() FROM PUBLIC;
+CREATE TRIGGER file_blobs_oss_owned BEFORE INSERT ON chat.file_blobs FOR EACH ROW EXECUTE FUNCTION chat.file_blobs_oss_owned();
 
 
 -- Content dimensions live on the row that names the bytes, not in a table keyed by a sha anyone can claim.

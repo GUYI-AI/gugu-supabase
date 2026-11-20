@@ -146,6 +146,30 @@ describe('direct upload', () => {
     await service()
   })
 
+  it('keeps legacy managed rows updatable', async () => {
+    const digest = sha()
+    // A row from before owned names (inserting one is refused now, so as a restore would).
+    await db.query('SET LOCAL session_replication_role = replica')
+    const id = (await db.query("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type) VALUES('oss',$1,$2,1,'image/png') RETURNING id",
+      [digest.slice(0, 2) + '/' + digest, digest])).rows[0].id
+    await db.query('SET LOCAL session_replication_role = origin')
+    await db.query('UPDATE chat.file_blobs SET width=2,height=3 WHERE id=$1', [id])
+    await db.query("UPDATE chat.file_blobs SET state='deleting' WHERE id=$1", [id])
+    expect((await db.query('SELECT width,state FROM chat.file_blobs WHERE id=$1', [id])).rows[0]).toEqual({ width: 2, state: 'deleting' })
+  })
+
+  it('registers an owned row beside a legacy row of the same sha', async () => {
+    const digest = sha()
+    await db.query('SET LOCAL session_replication_role = replica')
+    await db.query("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type) VALUES('oss',$1,$2,60,'application/octet-stream')",
+      [digest.slice(0, 2) + '/' + digest, digest])
+    await db.query('SET LOCAL session_replication_role = origin')
+    // The upsert's proposed row is always the owned name, so the insert trigger passes and the legacy row is never taken.
+    const blob = await register((await issue(digest)).staging_key, digest)
+    expect(blob).toMatchObject({ object_name: 'u/' + owner + '/' + digest, created: true })
+    expect((await db.query("SELECT count(*)::int AS n FROM chat.file_blobs WHERE bucket_id='oss' AND sha256=$1", [digest])).rows[0].n).toBe(2)
+  })
+
   it('freezes legacy managed names for new rows', async () => {
     const digest = sha()
     expect((await reject("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type) VALUES('oss',$1,$2,1,'text/plain')",
