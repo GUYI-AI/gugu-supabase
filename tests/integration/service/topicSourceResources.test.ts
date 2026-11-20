@@ -46,7 +46,7 @@ async function staged(uploader = owner) {
   const blob = randomUUID(), hash = randomUUID().replaceAll('-', '').repeat(2)
   const key = `staging/${uploader}/${randomUUID()}`
   await db.query(`INSERT INTO chat.file_blobs(id,bucket_id,object_name,sha256,size_bytes,content_type)
-    VALUES ($1,'oss',$2,$3,3,'text/plain')`, [blob, hash.slice(0, 2) + '/' + hash, hash])
+    VALUES ($1,'oss',$2,$3,3,'text/plain')`, [blob, 'u/' + uploader + '/' + hash, hash])
   await db.query('INSERT INTO chat.file_blob_uploads(staging_key,uploader,blob_id) VALUES ($1,$2,$3)', [key, uploader, blob])
   return { key, blob }
 }

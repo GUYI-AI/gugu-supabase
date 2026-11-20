@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
  * 字节按内容只存一份(迁移 20261016104500;gugu-base notes/2026-10-15-attachments-into-folder/设计.md §3.1):
  *   · 带 pointer 写进来的条目 / 历史(App 直接插、agent 的 create_file_as、replace_file_as)都记上那个 pointer 的 'workspace' blob,
  *     同一个 pointer 一行;客户端写不了 blob_id,三张新表谁也不能直接读写;
- *   · chat.file_blob_register(只给 service_role):新内容建一行 'oss' blob(路径就是哈希)并登记这次上传,同内容复用;
+ *   · chat.file_blob_register(只给 service_role):新内容建一行 'oss' blob(路径 u/<上传者>/<哈希>)并登记这次上传,同一个人的同内容复用;
  *   · 回收:失去最后一个引用才进队列,24 小时以后才领;领的时候再核一次,还有人用就出队;领走的标 deleting,
  *     这期间谁也用不上它(HINT file_blob_deleting);完成删掉 blob 行,失败退避,租约过期收回;
  *   · 过期的上传登记由 chat.file_blob_sweep 清,注销账号时随人删掉,它们的 blob 进回收队列。
@@ -240,20 +240,26 @@ describe('条目和历史记它用的 blob', () => {
 })
 
 describe('上传登记(chat.file_blob_register,只给 service_role)', () => {
-  it('新内容建一行 oss blob(路径 = 哈希)并登记;别人传同样的内容复用这一行;同一个暂存对象再登记一次回同一行', async () => {
+  it('新内容建一行 oss blob(路径 = u/上传者/哈希)并登记;同一个人再传同样的内容复用这一行;别人传同样的内容得到自己的一行;同一个暂存对象再登记一次回同一行', async () => {
     const digest = sha(`png-${randomUUID()}`)
     const mine = staging(owner)
     const made = await register(owner, mine, digest)
-    expect(made).toMatchObject({ object_name: `${digest.slice(0, 2)}/${digest}`, created: true })
+    expect(made).toMatchObject({ object_name: `u/${owner}/${digest}`, created: true })
     expect(await blobOf('id = $1', [made.blob_id])).toEqual([expect.objectContaining({ bucket_id: 'oss', sha256: digest, size_bytes: '1234', content_type: 'image/png', created_by: owner })])
     expect(await register(owner, mine, digest), '重试:同一个 blob,这一次没新建').toEqual({ ...made, created: false })
+    expect(await register(owner, staging(owner), digest), '同一个人另一次上传:复用自己的 blob').toEqual({ ...made, created: false })
     const theirs = await register(member, staging(member), digest.toUpperCase())
-    expect(theirs).toEqual({ ...made, created: false })
+    expect(theirs).toEqual({ blob_id: expect.any(String), object_name: `u/${member}/${digest}`, created: true })
+    expect(theirs.blob_id).not.toBe(made.blob_id)
+    expect(await blobOf('id = $1', [theirs.blob_id])).toEqual([expect.objectContaining({ bucket_id: 'oss', sha256: digest, created_by: member })])
     await asOwner()
     const uploads = (await database.query<{ uploader: string; blob_id: string; minutes: number }>(
-      `SELECT uploader, blob_id, round(extract(epoch FROM expires_at - now()) / 60)::int AS minutes FROM chat.file_blob_uploads WHERE blob_id = $1 ORDER BY uploader = $2 DESC`,
-      [made.blob_id, owner])).rows
-    expect(uploads).toEqual([{ uploader: owner, blob_id: made.blob_id, minutes: 60 }, { uploader: member, blob_id: made.blob_id, minutes: 60 }])
+      `SELECT uploader, blob_id, round(extract(epoch FROM expires_at - now()) / 60)::int AS minutes FROM chat.file_blob_uploads WHERE blob_id = ANY($1::uuid[]) ORDER BY uploader = $2 DESC`,
+      [[made.blob_id, theirs.blob_id], owner])).rows
+    expect(uploads).toEqual([
+      { uploader: owner, blob_id: made.blob_id, minutes: 60 }, { uploader: owner, blob_id: made.blob_id, minutes: 60 },
+      { uploader: member, blob_id: theirs.blob_id, minutes: 60 },
+    ])
   })
 
   it('rejects invalid hash, empty bytes, foreign staging and changed replay identity; configured upload permits own the size ceiling', async () => {
@@ -347,7 +353,7 @@ describe('回收', () => {
     expect(await blobOf('id = $1', [blob])).toEqual([])
   })
 
-  it('deleting 的 blob 谁也用不上:登记同样的内容、带同一个 pointer 写进来,都拒(HINT file_blob_deleting);对照:live 的照常复用', async () => {
+  it('deleting 的 blob 谁也用不上:同一个人登记同样的内容、带同一个 pointer 写进来,都拒(HINT file_blob_deleting);别人的同样内容是自己的 blob;对照:live 的照常复用', async () => {
     const group = await newGroup(owner, [member, agent])
     // OSS:登记过、上传登记过期清掉以后被领走。
     const digest = sha(`gone-${randomUUID()}`)
@@ -359,9 +365,11 @@ describe('回收', () => {
     await due(made.blob_id)
     expect((await claim()).map((c) => c.blob_id)).toEqual([made.blob_id])
     await asServiceRole()
-    expect(await fails('SELECT * FROM chat.file_blob_register($1,$2,$3,$4,$5)', [member, staging(member), digest, 1234, 'image/png']))
+    expect(await fails('SELECT * FROM chat.file_blob_register($1,$2,$3,$4,$5)', [owner, staging(owner), digest, 1234, 'image/png']))
       .toMatch(/is being collected.*hint: file_blob_deleting \| code: 55000/)
     await asOwner()
+    // 别人传同样的字节:放在自己名下,和正在回收的那一行无关。
+    expect(await register(member, staging(member), digest)).toMatchObject({ object_name: `u/${member}/${digest}`, created: true })
     // workspace:文件删了、blob 被领走,这时又有人拿同一个 pointer 登记。
     const file = await binary(group, owner)
     const blob = (await itemBlob(file.id))!
@@ -373,10 +381,10 @@ describe('回收', () => {
     expect(await fails('SELECT * FROM chat.workspace_create_file_as($1,$2,$3,$4,$5,$6)', [group, agent, 'again.bin', 'application/octet-stream', 1, file.pointer]))
       .toMatch(/hint: file_blob_deleting/)
     await asOwner()
-    // 对照:live 的同内容照常复用。
+    // 对照:live 的同内容(同一个人)照常复用。
     const live = sha(`live-${randomUUID()}`)
     const a = await register(owner, staging(owner), live)
-    expect(await register(member, staging(member), live)).toMatchObject({ blob_id: a.blob_id, created: false })
+    expect(await register(owner, staging(owner), live)).toMatchObject({ blob_id: a.blob_id, created: false })
   })
 
   it('过期的上传登记由 sweep 清掉、blob 进队列;没过期的护着它的 blob;注销账号时登记随人删掉,blob 的作者清空', async () => {

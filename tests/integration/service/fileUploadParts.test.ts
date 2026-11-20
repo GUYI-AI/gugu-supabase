@@ -78,7 +78,7 @@ describe('multipart upload state',()=>{
     const [old,live,none]=[await permit(),await permit(),await permit()]
     await parts(old,'U-old');await parts(live,'U-live')
     await expire([old,none])
-    expect(await claim(50,[old,live,none])).toEqual([{staging_key:old,account_id:owner,upload_id:'U-old'}])
+    expect(await claim(50,[old,live,none])).toEqual([{staging_key:old,account_id:owner,upload_id:'U-old',object_key:old}])
     expect((await db.query('SELECT abandon_tried_at IS NOT NULL AS tried FROM chat.file_transfer_uploads WHERE staging_key=$1',[old])).rows[0].tried).toBe(true)
   })
   it('when every claimed abandon fails, the next round takes the ones not tried yet',async()=>{

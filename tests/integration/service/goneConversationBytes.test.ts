@@ -191,11 +191,13 @@ describe('all historical reference families retain the same collector protection
   })
 
   it('keeps a private session attachment even when its group has no readers', async () => {
-    const file = await send(group, member), device = randomUUID(), sender = randomUUID(), receiver = randomUUID(), attachment = randomUUID()
+    // The owner's session hands on bytes the owner also sent to the group: a blob is its uploader's, so the same account
+    // registering the same bytes again reaches the same blob.
+    const file = await send(group, owner), device = randomUUID(), sender = randomUUID(), receiver = randomUUID(), attachment = randomUUID()
     await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,'fixture','fixture','linux')", [device, owner])
     for (const agent of [sender, receiver]) await db.query("INSERT INTO identity.users(id,type,display_name,owner_user_id,device_id) VALUES($1,'agent','fixture',$2,$3)", [agent, owner, device])
     const key = `staging/${owner}/${randomUUID()}`
-    await db.query('SELECT * FROM chat.file_blob_register($1,$2,$3,60,$4)', [owner, key, file.sha, 'application/pdf'])
+    expect((await db.query('SELECT * FROM chat.file_blob_register($1,$2,$3,60,$4)', [owner, key, file.sha, 'application/pdf'])).rows[0]).toMatchObject({ blob_id: file.blob, created: false })
     await user(owner)
     await db.query('SELECT * FROM chat.session_attachment_commit($1,$2,$3,$4,$5,$6)', [key, attachment, sender, 'fixture', [receiver], 'private.pdf'])
     await service()

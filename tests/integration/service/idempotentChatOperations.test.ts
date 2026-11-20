@@ -94,7 +94,7 @@ it('forwarding as an owned agent uses the authenticated callers source access', 
 })
 it.each([false, true])('attachment forward replay publishes only one message and file (whisper=%s)', async whisper => {
   const blob = randomUUID(), hash = randomUUID().replaceAll('-', '').repeat(2), key = `staging/${owner}/${randomUUID()}`, source = randomUUID(), id = randomUUID()
-  await db.query("INSERT INTO chat.file_blobs(id,bucket_id,object_name,sha256,size_bytes,content_type) VALUES($1,'oss',$2,$3,3,'text/plain')", [blob, hash.slice(0, 2) + '/' + hash, hash])
+  await db.query("INSERT INTO chat.file_blobs(id,bucket_id,object_name,sha256,size_bytes,content_type) VALUES($1,'oss',$2,$3,3,'text/plain')", [blob, 'u/' + owner + '/' + hash, hash])
   await db.query('INSERT INTO chat.file_blob_uploads(staging_key,uploader,blob_id) VALUES($1,$2,$3)', [key, owner, blob])
   await as(owner, 'SELECT * FROM chat.attachment_commit($1,$2,$3,$4,$5,$6,NULL,NULL,false,false)', [key, source, origin, owner, 'proof.txt', []])
   const values = [source, id, destination, owner, whisper ? [reader] : [], whisper]
@@ -135,7 +135,7 @@ it('concurrent topic deliveries converge on one topic id', async () => {
 
 it('concurrent attachment forwards place one file for the same message id', async () => {
   const blob = randomUUID(), hash = randomUUID().replaceAll('-', '').repeat(2), source = randomUUID(), id = randomUUID(), key = `staging/${owner}/${randomUUID()}`
-  await db.query("INSERT INTO chat.file_blobs(id,bucket_id,object_name,sha256,size_bytes,content_type) VALUES($1,'oss',$2,$3,3,'text/plain')", [blob, hash.slice(0, 2) + '/' + hash, hash])
+  await db.query("INSERT INTO chat.file_blobs(id,bucket_id,object_name,sha256,size_bytes,content_type) VALUES($1,'oss',$2,$3,3,'text/plain')", [blob, 'u/' + owner + '/' + hash, hash])
   await db.query('INSERT INTO chat.file_blob_uploads(staging_key,uploader,blob_id) VALUES($1,$2,$3)', [key, owner, blob])
   await as(owner, 'SELECT * FROM chat.attachment_commit($1,$2,$3,$4,$5,$6,NULL,NULL,false,false)', [key, source, origin, owner, 'concurrent.txt', []])
   await db.query('COMMIT')
