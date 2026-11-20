@@ -87,7 +87,7 @@ describe('send_message_with_overlays returns caller-visible message overlays', (
   })
 
   it('remains invoker-only with the original authenticated execution grant', async () => {
-    const signature = 'chat.send_message_with_overlays(text,text,text,text[],text,text,text,text,boolean,boolean,text,uuid,integer,text,uuid)'
+    const signature = 'chat.send_message_with_overlays(text,text,text,text[],text,text,text,text,boolean,boolean,text,uuid,integer,text,uuid,jsonb)'
     const result = (await db.query(`SELECT prosecdef,
       has_function_privilege('authenticated',oid,'EXECUTE') AS authenticated,
       has_function_privilege('anon',oid,'EXECUTE') AS anon
