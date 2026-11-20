@@ -65,10 +65,6 @@
   },
   {
     "owner": "postgres",
-    "object": "relation/chat.file_contents"
-  },
-  {
-    "owner": "postgres",
     "object": "relation/chat.file_device_revisions_retired"
   },
   {

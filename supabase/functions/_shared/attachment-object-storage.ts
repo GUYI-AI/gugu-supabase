@@ -18,11 +18,18 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
       return {maxBytes:requestedBytes,expiresSeconds:requestedSeconds}
     },
     upload: (key, date, limits) => postObjectForm(oss, { key, date, maxBytes: limits?.maxBytes ?? MAX_ATTACHMENT_BYTES,
-      expiresInSeconds: limits?.expiresSeconds }),
+      minBytes: limits?.minBytes, expiresInSeconds: limits?.expiresSeconds }),
+    sizeEnforced: true,
     inspect: async (key, limit, retainBytes = 512) => {
       const source = await ossSignedRequest(oss, { method: 'GET', key, internal: true })
       const { etag, ...inspected } = await config.inspector(source, limit, retainBytes)
       return { ...inspected, revision: etag }
+    },
+    head: async (key, bytes) => {
+      const response = await ossRequest(oss, fetch, { method: 'GET', key, internal: true,
+        headers: { Range: `bytes=0-${bytes - 1}`, 'Accept-Encoding': 'identity' } })
+      if (response.status === 404) { await response.body?.cancel(); return null }
+      return await headOf(response, bytes, `OSS GET ${key}`)
     },
     promote: (source, destination, revision, headers) => ossCopy(oss, fetch, source, destination, revision, headers),
     put: async (key, bytes) => {
@@ -44,6 +51,36 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
     parts: ossMultipart(oss, fetch),
   }
   return store
+}
+
+/**
+ * A ranged read's answer: the object's size (Content-Range total; Content-Length when the whole object came) and at most
+ * `limit` bytes of its start. The rest of the body is never read.
+ */
+async function headOf(response: Response, limit: number, what: string) {
+  if (response.status !== 200 && response.status !== 206 && response.status !== 416) {
+    await response.body?.cancel()
+    throw new ObjectStorageError(response.status, null, `${what}: ${response.status}`)
+  }
+  const total = /\/(\d+)$/.exec(response.headers.get('content-range') ?? '')?.[1]
+  const size = Number(total ?? (response.status === 200 ? response.headers.get('content-length') : null) ?? NaN)
+  if (!Number.isSafeInteger(size)) {
+    await response.body?.cancel()
+    throw new ObjectStorageError(502, null, `${what}: no object size`)
+  }
+  const out = new Uint8Array(response.status === 416 ? 0 : Math.min(limit, size))
+  // 416: an empty object (bytes=0- is past its end); its body is an error document, never read.
+  const reader = response.body?.getReader()
+  let n = 0
+  while (reader && n < out.length) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const take = Math.min(value.length, out.length - n)
+    out.set(value.subarray(0, take), n)
+    n += take
+  }
+  await reader?.cancel()
+  return { size, head: out.subarray(0, n) }
 }
 
 /**
@@ -202,6 +239,15 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
         throw error
       }
       await response.body?.cancel()
+    },
+    head: async (key, bytes) => {
+      const response = await request(objectUrl(key), { headers: { Range: `bytes=0-${bytes - 1}` } })
+      try { if (response.status !== 416) await check(response) }
+      catch (error) {
+        if (error instanceof ObjectStorageError && error.status === 404) return null
+        throw error
+      }
+      return await headOf(response, bytes, 'Supabase Storage GET')
     },
     put: (key, bytes) => write(key, bytes),
     exists: async (key, signal) => {

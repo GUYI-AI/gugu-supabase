@@ -16,7 +16,7 @@ beforeAll(async()=>{
   await db.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner')",[group,owner])
   for(let i=0;i<2;i++) {
     const blob=randomUUID(),item=randomUUID(),sha=randomUUID().replaceAll('-','').repeat(2)
-    await db.query("INSERT INTO chat.file_blobs(id,bucket_id,object_name,sha256,size_bytes,content_type,created_by) VALUES($1,'oss',$2,$3,1,'application/octet-stream',$4)",[blob,sha.slice(0,2)+'/'+sha,sha,owner])
+    await db.query("INSERT INTO chat.file_blobs(id,bucket_id,object_name,sha256,size_bytes,content_type,created_by) VALUES($1,'oss',$2,$3,1,'application/octet-stream',$4)",[blob,'u/'+owner+'/'+sha,sha,owner])
     await db.query("INSERT INTO chat.workspace_items(id,chat_id,kind,filename,content_type,size_bytes,blob_id,created_by) VALUES($1,$2,'file',$3,'application/octet-stream',1,$4,$5)",[item,group,'concurrency-'+i+'.bin',blob,owner])
     items.push(item);blobs.push(blob)
   }

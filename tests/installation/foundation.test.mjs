@@ -559,7 +559,7 @@ test('fresh foundation, repeat installation, authorization and refusal guards', 
       await db.query('ROLLBACK')
     }
     await t.test('project metadata tables are closed and only intended read/publish APIs are granted', async () => {
-      for (const table of ['file_contents','file_temporary_transfers']) {
+      for (const table of ['file_temporary_transfers']) {
         assert.equal((await query(`SELECT relrowsecurity AS enabled FROM pg_class WHERE oid='chat.${table}'::regclass`))[0].enabled, true)
         for (const role of ['anon','authenticated']) {
           for (const privilege of ['SELECT','INSERT','UPDATE','DELETE']) {

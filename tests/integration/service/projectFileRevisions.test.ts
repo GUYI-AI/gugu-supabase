@@ -360,7 +360,7 @@ describe('project local metadata and exact references, kept by the device that s
   })
   it('has no direct API table access or public helper grants; intended metadata APIs remain authenticated',async()=>{
     await service()
-    for(const role of ['anon','authenticated']) for(const table of ['file_contents','file_temporary_transfers']) {
+    for(const role of ['anon','authenticated']) for(const table of ['file_temporary_transfers']) {
       for(const permission of ['SELECT','INSERT','UPDATE','DELETE']) expect((await db.query('SELECT has_table_privilege($1,$2,$3) AS ok',[role,'chat.'+table,permission])).rows[0].ok).toBe(false)
     }
     for(const signature of ['file_project_policy_as(text,text,text,boolean,boolean,text)','file_project_policy_for(text,text)',
@@ -529,6 +529,14 @@ describe('temporary generations reuse managed budgets and private key issuance',
     await db.query(COMMIT,[id,owner,cipherSha,128,key])
     expect((await generation(id)).state).toBe('ready')
   })
+  it('commits a ciphertext whose sha equals a stored managed file',async()=>{
+    await service()
+    await db.query(`INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by)
+      VALUES('oss',$1,$2,128,'application/octet-stream',$3)`,['u/'+owner+'/'+cipherSha,cipherSha,owner])
+    const id=await ready()
+    expect((await generation(id)).state).toBe('ready')
+    expect((await db.query("SELECT bucket_id FROM chat.file_blobs WHERE sha256=$1 ORDER BY bucket_id",[cipherSha])).rows.map(r=>r.bucket_id)).toEqual(['oss','temporary'])
+  })
   it('registers only an immutable service commitment; size, SHA and key changes cannot overwrite a ready generation',async()=>{
     const {transfer_id:id}=await request();await accept(id);await service()
     expect((await fails(COMMIT,[id,owner,cipherSha,127,key])).hint).toBe('file_transfer_conflict')
@@ -644,7 +652,7 @@ describe('temporary generations reuse managed budgets and private key issuance',
   })
   it('LRU retires only temporary objects, preserves permanent files, and releases capacity only after GC confirmation',async()=>{
     const old=await ready(),oldRow=await generation(old),permanentSha='ef'.repeat(32)
-    const permanent=(await db.query("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by) VALUES('oss',$1,$2,64,$3,$4) RETURNING id",['ef/'+permanentSha,permanentSha,type,owner])).rows[0].id
+    const permanent=(await db.query("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by) VALUES('oss',$1,$2,64,$3,$4) RETURNING id",['u/'+owner+'/'+permanentSha,permanentSha,type,owner])).rows[0].id
     await db.query('SELECT chat.file_transfer_track($1,$2,$3)',[permanent,group,owner])
     await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"temporary_group_bytes\":128,\"storage_group_bytes\":192}'")
     item=randomUUID();await user();await publish()
@@ -686,24 +694,25 @@ describe('temporary generations reuse managed budgets and private key issuance',
     expect(await resolve({item_id:sized})).toMatchObject({source:'local',file_name:'a.png',width:1280,height:720})
     await user()
     expect((await fails(PUBLISH_SIZED,[...args({0:randomUUID(),3:'pics/b.png',6:'b.png'}),10,null])).hint).toBe('file_transfer_invalid')
-    // The server's measurement of the same bytes replaces what the device reported.
+    // Dimensions belong to the row that names the bytes: registering the same sha elsewhere changes neither row.
     await service()
-    await db.query("SELECT * FROM chat.file_blob_register($1,$2,$3,123,'image/png',1281,721)",[owner,'staging/'+owner+'/'+randomUUID(),png])
-    expect(await resolve({item_id:sized})).toMatchObject({source:'local',width:1281,height:721})
+    const registered=(await db.query("SELECT * FROM chat.file_blob_register($1,$2,$3,123,'image/png',1281,721)",[owner,'staging/'+owner+'/'+randomUUID(),png])).rows[0]
+    expect((await db.query('SELECT width,height FROM chat.file_blobs WHERE id=$1',[registered.blob_id])).rows[0]).toEqual({width:1281,height:721})
+    expect(await resolve({item_id:sized})).toMatchObject({source:'local',width:1280,height:720})
     // A managed file's current version has its record from the start.
     await service()
-    const blob=(await db.query("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by) VALUES('oss',$1,$2,9,'image/png',$3) RETURNING id",['12/'+'12'.repeat(32),'12'.repeat(32),owner])).rows[0].id
+    const blob=(await db.query("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by) VALUES('oss',$1,$2,9,'image/png',$3) RETURNING id",['u/'+owner+'/'+'12'.repeat(32),'12'.repeat(32),owner])).rows[0].id
     const managed=(await db.query("INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,size_bytes,blob_id,created_by) VALUES($1,'file','m.png','image/png',9,$2,$3) RETURNING id",[group,blob,owner])).rows[0].id
     expect((await db.query('SELECT n,blob_id FROM chat.workspace_item_versions WHERE item_id=$1',[managed])).rows).toEqual([{n:1,blob_id:blob}])
     // Members read the version columns they always could; where a device keeps a version only through the file functions.
-    for(const [column,ok] of [['content_type',true],['blob_id',true],['relative_path',false],['host_device_id',false],['sha256',false],['file_name',false]] as const)
+    for(const [column,ok] of [['content_type',true],['blob_id',true],['width',true],['height',true],['relative_path',false],['host_device_id',false],['sha256',false],['file_name',false]] as const)
       expect((await db.query("SELECT has_column_privilege('authenticated','chat.workspace_item_versions',$1,'SELECT') AS ok",[column])).rows[0].ok).toBe(ok)
   })
   it('records a moved version without a maker that is gone: updated_by may name a removed user, made_by may not',async()=>{
     const ghost=randomUUID(),local=randomUUID()
     await db.query('SELECT chat.file_device_publish($1,$2,$3,$4,$5,$6,$7,$8,NULL,NULL)',[local,group,device,'pics/g.png','9a'.repeat(32),5,'g.png','image/png'])
     await service()
-    const blob=(await db.query("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by) VALUES('oss',$1,$2,9,'image/png',$3) RETURNING id",['9b/'+'9b'.repeat(32),'9b'.repeat(32),owner])).rows[0].id
+    const blob=(await db.query("INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by) VALUES('oss',$1,$2,9,'image/png',$3) RETURNING id",['u/'+owner+'/'+'9b'.repeat(32),'9b'.repeat(32),owner])).rows[0].id
     const managed=(await db.query("INSERT INTO chat.workspace_items(chat_id,kind,filename,content_type,size_bytes,blob_id,created_by) VALUES($1,'file','g2.png','image/png',9,$2,$3) RETURNING id",[group,blob,owner])).rows[0].id
     // updated_by has no foreign key: older rows can name a user that no longer exists.
     await db.query('SET LOCAL session_replication_role = replica')

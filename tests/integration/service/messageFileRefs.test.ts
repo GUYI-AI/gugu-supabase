@@ -190,13 +190,13 @@ describe('提交(chat.attachment_commit)', () => {
     await asOwner()
   })
 
-  it('复用(设计 3.3):同会话、同内容、同一系列的名字 ⇒ 同一个条目、两条消息;名字不同 ⇒ 新条目同一份字节;另一个会话 ⇒ 它自己的条目;条目换过内容 ⇒ 不复用', async () => {
+  it('复用(设计 3.3):同会话、同一份字节、同一系列的名字 ⇒ 同一个条目、两条消息;名字不同 ⇒ 新条目同一份字节;另一个会话 ⇒ 它自己的条目;条目换过内容 ⇒ 不复用;别人传同样的内容 ⇒ 它自己的字节、自己的条目', async () => {
     const group = await newGroup(owner, [member])
     const other = await newGroup(owner, [member])
     const content = `same-${randomUUID()}`
     const first = await commit(owner, (await upload(owner, content)).key, randomUUID(), group, owner, 'shot.png')
-    const second = await commit(member, (await upload(member, content)).key, randomUUID(), group, member, 'shot.png')
-    const series = await commit(member, (await upload(member, content)).key, randomUUID(), group, member, 'Shot (3).png')
+    const second = await commit(owner, (await upload(owner, content)).key, randomUUID(), group, owner, 'shot.png')
+    const series = await commit(owner, (await upload(owner, content)).key, randomUUID(), group, owner, 'Shot (3).png')
     expect(second.file_item_id).toBe(first.file_item_id)
     expect(series.file_item_id, '同一系列的名字(大小写不算、「 (n)」不算)').toBe(first.file_item_id)
     expect((await item(first.file_item_id!)).source_message_ids).toEqual([first.id, second.id, series.id])
@@ -212,6 +212,11 @@ describe('提交(chat.attachment_commit)', () => {
     const after = await commit(owner, (await upload(owner, content)).key, randomUUID(), group, owner, 'shot.png')
     expect(after.file_item_id).not.toBe(first.file_item_id)
     expect((await item(after.file_item_id!)).filename).toBe('shot (2).png')
+    // 别人传同样的内容:字节放在它自己名下(另一个 blob),所以不复用别人的条目。
+    const theirs = await commit(member, (await upload(member, content)).key, randomUUID(), group, member, 'shot.png')
+    expect(theirs.file_item_id).not.toBe(after.file_item_id)
+    expect(theirs.file_item_id).not.toBe(first.file_item_id)
+    expect((await item(theirs.file_item_id!)).blob_id).not.toBe((await item(after.file_item_id!)).blob_id)
   })
 
   it('以自己的 agent 发(它在群里)可以;拒:别人的 agent、自己的 agent 不在群里、不是成员、登记不是自己的、过期的、发不出去的悄悄话 —— 拒了什么都不留', async () => {
@@ -497,7 +502,7 @@ describe('字节在哪(chat.file_urls_as)', () => {
     const rows = await ask(member, member)
     const oss = rows.find((r) => r.item_id === sent.file_item_id)!
     const digest = (await database.query<{ sha256: string }>('SELECT sha256 FROM chat.file_blobs WHERE id = $1', [up.blob])).rows[0]!.sha256
-    expect(oss).toMatchObject({ version: 1, bucket_id: 'oss', object_name: `${digest.slice(0, 2)}/${digest}`, sha256: digest, size_bytes: '1234',
+    expect(oss).toMatchObject({ version: 1, bucket_id: 'oss', object_name: `u/${owner}/${digest}`, sha256: digest, size_bytes: '1234',
       content_type: 'image/png', width: 640, height: 480, file_name: 'pic.png' })
     const old = rows.filter((r) => r.item_id === legacy).map((r) => [r.version, r.bucket_id, r.object_name.endsWith('-deck.pptx'), r.object_name === next])
     expect(old).toEqual([[1, 'workspace', true, false], [2, 'workspace', true, true]])

@@ -3,6 +3,8 @@
 // 以调用者身份和以 service_role 调库、Supabase 存储),所以单元测试在 Node 里用假的 OSS 和库跑同一份代码。
 //
 //   POST upload   → A quota-scoped immutable staging upload permit with provider-enforced size and lifetime bounds.
+//                   With sha256: a permit straight to the uploader's final object u/<account>/<sha256> (direct/ key), or
+//                   none when the account already stores those bytes; finish then HEADs it and reads only its head.
 //   POST commit   → With sha256: declare the pending file and its keep, then attachment_commit sends its message before the bytes.
 //                   Without sha256: hash, promote and register staged bytes before attachment_commit.
 //   POST finish   → Hash and promote bytes, settle the declaration with its receipt/quota and declared keep atomically.
@@ -74,13 +76,16 @@ export function objectStorage(deps: AttachmentsDeps): AttachmentObjectStorage {
 
 /** 说给调用者听的拒绝:HTTP 状态 + 机读的 code + 一句话。 */
 export class Refusal extends Error {
-  constructor(readonly status: number, readonly code: string, message: string, readonly details?: string) {
+  /** `extra`: more top-level fields of the refusal's JSON answer. */
+  constructor(readonly status: number, readonly code: string, message: string, readonly details?: string,
+    readonly extra?: Record<string, unknown>) {
     super(message)
   }
 }
 
-const STAGING = /^staging\/([^/]+)\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const STAGING = /^(?:staging|direct)\/([^/]+)\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const SHA256 = /^[0-9a-f]{64}$/
 const MIME = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,127}$/
 
 /**
@@ -91,6 +96,8 @@ const MIME = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,127}
 export function refusalFromDb(error: DbError): Refusal {
   if (error.hint?.startsWith('file_transfer_')) {
     const code=error.hint.slice('file_transfer_'.length)
+    // Another open permit writes the same object: DETAIL is when to ask again.
+    if (code==='upload_in_progress') return new Refusal(409,code,error.message,undefined,{retry_after:isoTime(error.details??'')})
     const status=code==='invalid'?400:code.endsWith('_full')||code==='rate_limited'?429:code==='denied'?403:code==='expired'?410:
       ['not_configured','inventory_required','paused','unavailable'].includes(code)?503:code==='too_large'?413:409
     return new Refusal(status,code,error.message)
@@ -124,6 +131,12 @@ export function refusalFromDb(error: DbError): Refusal {
   if (error.code === 'PT429') return new Refusal(429, 'rate_limited', error.message)
   if (error.code === '23505' || error.code === 'check_violation' || error.code === '23514') return new Refusal(400, 'invalid', error.message)
   return new Refusal(500, 'failed', error.message)
+}
+
+/** A Postgres timestamptz text ('2026-11-20 14:00:00.123+00') as ISO 8601; anything unparsed as given. */
+function isoTime(text: string) {
+  const at = new Date(text.replace(' ', 'T').replace(/([+-]\d\d)$/, '$1:00'))
+  return Number.isNaN(at.getTime()) ? text : at.toISOString()
 }
 
 /**
@@ -192,6 +205,8 @@ async function issueUpload(deps: AttachmentsDeps, userId: string, body: Record<s
   if (!declared) throw new Refusal(426,'client_outdated','Update Gugu to send files (this version does not declare the file size)')
   const chat=str(body,'chat_id',false),actor=str(body,'as',false)??userId
   const contentType=str(body,'content_type',false)
+  const sha=str(body,'sha256',false)
+  if (sha!==null&&!SHA256.test(sha)) throw new Refusal(400,'invalid','sha256 must be 64 lowercase hex digits')
   const prepared=await call(deps.userRpc,'file_managed_upload_prepare',{p_chat:chat,p_as:actor,p_bytes:declared,p_content_type:contentType}) as {
     max_bytes:number;permit_seconds:number
   }
@@ -206,6 +221,7 @@ async function issueUpload(deps: AttachmentsDeps, userId: string, body: Record<s
       ||bounds.expiresSeconds!==Number(prepared.permit_seconds)) {
     throw new Refusal(503,'not_configured','The upload provider size ceiling and lifetime must match deployment policy')
   }
+  if (sha) return await issueDirect(deps,store,userId,body,{p_id:id,p_chat:chat,p_as:actor,p_bytes:declared,p_content_type:contentType,p_sha256:sha})
   const permit=await call(deps.userRpc,'file_managed_upload_as',{
     p_id:id,p_chat:chat,p_as:actor,p_bytes:bounds.maxBytes,p_content_type:contentType,
   }) as { staging_key:string; signed_at:string; expires_at:string; max_bytes:number }
@@ -216,15 +232,41 @@ async function issueUpload(deps: AttachmentsDeps, userId: string, body: Record<s
     return { staging_key:permit.staging_key,max_bytes:declared,expires_at:permit.expires_at,
       parts:{ part_bytes:UPLOAD_PART_BYTES,count:Math.ceil(declared/UPLOAD_PART_BYTES) } }
   }
+  return { staging_key:permit.staging_key,...await signUpload(store,permit.staging_key,permit,{maxBytes:Number(permit.max_bytes)}),
+    max_bytes:Number(permit.max_bytes) }
+}
+
+async function signUpload(store: AttachmentObjectStorage, key: string, permit: { signed_at: string; expires_at: string },
+  limits: { maxBytes: number; minBytes?: number }) {
   const seconds=(Date.parse(permit.expires_at)-Date.parse(permit.signed_at))/1000
-  const form=await store.upload(permit.staging_key,new Date(permit.signed_at),{maxBytes:Number(permit.max_bytes),expiresSeconds:seconds})
+  const form=await store.upload(key,new Date(permit.signed_at),{...limits,expiresSeconds:seconds})
     .catch(error => {
       if (error instanceof ObjectStorageError && error.status === 409 && error.code === 'upload_used')
         throw new Refusal(409, 'upload_used', error.message)
       throw new Refusal(502, 'failed', 'The storage provider could not sign the upload')
     })
-  return { staging_key:permit.staging_key,url:form.url,fields:form.fields,...(form.method?{method:form.method}:{}),
-    ...(form.headers?{headers:form.headers}:{}),expires_at:form.expiresAt,max_bytes:Number(permit.max_bytes) }
+  return { url:form.url,fields:form.fields,...(form.method?{method:form.method}:{}),
+    ...(form.headers?{headers:form.headers}:{}),expires_at:form.expiresAt }
+}
+
+/**
+ * Direct upload: the bytes go straight to the uploader's own final object `u/<account>/<sha256>`, exactly the declared size
+ * and never overwriting. Bytes this account already stores need no upload (`stored`); the answer's `staging_key` is the
+ * permit's logical key `direct/<account>/<id>`, and the object key never leaves the server.
+ */
+async function issueDirect(deps: AttachmentsDeps, store: AttachmentObjectStorage, userId: string, body: Record<string, unknown>,
+  args: { p_id: string; p_chat: string | null; p_as: string; p_bytes: number; p_content_type: string | null; p_sha256: string }) {
+  const permit=await call(deps.userRpc,'file_managed_upload_direct_as',args) as
+    { status:'stored'|'upload'; staging_key:string; object_key:string; signed_at:string; expires_at:string }
+  if (permit.status==='stored') return { status:'stored',staging_key:permit.staging_key }
+  const size=args.p_bytes
+  if (body.parts===true&&store.parts&&size>UPLOAD_PART_BYTES) {
+    await openParts(deps,store.parts,userId,permit.staging_key,permit.object_key)
+    return { status:'upload',staging_key:permit.staging_key,max_bytes:size,expires_at:permit.expires_at,
+      parts:{ part_bytes:UPLOAD_PART_BYTES,count:Math.ceil(size/UPLOAD_PART_BYTES) } }
+  }
+  return { status:'upload',staging_key:permit.staging_key,
+    ...await signUpload(store,permit.object_key,permit,{maxBytes:size,minBytes:size}),max_bytes:size }
 }
 
 export async function handleUpload(deps: AttachmentsDeps,userId:string,body:Record<string,unknown> = {}) {
@@ -238,13 +280,16 @@ export const UPLOAD_PART_BYTES=8*1024*1024
 const PARTS_PER_ANSWER=6
 type PartsState={ upload_id:string|null; parts_done:number[] }
 
-/** The staging key's multipart upload: the recorded one, or a new one. Of two concurrent openers the loser abandons its own. */
-async function openParts(deps:AttachmentsDeps,parts:MultipartStorage,userId:string,key:string) {
+/**
+ * The permit's multipart upload: the recorded one, or a new one. Of two concurrent openers the loser abandons its own.
+ * The database knows it by the permit's key; the store by the object it writes (`object`: a direct permit's final object).
+ */
+async function openParts(deps:AttachmentsDeps,parts:MultipartStorage,userId:string,key:string,object=key) {
   const known=await call(deps.serviceRpc,'file_managed_upload_parts',{p_key:key,p_user:userId,p_upload_id:null,p_done:[]}) as PartsState
   if (known.upload_id) return known.upload_id
-  const opened=await parts.open(key)
+  const opened=await parts.open(object)
   const kept=await call(deps.serviceRpc,'file_managed_upload_parts',{p_key:key,p_user:userId,p_upload_id:opened,p_done:[]}) as PartsState
-  if (kept.upload_id!==opened) await parts.abandon(key,opened)
+  if (kept.upload_id!==opened) await parts.abandon(object,opened)
   return kept.upload_id!
 }
 
@@ -253,38 +298,44 @@ async function partsOf(deps:AttachmentsDeps,userId:string,body:Record<string,unk
   const key=stagingOf(body,userId)
   const parts=objectStorage(deps).parts
   if (!parts) throw new Refusal(400,'invalid','This storage uploads a file in one request')
-  const permit=await call(deps.serviceRpc,'file_managed_upload_for',{p_key:key,p_user:userId}) as { max_bytes:number; blob_id:string|null }
+  const permit=await call(deps.serviceRpc,'file_managed_upload_for',{p_key:key,p_user:userId}) as
+    { max_bytes:number; blob_id:string|null; object_key?:string|null }
   if (permit.blob_id) throw new Refusal(410,'expired','This upload was already sent; start a new one')
   const size=Number(permit.max_bytes),count=Math.ceil(size/UPLOAD_PART_BYTES)
   const bytes=(n:number)=>n<count?UPLOAD_PART_BYTES:size-(count-1)*UPLOAD_PART_BYTES
-  return { key,parts,size,count,bytes }
+  return { key,object:permit.object_key??key,parts,size,count,bytes }
 }
 
 /** Records the parts the client just sent and answers the parts still to send, signed. */
 export async function handleUploadParts(deps:AttachmentsDeps,userId:string,body:Record<string,unknown>) {
-  const { key,parts,count,bytes }=await partsOf(deps,userId,body)
+  const { key,object,parts,count,bytes }=await partsOf(deps,userId,body)
   const done=body.done===undefined||body.done===null?[]:body.done
   if (!Array.isArray(done)||done.some(n=>!Number.isSafeInteger(n)||n<1||n>count)) throw new Refusal(400,'invalid',`done must be part numbers from 1 to ${count}`)
   const state=await call(deps.serviceRpc,'file_managed_upload_parts',{p_key:key,p_user:userId,p_upload_id:null,p_done:done}) as PartsState
   if (!state.upload_id) throw new Refusal(409,'upload_incomplete','This upload has no parts yet; ask upload for it again')
   const todo=Array.from({length:count},(_,i)=>i+1).filter(n=>!state.parts_done.includes(n)).slice(0,PARTS_PER_ANSWER)
-  return { done:state.parts_done,todo:await parts.sign(key,state.upload_id,todo.map(n=>({n,bytes:bytes(n)}))) }
+  return { done:state.parts_done,todo:await parts.sign(object,state.upload_id,todo.map(n=>({n,bytes:bytes(n)}))) }
 }
 
 /**
- * Joins the parts into the staging object once every part is reported. The object must be exactly the declared size;
- * otherwise it is removed and the upload starts again. Asked again after success, it answers success again.
+ * Joins the parts into the permit's object once every part is reported. The object must be exactly the declared size;
+ * otherwise a staging object is removed and the upload starts again. Asked again after success, it answers success again.
+ * A direct permit's object that is already there (an earlier upload of the same bytes) counts when its size is right.
  */
 export async function handleUploadComplete(deps:AttachmentsDeps,userId:string,body:Record<string,unknown>) {
-  const { key,parts,size,count }=await partsOf(deps,userId,body)
+  const { key,object,parts,size,count }=await partsOf(deps,userId,body)
   const state=await call(deps.serviceRpc,'file_managed_upload_parts',{p_key:key,p_user:userId,p_upload_id:null,p_done:[]}) as PartsState
   if (!state.upload_id) throw new Refusal(409,'upload_incomplete','This upload has no parts yet; ask upload for it again')
   const missing=Array.from({length:count},(_,i)=>i+1).filter(n=>!state.parts_done.includes(n))
   if (missing.length) throw new Refusal(409,'upload_incomplete',`Parts not sent yet: ${missing.join(', ')}`,missing.join(','))
-  const joined=await parts.complete(key,state.upload_id)
+  const joined=await parts.complete(object,state.upload_id).catch(async error => {
+    if (object===key||!(error instanceof ObjectStorageError&&error.status===409)) throw error
+    return (await objectStorage(deps).head(object,1))?.size ?? null
+  })
   if (joined===size) return { staging_key:key,size_bytes:size }
   // A part reported but not sent, or bytes that are not this file (or the store gave up the upload after a day).
-  if (joined!==null) await objectStorage(deps).remove(key)
+  // A direct object is not removed here: it may be bytes a blob already owns; abandoned, gc removes it if none does.
+  if (joined!==null&&object===key) await objectStorage(deps).remove(key)
   await call(deps.serviceRpc,'file_managed_upload_parts_clear',{p_key:key,p_user:userId,p_upload_id:state.upload_id})
   throw new Refusal(409,'upload_changed',`The parts make ${joined ?? 0} bytes, not ${size}; upload the file again`)
 }
@@ -426,14 +477,25 @@ function stagingOf(body: Record<string, unknown>, userId: string): string {
 
 /** 暂存的字节:算哈希、存进 OSS 的最终位置、登记成 blob(提交和放进文件夹共用)。暂存已经没了 ⇒ 交给库认上一次的登记。 */
 async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey: string, declaredType: string | null, fileName: string, settle?: { pendingKey: string }) {
-  const permit=await call(deps.serviceRpc,'file_managed_upload_for',{p_key:stagingKey,p_user:userId}) as { max_bytes:number; blob_id?:string | null; staging_deleted?:boolean }
-  if (settle && permit.blob_id && permit.staging_deleted) {
-    await call(deps.serviceRpc, 'file_blob_settle', {
-      p_uploader: userId, p_pending_key: settle.pendingKey, p_upload_key: stagingKey,
-      p_sha256: null, p_size_bytes: null, p_content_type: null,
-    })
+  const direct = stagingKey.startsWith('direct/')
+  const replay = () => call(deps.serviceRpc, 'file_blob_settle', {
+    p_uploader: userId, p_pending_key: settle!.pendingKey, p_upload_key: stagingKey,
+    p_sha256: null, p_size_bytes: null, p_content_type: null,
+  })
+  const found = await deps.serviceRpc('file_managed_upload_for', { p_key: stagingKey, p_user: userId })
+  if (found.error) {
+    // A stored direct key has no reservation: a receipt for bytes this account already stores. Nothing to read or copy;
+    // the library resolves it by its receipt (and refuses it where the receipt is not this caller's).
+    if (!(direct && found.error.hint === 'file_transfer_denied')) throw refusalFromDb(found.error)
+    if (settle) await replay()
     return
   }
+  const permit = found.data as { max_bytes:number; blob_id?:string | null; staging_deleted?:boolean; object_key?:string | null }
+  if (settle && permit.blob_id && (permit.staging_deleted || direct)) {
+    await replay()
+    return
+  }
+  if (direct) return await registerDirect(deps, userId, stagingKey, permit, declaredType, fileName, settle)
   const store=objectStorage(deps)
   let read: InspectedObject | null = null
   try {
@@ -456,7 +518,7 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
     const document = deps.textFiles.classify(fileName, declaredType, bytes.subarray(0, deps.textFiles.maxBytes + 1))
     const sha = read.sha256
     const type = blobType(declaredType, bytes)
-    const finalKey = `${sha.slice(0, 2)}/${sha}`
+    const finalKey = `u/${userId}/${sha}`
     const headers = objectHeaders(type, IMMUTABLE)
     const copy = async () => {
       try {
@@ -507,6 +569,57 @@ async function registerStaged(deps: AttachmentsDeps, userId: string, stagingKey:
     // recreate it uncounted until the staging lifecycle removes it. A failed delete leaves it to that lifecycle.
     await dropStaging(deps, stagingKey)
   }
+}
+
+/**
+ * A direct permit's bytes are already at their final object: HEAD-sized against the declaration, and only its head read
+ * for type, dimensions and document text. Its sha256 is the uploader's claim (the object's name); readers verify it.
+ */
+async function registerDirect(deps: AttachmentsDeps, userId: string, key: string, permit: { max_bytes: number; object_key?: string | null },
+  declaredType: string | null, fileName: string, settle?: { pendingKey: string }) {
+  const object = permit.object_key
+  if (!object) throw new Refusal(503, 'not_configured', 'A direct upload permit names no object')
+  const store = objectStorage(deps), size = Number(permit.max_bytes), retain = deps.textFiles.maxBytes + 1
+  const read = async () => {
+    const h = await store.head(object, retain).catch((error) => {
+      if (error instanceof ObjectStorageError && error.status === 503) throw new Refusal(503, 'not_configured', error.message)
+      throw error
+    })
+    if (!h) throw new Refusal(409, 'upload_missing', 'the upload is not there; upload the file again')
+    return h
+  }
+  const h = await read()
+  if (h.size !== size) {
+    // Where the provider does not bound the size, the object is this permit's own and nothing references it yet.
+    if (!store.sizeEnforced) await store.remove(object)
+    throw new Refusal(409, 'upload_changed', `the upload is ${h.size} bytes, not ${size}; upload the file again`)
+  }
+  if (h.head.length < Math.min(size, retain)) throw new Refusal(503, 'not_configured', 'Object read did not return the complete bounded head')
+  const sha = object.slice(object.lastIndexOf('/') + 1)
+  const document = deps.textFiles.classify(fileName, declaredType, h.head)
+  const type = blobType(declaredType, h.head)
+  for (let attempt = 1; ; attempt++) {
+    // The same object's previous blob being collected: wait, and register again only while the bytes are still there.
+    if (attempt > 1) await read()
+    const { data, error } = settle
+      ? await deps.serviceRpc('file_blob_settle', {
+        p_uploader: userId, p_pending_key: settle.pendingKey, p_upload_key: key, p_sha256: sha, p_size_bytes: h.size,
+        p_content_type: type.contentType, p_width: type.width, p_height: type.height,
+        p_document: document.kind === 'document' ? { text: document.text, content_type: document.contentType } : null,
+      })
+      : await deps.serviceRpc('file_blob_register', {
+        p_uploader: userId, p_staging_key: key, p_sha256: sha, p_size_bytes: h.size,
+        p_content_type: type.contentType, p_width: type.width, p_height: type.height,
+      })
+    if (!error && settle && (data as { status?: string } | null)?.status === 'failed') {
+      throw new Refusal(409, 'upload_mismatch', 'the uploaded bytes are not the file this message declared')
+    }
+    if (!error) break
+    if (error.hint !== 'file_blob_deleting' || attempt >= 5) throw refusalFromDb(error)
+    await new Promise((r) => setTimeout(r, deps.retryDelayMs ?? 1000))
+  }
+  if (!settle) await call(deps.serviceRpc, 'file_managed_upload_registered', { p_key: key, p_user: userId,
+    p_document: document.kind === 'document' ? { text: document.text, content_type: document.contentType } : null })
 }
 
 async function dropStaging(deps: AttachmentsDeps, stagingKey: string) {
@@ -619,18 +732,51 @@ async function abandonExpiredParts(deps: AttachmentsDeps, remaining: number, gua
   const parts = objectStorage(deps).parts
   if (!parts) return 0
   await guard()
-  const stale = ((await call(deps.serviceRpc, 'file_managed_upload_parts_claim', { p_limit: remaining })) ?? []) as Array<{ staging_key: string; account_id: string; upload_id: string }>
+  const stale = ((await call(deps.serviceRpc, 'file_managed_upload_parts_claim', { p_limit: remaining })) ?? []) as
+    Array<{ staging_key: string; account_id: string; upload_id: string; object_key?: string | null }>
   if (!Array.isArray(stale) || stale.length > remaining) throw new Refusal(503, 'not_configured', 'Multipart GC claim exceeds its bound')
   for (const row of stale) {
     await guard()
     try {
-      await parts.abandon(row.staging_key, row.upload_id)
+      await parts.abandon(row.object_key ?? row.staging_key, row.upload_id)
       await call(deps.serviceRpc, 'file_managed_upload_parts_clear', { p_key: row.staging_key, p_user: row.account_id, p_upload_id: row.upload_id })
     } catch (error) {
       deps.log('gc_abandon_failed', { key: row.staging_key, error: String(error) })
     }
   }
   return stale.length
+}
+
+/**
+ * Direct uploads abandoned past their release time may have left bytes at their final object. Each claimed permit's
+ * multipart upload is aborted, its object deleted unless a blob owns it, and the outcome recorded only once the store
+ * confirms it; a failure is tried again in a later round.
+ */
+async function cleanupDirectUploads(deps: AttachmentsDeps, remaining: number, guard: () => Promise<void>) {
+  if (remaining <= 0) return 0
+  await guard()
+  const limit = Math.min(remaining, 50)
+  const rows = ((await call(deps.serviceRpc, 'file_direct_upload_cleanup_claim', { p_limit: limit })) ?? []) as
+    Array<{ staging_key: string; object_key: string; upload_id: string | null; object_owned: boolean }>
+  if (!Array.isArray(rows) || rows.length > limit) throw new Refusal(503, 'not_configured', 'Direct upload GC claim exceeds its bound')
+  const store = objectStorage(deps)
+  for (const row of rows) {
+    await guard()
+    try {
+      if (row.upload_id) {
+        if (!store.parts) throw new Error('a multipart upload on a store without parts')
+        await store.parts.abandon(row.object_key, row.upload_id)
+      }
+      if (!row.object_owned) {
+        await store.remove(row.object_key)
+        if (await store.exists(row.object_key)) throw new Error('object still present after delete')
+      }
+      await call(deps.serviceRpc, 'file_direct_upload_cleanup_done', { p_key: row.staging_key, p_object_deleted: !row.object_owned })
+    } catch (error) {
+      deps.log('gc_direct_cleanup_failed', { key: row.staging_key, error: String(error) })
+    }
+  }
+  return rows.length
 }
 
 export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-accept' = 'kick',
@@ -689,7 +835,8 @@ export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-acce
     // A disabled or busy collector cannot delete via this second path either.
     const remaining = run.batch_limit - claimed.length
     const abandoned = await abandonExpiredParts(deps, remaining, guard)
-    if (sweepStaging && remaining > abandoned) await sweepStaging(remaining - abandoned, guard)
+    const cleaned = await cleanupDirectUploads(deps, remaining - abandoned, guard)
+    if (sweepStaging && remaining > abandoned + cleaned) await sweepStaging(remaining - abandoned - cleaned, guard)
     completed = true
     return result
   } finally {

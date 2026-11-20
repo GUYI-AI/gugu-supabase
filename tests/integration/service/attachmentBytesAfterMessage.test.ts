@@ -84,6 +84,18 @@ async function retention(message:string, expectedKeep:string|null) {
 }
 
 describe('the message is there before its bytes', ()=>{
+  it('a relay blob that claims the same sha never captures a declared upload', async()=>{
+    const send=await declaredSend()
+    await service()
+    const relay=(await db.query(`INSERT INTO chat.file_blobs(bucket_id,object_name,sha256,size_bytes,content_type,created_by)
+      VALUES('temporary',$1,$2,60,'application/octet-stream',$3) RETURNING id`,['temporary/relay/'+randomUUID(),send.digest,receiver])).rows[0].id
+    const settled=await settle(send.key,send.digest)
+    expect(settled).toMatchObject({status:'ready'})
+    expect(settled.blob_id).not.toBe(relay)
+    expect((await db.query('SELECT bucket_id,object_name FROM chat.file_blobs WHERE id=$1',[settled.blob_id])).rows[0])
+      .toEqual({bucket_id:'oss',object_name:'u/'+sender+'/'+send.digest})
+    expect((await db.query('SELECT bucket_id,sha256 FROM chat.file_blobs WHERE id=$1',[relay])).rows[0]).toEqual({bucket_id:'temporary',sha256:send.digest})
+  })
   it.each(['temporary','permanent'])('one settle RPC applies %s and accounts for the upload without a later registration', async keep=>{
     const send=await declaredSend(sha(),60,false,keep)
     await service()
