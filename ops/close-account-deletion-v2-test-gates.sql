@@ -17,5 +17,10 @@ SELECT (SELECT count(*)::int FROM account_deletion_private.access WHERE test_onl
        (SELECT count(*)::int FROM account_deletion_private.operation_access WHERE enabled) AS operation_gates,
        (SELECT count(*)::int FROM account_deletion_private.device_preparation_access WHERE enabled) AS preparation_gates,
        (SELECT count(*)::int FROM account_deletion_private.operations WHERE state IN ('open','confirming','processing')) AS active_operations,
-       (SELECT count(*)::int FROM account_deletion_private.device_preparations WHERE state='prepared') AS prepared_devices;
+       (SELECT count(*)::int FROM account_deletion_private.device_preparations p
+          JOIN account_deletion_private.operations o ON o.id=p.operation_id
+          WHERE p.state='prepared' AND NOT (p.device_id IS NULL AND o.state='deleted')) AS prepared_devices,
+       (SELECT count(*)::int FROM account_deletion_private.device_preparations p
+          JOIN account_deletion_private.operations o ON o.id=p.operation_id
+          WHERE p.state='prepared' AND p.device_id IS NULL AND o.state='deleted') AS deleted_operation_preparations;
 COMMIT;

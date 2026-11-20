@@ -18,7 +18,12 @@ BEGIN
   IF target IS NOT NULL AND target<>candidate[1] THEN RAISE EXCEPTION 'Another dedicated account is already allowed'; END IF;
   IF NOT (operations AND preparations AND target IS NOT DISTINCT FROM candidate[1]) AND (
     EXISTS(SELECT 1 FROM account_deletion_private.operations WHERE state IN ('open','confirming','processing'))
-    OR EXISTS(SELECT 1 FROM account_deletion_private.device_preparations WHERE state='prepared')
+    -- A completed deletion erases the device row, so its preparation keeps state='prepared' with device_id NULL.
+    -- That record seals no device (every seal check is device_id equality) and is not pending custody.
+    -- Only a row that is BOTH device-erased AND under a deleted operation is exempt; any other prepared row blocks.
+    OR EXISTS(SELECT 1 FROM account_deletion_private.device_preparations p
+      JOIN account_deletion_private.operations o ON o.id=p.operation_id
+      WHERE p.state='prepared' AND NOT (p.device_id IS NULL AND o.state='deleted'))
     OR EXISTS(SELECT 1 FROM account_deletion_private.requests WHERE state IN ('verifying','processing','retry_wait')
       OR (state IN ('sending','challenge') AND expires_at>clock_timestamp()))) THEN
     RAISE EXCEPTION 'Reconcile pending deletion custody before opening admission';
