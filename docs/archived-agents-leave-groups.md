@@ -1,6 +1,6 @@
 # Archived agents leave their groups
 
-Rule: when an agent's session is archived (`identity.users.session_archived_at` is set), the agent has left every group and topic it was in. It holds no seat, is not listed and is not counted. Restoring the session brings it back with its original seat, role, read state and history. Direct and AI chats are unchanged.
+Rule: when an agent's session is archived (`identity.users.session_archived_at` is set), the agent has left every group and topic it was in. It holds no seat, is not listed and is not counted. Restoring the session brings it back with its original seat, role, read state and history. Its direct and AI chats leave the lists of everyone in them as well (20261120020000): while it is archived nobody sees, reads or is notified about those conversations, and restore brings them back with their history.
 
 ## Projections
 
@@ -14,6 +14,9 @@ Rule: when an agent's session is archived (`identity.users.session_archived_at` 
   - `chat.remove_group_member_as`: refuses an archived agent's retained seat with `agent_archived` (see below).
 - `identity.set_agent_session_archival` locks the agent's `member_liveness` row before the revision heads, the same order as member-row lockers such as `mark_read_on_deliver` and `remove_group_member_as`.
 - `chat.chat_members` rows are never deleted or rewritten. Message history and sender display read `chat.messages` and `identity.users` and are unaffected.
+
+- Direct and AI chats (20261120020000): `chat_private.closed_direct_seats` holds the other seats of every direct or AI chat whose agent is session-archived, maintained by the `users_01_closed_direct_seats` trigger. `chat.active_members` and `chat_private.member_seat_visible` hide those seats with a primary-key anti-join, and the agent's own seats by `in_groups`, so the account snapshot, memberships, previews, unread and the client key set all drop the conversation without a filter of their own. Archive publishes a `chat_members_changed` tombstone for each such member's own row (`kind: own`), restore a plain revision.
+- `identity.active_users`, the live directory, omits session-archived agents as well as removed identities, so owned-agent and contact lists neither show nor read them while archived. The account snapshot's owned-identity branch likewise carries only identities that are neither removed nor archived, so it reads no presence for them. Lookups that must still find the archived identity by id (restore, session binding, history) read `identity.users`. `identity.user_is_live` is unchanged: it is the permission layer, and the archival RPC itself refuses a non-live identity.
 
 ## Revisions
 
