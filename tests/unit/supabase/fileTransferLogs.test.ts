@@ -3,7 +3,7 @@ import { parseTransferLog,parseInventoryEntry } from '../../../scripts/file-tran
 import { handleUsageImport } from '../../../supabase/functions/_shared/file-transfer-core'
 const id='12345678-1234-4234-8234-123456789abc',rand=id.replace(/-/g,'')
 const options={domain:'files.example.test',objectPrefix:'fixture'}
-const cdn={method:'GET',domain:options.domain,uri:'/fixture/ab/hash',uri_param:'auth_key=1792846800-'+rand+'-0-secret',uuid:'cdn-request-1',body_bytes_sent:'120',response_size:'150',unixtime:'1792846800'}
+const cdn={method:'GET',domain:options.domain,uri:'/fixture/ab/hash',uri_param:'?auth_key=1792846800-'+rand+'-0-secret',uuid:'cdn-request-1',body_bytes_sent:'120',response_size:'150',unixtime:'1792846800'}
 describe('trusted provider log ingestion',()=>{
   it('uses the provider request ID, canonical download ID and actual body bytes, omitting bearer data',()=>{
     const parsed=parseTransferLog('cdn',cdn,options)
@@ -18,7 +18,7 @@ describe('trusted provider log ingestion',()=>{
     expect(parseTransferLog('cdn',{...cdn,method:'HEAD'},options)).toBeNull()
   })
   it('fails loudly for missing attribution, wrong domains/prefixes, missing byte fields or malformed timestamps',()=>{
-    for (const row of [{...cdn,uri_param:'auth_key=bad'},{...cdn,domain:'foreign.example.test'},{...cdn,uri:'/other/hash'},{...cdn,body_bytes_sent:undefined},{...cdn,body_bytes_sent:null},{...cdn,body_bytes_sent:''},{...cdn,unixtime:'bad'}]) {
+    for (const row of [{...cdn,uri_param:'?auth_key=bad'},{...cdn,domain:'foreign.example.test'},{...cdn,uri:'/other/hash'},{...cdn,body_bytes_sent:undefined},{...cdn,body_bytes_sent:null},{...cdn,body_bytes_sent:''},{...cdn,unixtime:'bad'}]) {
       expect(()=>parseTransferLog('cdn',row,options)).toThrow()
     }
   })
