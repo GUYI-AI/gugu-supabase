@@ -107,6 +107,17 @@ async function waitBlocked(observer: pg.Client, waiting: pg.Client, blocker: pg.
   } }
 }
 
+async function registerAndroid(f: Fixture, overrides: { provider?: string; token?: string; topic?: string; install?: string; sound?: boolean; environment?: string } = {}) {
+  const install = overrides.install ?? f.install
+  return (await rpc(db, 'authenticated', 'SELECT identity.mobile_push_register($1,$2,$3,$4,$5,$6,true,false,$7,false) AS value',
+    [install, `phone-${install}-${f.owner}`, overrides.provider ?? 'fcm', overrides.token ?? 'FCM_FIXTURE:Token-A',
+      overrides.environment ?? 'production', overrides.topic ?? 'app.gugu.chat.beta', overrides.sound ?? true],
+    { sub: f.owner, session_id: f.session, role: 'authenticated' }))[0].value as { registration_id: string; generation: string }
+}
+async function reserveAndroid(providers = ['fcm']) {
+  return (await rpc(worker, 'gugu_push', "SELECT identity.mobile_push_reserve('production',$1::text[],20) AS id", [providers])).map(r => r.id as string)
+}
+
 describe('mobile push binding and existing notification sources', () => {
   it('registers without an enabled phone host and returns no token; idempotent registration preserves generation', async () => fixture(async f => {
     const first = await register(f)
@@ -354,5 +365,62 @@ describe('mobile push binding and existing notification sources', () => {
       expect((await result)[0].value.evidence).toBe('installation_fenced')
       expect((await db.query('SELECT count(*) FROM identity.mobile_push_registrations WHERE owner_user_id=$1', [f.owner])).rows[0].count).toBe('0')
     } finally { await db.query('ROLLBACK'); await late.end(); await observer.end() }
+  }))
+})
+
+describe('Android provider transport contracts', () => {
+  it('accepts both Android packages with case-sensitive opaque tokens and preserves APNs legacy registration', async () => fixture(async f => {
+    const beta = await registerAndroid(f)
+    expect(await registerAndroid(f)).toEqual(beta)
+    expect((await db.query('SELECT provider,topic FROM identity.mobile_push_registrations WHERE id=$1', [beta.registration_id])).rows[0])
+      .toEqual({ provider: 'fcm', topic: 'app.gugu.chat.beta' })
+    await registerAndroid(f, { topic: 'app.gugu.chat', token: 'FCM_FIXTURE:Token-B' })
+    const ios = await register(f, { install: randomUUID() })
+    expect((await db.query('SELECT provider FROM identity.mobile_push_registrations WHERE id=$1', [ios.registration_id])).rows[0].provider).toBe('apns')
+  }))
+  it('rejects unknown provider, wrong topic/environment, non-ASCII, whitespace and oversized tokens', async () => fixture(async f => {
+    for (const override of [{ provider: 'unknown' }, { topic: 'other.app' }, { environment: 'sandbox' },
+      { token: 'with space' }, { token: '中文' }, { token: '' }, { token: 'a'.repeat(4097) }, { provider: 'apns' }]) {
+      await expect(registerAndroid(f, override)).rejects.toMatchObject({ code: '22023' })
+    }
+  }))
+  it('isolates provider cursors: an APNs worker cannot consume pending FCM events', async () => fixture(async f => {
+    await registerAndroid(f); await send(f)
+    expect(await reserve()).toEqual([])
+    const ids = await reserveAndroid(); expect(ids).toHaveLength(1)
+    expect(await prepare(ids[0])).toMatchObject({ provider: 'fcm', topic: 'app.gugu.chat.beta', token: 'FCM_FIXTURE:Token-A' })
+    expect(await reserveAndroid()).toEqual([])
+    for (const providers of [[], ['unknown'], [null]]) await expect(rpc(worker, 'gugu_push',
+      "SELECT identity.mobile_push_reserve('production',$1::text[],20)", [providers])).rejects.toThrow('Invalid push reservation bounds')
+  }))
+  it('cannot steal another installation token; provider/token/preferences rotate generation on the single package binding', async () => fixture(async f => {
+    const original = await registerAndroid(f)
+    await expect(registerAndroid(f, { install: randomUUID() })).rejects.toMatchObject({ code: '42501' })
+    const changed = await registerAndroid(f, { token: 'FCM_FIXTURE:Token-B' })
+    expect(changed.registration_id).toBe(original.registration_id); expect(changed.generation).not.toBe(original.generation)
+    const quiet = await registerAndroid(f, { token: 'FCM_FIXTURE:Token-B', sound: false })
+    expect(quiet.generation).not.toBe(changed.generation)
+    const vendor = await registerAndroid(f, { provider: 'oppo', token: 'FCM_FIXTURE:Token-B', sound: false })
+    expect(vendor.registration_id).toBe(original.registration_id); expect(vendor.generation).not.toBe(quiet.generation)
+    expect((await db.query('SELECT count(*) FROM identity.mobile_push_registrations WHERE installation_id=$1', [f.install])).rows[0].count).toBe('1')
+  }))
+  it('keeps refreshed generation when an old FCM response is invalid; records acceptance ID without replay', async () => fixture(async f => {
+    await registerAndroid(f); await send(f); const [id] = await reserveAndroid(); await prepare(id)
+    const rotated = await registerAndroid(f, { token: 'FCM_FIXTURE:Token-B' })
+    await rpc(worker, 'gugu_push', "SELECT identity.mobile_push_finish($1,'rejected',now(),NULL)", [id])
+    expect((await db.query('SELECT generation FROM identity.mobile_push_registrations WHERE id=$1', [rotated.registration_id])).rows[0].generation).toBe(rotated.generation)
+    await send(f); const [accepted] = await reserveAndroid(); await prepare(accepted)
+    await rpc(worker, 'gugu_push', "SELECT identity.mobile_push_finish($1,'accepted',NULL,'projects/fixture/messages/one')", [accepted])
+    expect((await db.query('SELECT outcome,provider_message_id FROM identity.mobile_push_attempts WHERE id=$1', [accepted])).rows[0])
+      .toEqual({ outcome: 'accepted', provider_message_id: 'projects/fixture/messages/one' })
+    expect(await reserveAndroid()).toEqual([])
+  }))
+  it('revokes and fences Android registrations through the existing installation cleanup RPCs', async () => fixture(async f => {
+    const binding = await registerAndroid(f)
+    expect((await rpc(db, 'authenticated', 'SELECT identity.mobile_push_revoke($1,$2,$3) AS value',
+      [f.install, binding.registration_id, binding.generation], { sub: f.owner, session_id: f.session, role: 'authenticated' }))[0].value).toBe(true)
+    await registerAndroid(f); await closeScope(f)
+    await expect(registerAndroid(f)).rejects.toMatchObject({ code: '42501' })
+    await send(f); expect(await reserveAndroid()).toEqual([])
   }))
 })

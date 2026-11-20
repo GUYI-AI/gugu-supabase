@@ -7,6 +7,24 @@ on:
 permissions:
   contents: read
 jobs:
+  push-worker-image:
+    name: Push worker image without credentials
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the frozen worker runtime
+        run: docker build -f services/push/Dockerfile -t gugu-push-ci .
+      - name: Exercise the packaged entry point without network or credentials
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' gugu-push-ci)" = node
+          set +e
+          docker run --rm --network none --read-only --tmpfs /tmp gugu-push-ci > worker.stdout 2> worker.stderr
+          code=$?
+          set -e
+          test "$code" = 1
+          test ! -s worker.stdout
+          test "$(cat worker.stderr)" = '{"event":"push_worker_failed","phase":"configuration"}'
   migration-source:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -137,7 +155,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Test candidate migration checker offline
-        run: node --test tests/ci/migration-versions.test.mjs tests/ci/application-owner-baseline.test.mjs
+        run: node --test tests/ci/migration-versions.test.mjs tests/ci/application-owner-baseline.test.mjs tests/ci/attachment-quota-preservation.test.mjs
       - name: Validate candidate owner snapshot format and policy
         run: node scripts/ci/application-owner-baseline.mjs --snapshot release/production-object-owners.json
       - run: pnpm test
@@ -186,6 +204,19 @@ jobs:
           docker info --format '{{.RegistryConfig.Mirrors}}'
       - run: pnpm test:db:start
       - run: pnpm test:installation
+      - name: Upload actual writer body and ACL comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attachment-quota-359-${{ github.run_attempt }}
+          path: .local/verification/attachment-quota-359.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+      - name: Prove Auth audit fixture isolation with the real cron worker
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: node tests/ci/auth-audit-cron-race.mjs "$PWD" "$SOURCE_SHA"
       - name: Check installed candidate application owners
         env:
           OWNER_ENFORCED: ${{ needs.migration-source.outputs.owner_enforced }}

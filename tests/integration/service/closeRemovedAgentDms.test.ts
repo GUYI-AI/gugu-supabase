@@ -121,8 +121,8 @@ it.each(['delete-first', 'remove-first'])('commits %s personal deletion and remo
   const deleting = new Client({ connectionString }), removing = new Client({ connectionString })
   await deleting.connect(); await removing.connect()
   try {
+    // The agent is not archived: an archived agent's DM has left the owner's list, so it cannot be deleted from it.
     for (const client of [deleting, removing]) await client.query("BEGIN; SET LOCAL statement_timeout='5s'")
-    await db.query('UPDATE identity.users SET session_archived_at=now() WHERE id=$1', [agent])
     await as(deleting, owner); await as(removing, owner)
     const remove = () => removing.query('SELECT identity.archive_user($1,true)', [agent])
     const del = () => deleting.query('SELECT chat.delete_my_dm_conversation($1) AS r', [ownerDm])
@@ -144,11 +144,11 @@ it.each(['delete-first', 'remove-first'])('commits %s personal deletion and remo
   }
 })
 
-// The client archives the session first (#236: the agent leaves its groups, keeps its DMs), then removes the identity.
+// The client archives the session first (the agent leaves its groups and its DMs leave both lists), then removes
+// the identity: removal reopens the seats and closes the DMs for the other side as a personal delete.
 it('closes the DMs of an agent that was session-archived before removal', async () => {
   await db.query('UPDATE identity.users SET session_archived_at=now() WHERE id=$1', [agent])
-  expect((await db.query('SELECT chat_id FROM chat.active_members WHERE user_id=$1 ORDER BY chat_id', [agent])).rows.map(r => r.chat_id))
-    .toEqual([ownerDm, friendDm].sort())
+  expect((await db.query('SELECT chat_id FROM chat.active_members WHERE chat_id=ANY($1)', [[ownerDm, friendDm]])).rows).toEqual([])
   await archive()
   expect((await db.query('SELECT chat_id FROM chat.chat_members WHERE chat_id=ANY($1) AND user_id<>$2 AND conversation_deleted_at IS NOT NULL ORDER BY chat_id',
     [[ownerDm, friendDm, group], agent])).rows.map(r => r.chat_id)).toEqual([ownerDm, friendDm].sort())

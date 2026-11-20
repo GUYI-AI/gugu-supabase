@@ -240,10 +240,11 @@ describe('a deleted DM keeps its bytes while the other side can still see it', (
   const deleteDm = async () => { await user(owner); await db.query('SELECT chat.delete_my_dm_conversation($1)', [dm]); await service() }
   const removeAgent = async () => { await user(owner); await db.query('SELECT identity.archive_user($1,true)', [agent]); await service() }
 
-  it('list deletion and later agent removal leave the hidden owner able to read', async () => {
+  it('session archival keeps a closed DM and its bytes, and later agent removal leaves the owner able to read', async () => {
     const { blob, message } = await send(dm, owner)
-    await archiveAgent(); await deleteDm()
-    expect(await collected(blob)).toEqual([])
+    await archiveAgent()
+    // Both seats have left the lists, but the conversation still exists: nothing about it is collectable.
+    expect(await gone(dm)).toBe(false)
     await removeAgent()
     expect(await gone(dm)).toBe(false)
     await queue(blob)

@@ -88,6 +88,23 @@ async function waitingOn(pid: number, pending: Promise<unknown>): Promise<string
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
 }
+async function waitingOnQuota(waiter: number, holder: number, pending: Promise<unknown>) {
+  expect(await waitingOn(waiter, pending)).toBe('waiting on advisory')
+  const { rows } = await monitor.query<{ quota: boolean; blocker: boolean }>(`
+    WITH quota AS (SELECT hashtextextended('gugu:file-transfer:quota',0) AS key)
+    SELECT EXISTS (
+      SELECT 1 FROM pg_locks waiting JOIN pg_locks held
+        ON held.locktype=waiting.locktype AND held.database=waiting.database
+       AND held.classid=waiting.classid AND held.objid=waiting.objid AND held.objsubid=waiting.objsubid
+      CROSS JOIN quota
+      WHERE waiting.pid=$1 AND NOT waiting.granted AND waiting.locktype='advisory'
+        AND waiting.mode='ExclusiveLock' AND waiting.objsubid=1
+        AND waiting.classid::bigint=((quota.key>>32)&4294967295::bigint)
+        AND waiting.objid::bigint=(quota.key&4294967295::bigint)
+        AND held.pid=$2 AND held.granted AND held.mode='ExclusiveLock'
+    ) AS quota, $2::integer=ANY(pg_blocking_pids($1::integer)) AS blocker`, [waiter, holder])
+  expect(rows).toEqual([{ quota: true, blocker: true }])
+}
 const pidOf = async (db: DatabaseClient) => (await db.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid
 /** The error a pending statement ended with (message | hint), or 'ok'. */
 const outcome = (pending: Promise<unknown>) =>
@@ -106,7 +123,7 @@ beforeAll(async () => {
 })
 afterAll(async () => {
   if (!database) return
-  await database.query('ROLLBACK').catch(() => undefined)
+  await Promise.all([database, other].map(db => db.query('ROLLBACK').catch(() => undefined)))
   // 只删这里建的对话(条目、历史、消息随它走)和这里的 pointer 的 blob(回收队列行随它走);测试号留在用完即弃的库里。
   for (const chat of chats) await database.query('DELETE FROM chat.chats WHERE id = $1', [chat])
   await database.query(`DELETE FROM chat.file_blobs WHERE bucket_id = 'workspace' AND object_name = ANY($1)`, [pointers])
@@ -150,10 +167,17 @@ describe('修剪 vs 钉旧版本(复核 L11 要改 5)', () => {
     await asUser(member)
     const pinning = database.query(SEND, [randomUUID(), group, member, [], a.envelope2, 'attachment', a.file, 2])
     const pinned = outcome(pinning)
-    expect(await waitingOn(databasePid, pinning)).toMatch(/^waiting on (transactionid|tuple)$/)
-    await other.query('COMMIT')
-    expect(await pinned).toMatch(/^version 2 of that file has no bytes to send \| hint: message_file_not_here$/)
-    await database.query('ROLLBACK')
+    let pinResult: string
+    try {
+      // The file row is now protected behind the same quota admission used by
+      // replacement. Prove the exact key and peer holder, not any advisory wait.
+      await waitingOnQuota(databasePid, otherPid, pinning)
+    } finally {
+      await other.query('COMMIT')
+      pinResult = await pinned
+      await database.query('ROLLBACK')
+    }
+    expect(pinResult).toMatch(/^version 2 of that file has no bytes to send \| hint: message_file_not_here$/)
     expect((await versions(a.file))[0], '第 2 版裁掉了,没有消息钉着它').toBe(3)
 
     // ② 对照:database 先钉第 2 版、事务开着;other 换到第 52 版,等它提交,修剪看得见钉住。
@@ -164,10 +188,15 @@ describe('修剪 vs 钉旧版本(复核 L11 要改 5)', () => {
     await asUser(owner, other)
     const replacing = other.query(REPLACE, [b.file, owner, await object(group, owner), 99])
     const replaced = outcome(replacing)
-    expect(await waitingOn(otherPid, replacing)).toMatch(/^waiting on (transactionid|tuple)$/)
-    await database.query('COMMIT')
-    expect(await replaced).toBe('ok')
-    await other.query('COMMIT')
+    let replaceResult: string
+    try {
+      await waitingOnQuota(otherPid, databasePid, replacing)
+    } finally {
+      await database.query('COMMIT')
+      replaceResult = await replaced
+      await other.query('COMMIT')
+    }
+    expect(replaceResult).toBe('ok')
     const kept = await versions(b.file)
     expect(kept[0], '钉着的第 2 版留下').toBe(2)
     expect(kept).toHaveLength(51)
