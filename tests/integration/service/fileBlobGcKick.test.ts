@@ -51,6 +51,30 @@ async function queued(state: 'due' | 'later' | 'stale'): Promise<string> {
   }
   return blob
 }
+/** No upload copy is due and no multipart upload is open, within this transaction. */
+async function noUploadWork() {
+  await database.query('UPDATE chat.file_transfer_uploads SET staging_deleted=true, upload_id=NULL WHERE NOT staging_deleted OR upload_id IS NOT NULL')
+}
+/** A live staging permit of a fresh account in its own group. */
+async function permit(): Promise<{ id: string; key: string }> {
+  const user = randomUUID(), group = randomUUID(), id = randomUUID()
+  await database.query(`INSERT INTO auth.users (id,aud,role,email,raw_app_meta_data,raw_user_meta_data,created_at,updated_at)
+    VALUES ($1,'authenticated','authenticated',$2,'{"provider":"email","providers":["email"]}','{}',now(),now())`, [user, `${user}@gc-kick.invalid`])
+  await database.query("INSERT INTO chat.chats(id,kind,name,creator_user_id) VALUES($1,'group','kick',$2)", [group, user])
+  await database.query("INSERT INTO chat.chat_members(chat_id,user_id,role) VALUES($1,$2,'owner')", [group, user])
+  const global = Number((await database.query<{ n: string }>("SELECT chat.file_transfer_usage('upload','global','*') AS n")).rows[0]!.n)
+  await database.query(`INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1)
+    ON CONFLICT(scope,scope_id) DO UPDATE SET settings=EXCLUDED.settings`, [{ inventory_ready: true,
+    storage_global_bytes: global + 100000, storage_account_bytes: 100000, storage_group_bytes: 100000,
+    download_global_bytes: 100000, download_account_bytes: 100000, download_group_bytes: 100000,
+    upload_permit_seconds: 120, upload_edge_seconds: 400, upload_sign_seconds: 900, upload_inflight_seconds: 600,
+    sign_window_seconds: 60, sign_account_count: 100, sign_group_count: 100, file_max_bytes: 1000 }])
+  await database.query('SET LOCAL ROLE authenticated')
+  await database.query("SELECT set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: user, role: 'authenticated' })])
+  const key = (await database.query<{ r: { staging_key: string } }>('SELECT chat.file_managed_upload_as($1,$2,$3,$4) AS r', [id, group, user, 60])).rows[0]!.r.staging_key
+  await database.query('RESET ROLE')
+  return { id, key }
+}
 const kick = async () => (await database.query<{ id: string | null }>('SELECT chat.file_blob_gc_kick() AS id')).rows[0]!.id
 const requests = async () => (await database.query<{ id: string; method: string; url: string; headers: Record<string, string>; timeout_milliseconds: number }>(
   'SELECT id::text, method, url, headers, timeout_milliseconds FROM net.http_request_queue ORDER BY id')).rows
@@ -80,6 +104,7 @@ afterEach(async () => { await database?.query('ROLLBACK') })
 describe('chat.file_blob_gc_kick', () => {
   it('没有到期的活:不发请求、回 NULL(Vault 设没设都一样)', async () => {
     await secrets(URL_SECRET, 'service-key-for-test')
+    await noUploadWork()
     await queued('later')
     const before = (await requests()).length
     expect(await kick()).toBeNull()
@@ -97,6 +122,24 @@ describe('chat.file_blob_gc_kick', () => {
     // 租约过期(调用者死了):领取那一步会收回,也要叫。
     await database.query('DELETE FROM chat.file_blob_gc')
     await queued('stale')
+    expect(await kick()).not.toBeNull()
+  })
+
+  it('blob 都没到期,但有上传副本待清或过期的分片:也叫(同一个请求)', async () => {
+    await secrets(URL_SECRET, 'service-key-for-test')
+    await noUploadWork()
+    await queued('later')
+    expect(await kick()).toBeNull()
+    // An upload copy due for removal: a staging permit whose hold was released, never registered.
+    const copy = await permit()
+    await database.query("UPDATE chat.file_transfer_reservations SET release_at=now()-interval '1 second' WHERE id=$1", [copy.id])
+    expect(await kick()).not.toBeNull()
+    await database.query('UPDATE chat.file_transfer_uploads SET staging_deleted=true WHERE staging_key=$1', [copy.key])
+    expect(await kick()).toBeNull()
+    // An expired multipart upload, nothing else.
+    const parts = await permit()
+    await database.query("UPDATE chat.file_transfer_uploads SET upload_id='U-test',staging_deleted=true WHERE staging_key=$1", [parts.key])
+    await database.query("UPDATE chat.file_transfer_reservations SET expires_at=now()-interval '1 second' WHERE id=$1", [parts.id])
     expect(await kick()).not.toBeNull()
   })
 
