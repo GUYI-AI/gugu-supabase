@@ -68,9 +68,10 @@ function world(opts: { stored?: boolean; busy?: boolean; object?: Uint8Array; si
     }
     if (method === 'DELETE' && upload) { upload.state = 'aborted'; return new Response(null, { status: 204 }) }
     if (method === 'DELETE') { objects.delete(key); return new Response(null, { status: 204 }) }
-    if (method === 'HEAD') return objects.has(key)
-      ? new Response(null, { status: 200, headers: { 'content-length': String(objects.get(key)!.length), 'x-oss-hash-crc64ecma': checksum(objects.get(key)!) } })
-      : new Response(null, { status: 404 })
+    // As OSS does for a compressible object: asked for anything but identity, the HEAD comes compressed, without its length.
+    if (method === 'HEAD') return !objects.has(key) ? new Response(null, { status: 404 })
+      : headers['accept-encoding'] !== 'identity' ? new Response(null, { status: 200, headers: { 'content-encoding': 'gzip', 'x-oss-hash-crc64ecma': checksum(objects.get(key)!) } })
+      : new Response(null, { status: 200, headers: { 'content-length': String(objects.get(key)!.length), 'x-oss-hash-crc64ecma': checksum(objects.get(key)!) } })
     if (method === 'GET') return ranged(objects.get(key), headers.range ?? null) ?? new Response('<Error><Code>NoSuchKey</Code></Error>', { status: 404 })
     return new Response('unexpected', { status: 500 })
   }
@@ -85,7 +86,8 @@ function world(opts: { stored?: boolean; busy?: boolean; object?: Uint8Array; si
     }
     const bytes = objects.get(key)
     if (!bytes) return new Response('{"statusCode":"404"}', { status: 400 })
-    if (method === 'HEAD') return new Response(null, { status: 200, headers: { 'content-length': String(bytes.length), etag: `"${checksum(bytes)}"` } })
+    if (method === 'HEAD') return new Response(null, { status: 200, headers: headers['accept-encoding'] !== 'identity'
+      ? { 'content-encoding': 'gzip', etag: `"${checksum(bytes)}"` } : { 'content-length': String(bytes.length), etag: `"${checksum(bytes)}"` } })
     return ranged(bytes, headers.range ?? null)!
   }
   const row = opts.stored ? null : {

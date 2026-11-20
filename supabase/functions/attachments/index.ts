@@ -111,12 +111,12 @@ function depsFor(authorization: string, storage: AttachmentStorageConfig): Attac
     fetch: (input, init) => fetch(input, init),
     userRpc: async (fn, args) => {
       const { data, error, status } = await asUser.rpc(fn, args)
-      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code, status } : null }
+      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code, details: error.details, status } : null }
     },
     serviceRpc: async (fn, args, signal) => {
       const query = asService.rpc(fn, args)
       const { data, error, status } = await (signal ? query.abortSignal(signal) : query)
-      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code, status } : null }
+      return { data, error: error ? { message: error.message, hint: error.hint, code: error.code, details: error.details, status } : null }
     },
     storageSignedUrl:signStorage,
     storageRemove: async (bucket, object) => {
