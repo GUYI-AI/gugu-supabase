@@ -48,7 +48,7 @@ describe('download input and signed throttles',()=>{
     const deps={userRpc:vi.fn<AttachmentsDeps['userRpc']>(async(_name,args)=>({data:(args.p_ref as Record<string,unknown>).item_id?local:expired,error:null}))} as unknown as AttachmentsDeps
     const refs=[{message_id:'expired'},{item_id:'11111111-1111-4111-8111-111111111111'}]
     expect(await handleFileResolve(deps,'reader',{ref:refs[0]})).toEqual(expired)
-    expect(await handleFileResolve(deps,'reader',{refs})).toEqual({files:[{...expired,ref:refs[0]},{...local,ref:refs[1]}]})
+    expect(await handleFileResolve(deps,'reader',{refs})).toEqual({files:[{...expired,ref:refs[0]},{...local,thumbnail_available:false,ref:refs[1]}]})
   })
   it('metadata display calls only the read-only RPC and never invokes a provider or signing RPC',async()=>{
     const calls:string[]=[]
@@ -105,7 +105,7 @@ describe('one download contract with optional provider throttling',()=>{
       download_id:request,signed_at:at,expires_at:'2026-10-24T00:01:00Z',content_type:'application/octet-stream',...metadata},error:null}))
     const sign=vi.fn(async(_key:string,image:boolean)=>({url:'https://bytes.example/file',thumbUrl:image?'https://bytes.example/thumb':null,expiresAt:'2026-10-24T00:01:00Z'}))
     const storageSignedUrl=vi.fn(async()=> 'https://storage.example/file')
-    const deps={userRpc,serviceRpc:vi.fn(async()=>({data:settings,error:null})),objects:{sign},storageSignedUrl} as unknown as Parameters<typeof handleFileDownload>[0]
+    const deps={userRpc,serviceRpc:vi.fn(async()=>({data:settings,error:null})),objects:{sign,thumbnails:true},storageSignedUrl} as unknown as Parameters<typeof handleFileDownload>[0]
     return {deps,userRpc,sign,storageSignedUrl}
   }
   it.each(['oss','workspace','temporary'])('signs %s without a rate declaration after the same ACL/reservation RPC',async bucket=>{
@@ -188,5 +188,38 @@ describe('one download contract with optional provider throttling',()=>{
     f.userRpc.mockResolvedValueOnce({data:{status:'missing',code:'object_not_found',sha256:null},error:null})
     expect(await handleFileDownload(f.deps,'reader',{ref:{message_id:'m'},request_id:request})).toEqual({status:'missing',code:'object_not_found',sha256:null})
     expect(f.sign).not.toHaveBeenCalled();expect(f.storageSignedUrl).not.toHaveBeenCalled();expect(f.deps.serviceRpc).not.toHaveBeenCalled()
+  })
+})
+describe('file-resolve says whether a download is signed with a thumbnail',()=>{
+  const image={status:'ready',source:'managed-object',bucket_id:'oss',object_name:'ab/object',content_type:'image/png',size_bytes:48_685,width:1200,height:900}
+  const rows:Array<[string,Record<string,unknown>,boolean]>=[
+    ['an OSS image',image,true],
+    ['an OSS image over the size limit',{...image,size_bytes:20_971_521},false],
+    ['an OSS SVG',{...image,content_type:'image/svg+xml'},false],
+    ['an OSS non-image',{...image,content_type:'application/pdf'},false],
+    ['a Supabase Storage object',{...image,bucket_id:'workspace'},false],
+    ['a temporary transfer',{...image,bucket_id:'temporary'},false],
+    ['a file kept on its sender\'s machine',{status:'ready',source:'local',content_type:'image/png',size_bytes:48_685},false],
+  ]
+  const deps=(row:Record<string,unknown>,thumbnails=true)=>({
+    userRpc:vi.fn(async(name:string)=>({data:name==='file_resolve_as'?row:{...row,download_id:'11111111-1111-4111-8111-111111111111',signed_at:'2026-10-24T00:00:00Z',expires_at:'2026-10-24T00:01:00Z'},error:null})),
+    serviceRpc:vi.fn(async()=>({data:{},error:null})),storageSignedUrl:vi.fn(async()=>'https://storage.example/file'),
+    objects:{...(thumbnails?{thumbnails:true}:{}),sign:vi.fn(async(_key:string,image:boolean)=>({url:'https://bytes.example/file',thumbUrl:image?'https://bytes.example/thumb':null,expiresAt:'2026-10-24T00:01:00Z'}))},
+  }) as unknown as AttachmentsDeps
+  it.each(rows)('%s',async(_label,row,expected)=>{
+    const d=deps(row)
+    expect(await handleFileResolve(d,'reader',{ref:{message_id:'m'}})).toMatchObject({thumbnail_available:expected})
+    expect(await handleFileResolve(d,'reader',{refs:[{message_id:'m'}]})).toMatchObject({files:[{thumbnail_available:expected}]})
+    if(row.source==='managed-object') {
+      // The same rule signs the download: a thumbnail URL exactly when resolve said so.
+      const signed=await handleFileDownload(d,'reader',{ref:{message_id:'m'},request_id:'11111111-1111-4111-8111-111111111111'})
+      expect('thumb_url'in signed&&signed.thumb_url!==null).toBe(expected)
+    }
+  })
+  it('is false for every row of a store that signs originals only (Supabase Storage)',async()=>{
+    expect(await handleFileResolve(deps(image,false),'reader',{ref:{message_id:'m'}})).toMatchObject({thumbnail_available:false})
+  })
+  it('is only on ready rows',async()=>{
+    expect(await handleFileResolve(deps({status:'gone'}),'reader',{ref:{message_id:'m'}})).toEqual({status:'gone'})
   })
 })

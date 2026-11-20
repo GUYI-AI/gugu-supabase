@@ -1,6 +1,6 @@
 import { type AttachmentsDeps, type Rpc, call, objectStorage, Refusal } from './attachments-core.ts'
 import { canSignThumbnail } from './blob-sniff.ts'
-import { ObjectStorageError } from './object-storage.ts'
+import { type AttachmentObjectStorage, ObjectStorageError } from './object-storage.ts'
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 export function fileRef(value:unknown):Record<string,unknown> {
@@ -14,12 +14,23 @@ export function fileRef(value:unknown):Record<string,unknown> {
   throw new Refusal(400,'invalid','Expected an exact item/version, attachment or message reference')
 }
 
+type SignedRow={bucket_id?:unknown;content_type?:unknown;size_bytes?:unknown;width?:unknown;height?:unknown}
+/** Whether a download of this row is signed with a thumbnail: the signer's one rule, which file-resolve also tells readers. */
+export const thumbnailAvailable=(store:()=>AttachmentObjectStorage,row:SignedRow):boolean=>
+  row.bucket_id==='oss'&&store().thumbnails===true&&canSignThumbnail(String(row.content_type),row.size_bytes,row.width,row.height)
+
 export async function handleFileResolve(deps:AttachmentsDeps,user:string,body:Record<string,unknown>) {
   const refs='refs'in body?body.refs:[body.ref]
   if (!Array.isArray(refs)||refs.length<1||refs.length>200||'refs'in body&&'ref'in body) throw new Refusal(400,'invalid','Expected 1 to 200 file references')
   const exact=refs.map(fileRef),actor=typeof body.as==='string'?body.as:user
-  const rows=await Promise.all(exact.map(ref=>call(deps.userRpc,'file_resolve_as',{p_ref:ref,p_as:actor})))
-  return 'refs'in body?{files:rows.map((row,i)=>({...row as Record<string,unknown>,ref:exact[i]}))}:rows[0]
+  // The store is made once for the whole batch, and only when an OSS row asks.
+  let made:AttachmentObjectStorage|undefined
+  const store=()=>made??=objectStorage(deps)
+  const rows=(await Promise.all(exact.map(ref=>call(deps.userRpc,'file_resolve_as',{p_ref:ref,p_as:actor})))).map(value=>{
+    const row=value as Record<string,unknown>
+    return row.status==='ready'?{...row,thumbnail_available:thumbnailAvailable(store,row)}:row
+  })
+  return 'refs'in body?{files:rows.map((row,i)=>({...row,ref:exact[i]}))}:rows[0]
 }
 
 export async function handleFileDownload(deps:AttachmentsDeps,user:string,body:Record<string,unknown>) {
@@ -33,9 +44,11 @@ export async function handleFileDownload(deps:AttachmentsDeps,user:string,body:R
   const cfg=await call(deps.serviceRpc,'file_transfer_settings',{}) as Record<string,unknown>
   const traffic=cfg.download_link_bits_per_second===undefined?undefined:Number(cfg.download_link_bits_per_second)
   if (traffic!==undefined&&(!Number.isSafeInteger(traffic)||traffic<819200||traffic>838860800)) throw new Refusal(503,'not_configured','Download rate is not configured')
+  let made:AttachmentObjectStorage|undefined
+  const store=()=>made??=objectStorage(deps)
   try {
     const signed=row.bucket_id==='oss'||row.bucket_id==='temporary'
-      ?await objectStorage(deps).sign(row.object_name,row.bucket_id==='oss'&&canSignThumbnail(row.content_type,row.size_bytes,row.width,row.height),new Date(row.signed_at),{
+      ?await store().sign(row.object_name,thumbnailAvailable(store,row),new Date(row.signed_at),{
         requestId:row.download_id,expiresSeconds:60,...(traffic===undefined?{}:{trafficBits:traffic}),...(row.bucket_id==='temporary'||body.origin===true?{direct:true}:{}),
       })
       :{url:await deps.storageSignedUrl(row.bucket_id,row.object_name,60,traffic),thumbUrl:null}
