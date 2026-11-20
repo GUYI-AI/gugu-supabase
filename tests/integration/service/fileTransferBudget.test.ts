@@ -63,6 +63,21 @@ beforeEach(async () => {
 })
 afterEach(async () => { await db.query('ROLLBACK') })
 describe('atomic transfer budgets', () => {
+  it('counts an unsettled download only in the UTC month it was signed',async()=>{
+    const usage=async()=>Promise.all(['global','account','group'].map(async(scope)=>Number((await db.query(
+      'SELECT chat.file_transfer_usage($1,$2,$3) AS n',['download',scope,scope==='global'?'*':scope==='account'?owner:group])).rows[0].n)))
+    const initial=await usage()
+    const earlier=randomUUID(), current=randomUUID()
+    await reserve(100,'download',owner,group,earlier,'signed last month')
+    await reserve(30,'download',owner,group,current,'signed this month')
+    expect(await usage()).toEqual(initial.map(n=>n+130))
+    // Signed before this UTC month and never settled: no longer held against this month's budget.
+    await db.query("UPDATE chat.file_transfer_reservations SET created_at=date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'-interval '1 second' WHERE id=$1",[earlier])
+    expect(await usage()).toEqual(initial.map(n=>n+30))
+    // The first instant of the month still belongs to it.
+    await db.query("UPDATE chat.file_transfer_reservations SET created_at=date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' WHERE id=$1",[earlier])
+    expect(await usage()).toEqual(initial.map(n=>n+130))
+  })
   it('keeps ledger usage equal to holds and UTC-month observations through reconciliation and deletion',async()=>{
     const id=randomUUID()
     await reserve(100,'download',owner,group,id,'ledger lifecycle')
@@ -160,24 +175,29 @@ describe('atomic transfer budgets', () => {
     for (const until of [null, 'infinity', 'tomorrow']) {
       expect((await reject('SELECT chat.file_transfer_downloads_closed($1,$2,$3)',[until,['oss'],'logs:test'])).message).toMatch(/cutoff/)
     }
+    // Signed before this UTC month, these unsettled holds no longer count against it; closure settles them.
     const held = async () => Number((await db.query("SELECT chat.file_transfer_usage('download','account',$1) AS n",[owner])).rows[0].n)
+    const open = async () => Number((await db.query("SELECT count(*) AS n FROM chat.file_transfer_reservations WHERE id=ANY($1) AND state IN ('reserved','issued')",[[permanent,temporary]])).rows[0].n)
     const initial = await held()
+    expect(await open()).toBe(2)
     expect((await db.query(close,[['cdn'],'logs:cdn'])).rows[0].n).toBe(0)
     expect((await db.query(close,[['oss'],'logs:direct'])).rows[0].n).toBe(1)
-    expect(await held()).toBe(initial-10)
+    expect(await open()).toBe(1)
     expect((await db.query(close,[['cdn','oss'],'logs:both'])).rows[0].n).toBe(1)
     expect((await db.query(close,[['oss','cdn'],'logs:retry'])).rows[0].n).toBe(0)
-    expect(await held()).toBe(initial-20)
+    expect(await open()).toBe(0)
+    expect(await held()).toBe(initial)
     const state = async (id: string) => (await db.query('SELECT state,close_evidence FROM chat.file_transfer_reservations WHERE id=$1',[id])).rows[0]
     expect(await state(temporary)).toEqual({state:'settled',close_evidence:'logs:direct'})
     for (const id of [...excluded, observed]) expect(await state(id)).toEqual({state:'issued',close_evidence:null})
 
+    // Settled downloads count only their observations in this UTC month.
     await db.query('SELECT chat.file_transfer_settle($1)',[observed])
-    expect(await held()).toBe(initial-30)
+    expect(await held()).toBe(initial)
     await db.query(`SELECT chat.file_transfer_observe('prior-month',$1,12,(${cutoff}))`,[permanent])
-    expect(await held()).toBe(initial-30)
+    expect(await held()).toBe(initial)
     await db.query("SELECT chat.file_transfer_observe('current-month',$1,18,now())",[permanent])
-    expect(await held()).toBe(initial-12)
+    expect(await held()).toBe(initial+18)
     expect(await state(permanent)).toEqual({state:'settled',close_evidence:'logs:both'})
   })
   it('only trusted imports can reconcile a current download, without refunding its issued capability',async()=>{
@@ -259,10 +279,10 @@ describe('atomic transfer budgets', () => {
     expect((await db.query('SELECT actual_bytes FROM chat.file_transfer_reservations WHERE id=$1', [r.id])).rows[0].actual_bytes).toBe('130')
     expect((await reject("SELECT chat.file_transfer_observe('get-1',$1,131,$2)", [r.id, at])).message).toMatch(/immutable/)
   })
-  it('old issued capabilities remain reserved across a UTC month boundary', async () => {
+  it('an unsettled capability signed in an earlier UTC month does not hold this month\'s budget', async () => {
     await reserve(600)
     await db.query("UPDATE chat.file_transfer_reservations SET period='2000-01-01',created_at=now()-interval '40 days',state='issued'")
-    expect((await reject('SELECT chat.file_transfer_reserve($1,$2,$3,$4,$5,$6)', [randomUUID(), 'download', owner, group, 101, 'carry'])).hint).toBe('file_transfer_group_download_full')
+    await reserve(101, 'download', owner, group, randomUUID(), 'carry')
   })
   it('rate limits new signatures but permits an identical retry without another charge', async () => {
     await db.query("UPDATE chat.file_transfer_limits SET settings=settings||'{\"sign_account_count\":1}' WHERE scope='global'")
