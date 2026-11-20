@@ -51,7 +51,7 @@ afterAll(async () => {
       await fx.admin.query('DELETE FROM chat.file_transfer_uploads WHERE account_id=$1', [user])
       await fx.admin.query('DELETE FROM chat.file_transfer_reservations WHERE id=ANY($1::uuid[])', [reservations])
       await fx.admin.query('DELETE FROM chat.file_transfer_storage WHERE blob_id=ANY($1::uuid[])', [blobs])
-      await fx.admin.query('DELETE FROM chat.file_blobs WHERE id=ANY($1::uuid[])', [blobs])
+      await fx.admin.query('DELETE FROM chat.file_blobs WHERE id=ANY($1::uuid[]) AND created_by=$2', [blobs, user])
       const result = await admin.auth.admin.deleteUser(user)
       if (result.error) throw result.error
     }
@@ -63,8 +63,9 @@ afterAll(async () => {
 })
 
 async function fixture(type = 'text/markdown') {
-  const json = type === 'application/json', original = json ? '{"before":true}' : '# original'
-  const text = json ? '{"after":true}' : '# replaced', bytes = new TextEncoder().encode(text)
+  const json = type === 'application/json', unique = randomUUID()
+  const original = json ? JSON.stringify({ before: unique }) : '# original ' + unique
+  const text = json ? JSON.stringify({ after: unique }) : '# replaced ' + unique, bytes = new TextEncoder().encode(text)
   const digest = createHash('sha256').update(bytes).digest('hex')
   const originalKey = `staging/${user}/${randomUUID()}`
   const blob = (await fx.admin.query('SELECT * FROM chat.file_blob_register($1,$2,$3,$4,$5)',
@@ -106,7 +107,7 @@ async function fixture(type = 'text/markdown') {
     expect((await fx.admin.query('SELECT count(*)::int AS n FROM chat.messages WHERE id=$1', [message])).rows[0].n).toBe(1)
     expect(await receipt()).toMatchObject({ item_id: item, message_id: message })
   }
-  return { deps, body, digest, key, item, bytes, type, receipt, verify, absent() { available = false }, uploaded() { available = true } }
+  return { deps, body, digest, key, item, bytes, type, text, receipt, verify, absent() { available = false }, uploaded() { available = true } }
 }
 
 describe('text replacement commit and finish order (#378)', () => {
@@ -155,7 +156,7 @@ describe('text replacement commit and finish order (#378)', () => {
     let commit: Promise<unknown> | undefined, commitError: unknown
     try {
       await finish.query('BEGIN; SET LOCAL ROLE service_role')
-      await finish.query('SELECT chat.file_blob_settle($1,$2,$2,$3,$4,$5,NULL,NULL,$6)', [user, f.key, f.digest, f.bytes.length, f.type, { text: '# replaced', content_type: f.type }])
+      await finish.query('SELECT chat.file_blob_settle($1,$2,$2,$3,$4,$5,NULL,NULL,$6)', [user, f.key, f.digest, f.bytes.length, f.type, { text: f.text, content_type: f.type }])
       commit = handleCommit(f.deps, user, f.body).catch(error => { commitError = error })
       const holder = Number((await finish.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
       const deadline = Date.now() + 5000
