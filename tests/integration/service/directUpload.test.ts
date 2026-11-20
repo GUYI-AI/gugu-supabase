@@ -116,6 +116,23 @@ describe('direct upload', () => {
     expect((await issue(digest)).status).toBe('upload')
   })
 
+  it('holds a staging-path registration of the same object until an unresolved direct permit resolves', async () => {
+    const digest = sha()
+    const direct = await issue(digest)
+    await db.query("UPDATE chat.file_transfer_reservations SET release_at=now()-interval '1 second' WHERE id=$1", [direct.id])
+    expect((await db.query('SELECT * FROM chat.file_direct_upload_cleanup_claim(50)')).rows.some(r => r.staging_key === direct.staging_key)).toBe(true)
+    // An older client of the same account registers the same bytes through staging while the cleanup is deleting.
+    await user(owner)
+    const legacy = (await db.query('SELECT chat.file_managed_upload_as($1,$2,$3,$4) AS r', [randomUUID(), group, owner, 60])).rows[0].r.staging_key
+    await service()
+    const refused = await reject('SELECT * FROM chat.file_blob_register($1,$2,$3,$4,$5)', [owner, legacy, digest, 60, 'application/octet-stream'])
+    expect(refused.hint).toBe('file_transfer_upload_in_progress')
+    expect((await db.query("SELECT count(*)::int AS n FROM chat.file_blobs WHERE bucket_id='oss' AND object_name=$1", ['u/' + owner + '/' + digest])).rows[0].n).toBe(0)
+    await db.query('SELECT chat.file_direct_upload_cleanup_done($1,true)', [direct.staging_key])
+    const blob = await register(legacy, digest)
+    expect(blob).toMatchObject({ object_name: 'u/' + owner + '/' + digest, created: true })
+  })
+
   it('admits a stored key only where its actor may write', async () => {
     const digest = sha()
     await register((await issue(digest)).staging_key, digest)

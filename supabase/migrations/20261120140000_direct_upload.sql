@@ -229,6 +229,29 @@ BEGIN
     IF NOT FOUND OR u.actor_id<>actor THEN');
 END $scope$;
 
+-- Registration on the staging path (older clients) creates the same owned object a direct permit writes. While another
+-- direct permit for that object is unresolved (its upload may land, or GC may be deleting its object), creating the blob
+-- here would race that permit, so it answers the same retryable upload_in_progress as issuing does.
+DO $race$
+DECLARE guard text := '
+    IF NOT EXISTS(SELECT 1 FROM chat.file_blobs x WHERE x.bucket_id = ''oss'' AND x.object_name = ''u/'' || p_uploader || ''/'' || %1$s)
+       AND EXISTS(SELECT 1 FROM chat.file_transfer_uploads o WHERE o.object_key = ''u/'' || p_uploader || ''/'' || %1$s
+           AND o.blob_id IS NULL AND NOT o.staging_deleted AND o.staging_key <> %2$s) THEN
+        RAISE EXCEPTION ''These bytes are being uploaded by another request'' USING HINT = ''file_transfer_upload_in_progress'',
+            DETAIL = (SELECT COALESCE(max(r.release_at), now())::text FROM chat.file_transfer_uploads o
+                JOIN chat.file_transfer_reservations r ON r.id = o.reservation_id
+                WHERE o.object_key = ''u/'' || p_uploader || ''/'' || %1$s AND o.blob_id IS NULL AND NOT o.staging_deleted);
+    END IF;
+';
+BEGIN
+    EXECUTE pg_temp.patch('chat.file_blob_register(text,text,text,bigint,text,integer,integer)',
+        '    INSERT INTO chat.file_blobs AS b (bucket_id, object_name, sha256, size_bytes, content_type, created_by)',
+        format(guard, 'v_sha', 'p_staging_key') || '    INSERT INTO chat.file_blobs AS b (bucket_id, object_name, sha256, size_bytes, content_type, created_by)');
+    EXECUTE pg_temp.patch('chat.file_blob_settle(text,text,text,text,bigint,text,integer,integer,jsonb)',
+        '        INSERT INTO chat.file_blobs AS b(bucket_id,object_name,sha256,size_bytes,content_type,created_by)',
+        format(guard, 'sha', 'p_upload_key') || '        INSERT INTO chat.file_blobs AS b(bucket_id,object_name,sha256,size_bytes,content_type,created_by)');
+END $race$;
+
 -- Failure cleanup: an abandoned direct upload (never registered, past its release time) can leave bytes at its owned
 -- object. The attachments GC claims such permits under the quota lock, deletes the object only when no live blob owns
 -- it, and records the outcome; until then a new permit for the object answers upload_in_progress.
