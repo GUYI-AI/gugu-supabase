@@ -24,6 +24,7 @@
 // 防钓鱼:别人把他机器的短码发给你骗你点「允许」—— 确认页必须把机器信息摆在「允许」按钮正上方,
 // 并写明「只在你自己刚刚在服务器上执行了 gugu-server login 时才点」。
 import { createClient } from 'npm:@supabase/supabase-js@2.110.9'
+import { createSafeLogger } from '../_shared/safe-log.ts'
 import {
   codeEntryStep,
   emailStep,
@@ -79,9 +80,12 @@ function json(body: unknown, status = 200): Response {
   })
 }
 
-function log(stage: string, extra: Record<string, unknown> = {}): void {
-  console.log(JSON.stringify({ fn: 'server-login', stage, ...extra }))
-}
+const log = createSafeLogger('server-login', {
+  start: 'info', start_error: 'error', poll_error: 'error', machine_limit: 'warn',
+  poll_user_error: 'error', poll_link_error: 'error', approved: 'info', grant_error: 'error',
+  granted: 'info', approve_error: 'error', approved_by_user: 'info', denied: 'info',
+  otp_send_error: 'error', unhandled: 'error',
+})
 
 // ── server 调的两个接口 ────────────────────────────────────────────────────────
 
@@ -119,11 +123,11 @@ async function handleStart(req: Request): Promise<Response> {
     })
     if (!error) {
       const expiresIn = Math.max(0, Math.round((new Date(data as string).getTime() - Date.now()) / 1000))
-      log('start', { user_code: userCode, hostname: machine.hostname ?? null })
+      log('start')
       return json({ device_code: deviceCode, user_code: userCode, expires_in: expiresIn, interval: POLL_INTERVAL_SECONDS })
     }
     if (!/duplicate key/.test(error.message)) {
-      log('start_error', { error: error.message })
+      log('start_error')
       return json({ error: 'server_error', error_description: error.message }, 500)
     }
   }
@@ -142,7 +146,7 @@ async function handlePoll(req: Request): Promise<Response> {
     p_machine_id: machineIdOf(body.machine_id),
   })
   if (error) {
-    log('poll_error', { error: error.message })
+    log('poll_error')
     return json({ error: 'server_error', error_description: error.message }, 500)
   }
   const row = (Array.isArray(data) ? data[0] : data) as
@@ -151,7 +155,7 @@ async function handlePoll(req: Request): Promise<Response> {
   switch (row?.result) {
     // #6264 这个账号的机器数到上限了:不发登录凭证。server 把 limit / used / max 说成人话。
     case 'machine_limit':
-      log('machine_limit', { detail: row.detail })
+      log('machine_limit')
       return json({ error: 'machine_limit', ...(row.detail ?? {}) }, 400)
     case 'pending':
       return json({ error: 'authorization_pending' }, 400)
@@ -163,7 +167,7 @@ async function handlePoll(req: Request): Promise<Response> {
       // 给这个人签一条**一次性**的 magiclink;server 拿它去 GoTrue 换自己的会话链。
       const { data: user, error: userError } = await client.auth.admin.getUserById(row.user_id!)
       if (userError || !user.user?.email) {
-        log('poll_user_error', { error: userError?.message ?? 'user has no email' })
+        log('poll_user_error')
         return json({ error: 'server_error', error_description: 'approved user has no email' }, 500)
       }
       const { data: link, error: linkError } = await client.auth.admin.generateLink({
@@ -171,10 +175,10 @@ async function handlePoll(req: Request): Promise<Response> {
         email: user.user.email,
       })
       if (linkError || !link.properties?.hashed_token) {
-        log('poll_link_error', { error: linkError?.message ?? 'no hashed_token' })
+        log('poll_link_error')
         return json({ error: 'server_error', error_description: 'could not mint a login link' }, 500)
       }
-      log('approved', { user_id: row.user_id })
+      log('approved')
       return json({ token_hash: link.properties.hashed_token, type: 'magiclink', user_id: row.user_id })
     }
     default:
@@ -227,10 +231,10 @@ async function handleGrant(req: Request): Promise<Response> {
     })
     if (error) {
       if (/duplicate key/.test(error.message)) continue
-      log('grant_error', { error: error.message })
+      log('grant_error')
       return json({ error: 'server_error', error_description: error.message }, 500)
     }
-    log('granted', { user_id: userId, hostname: machine.hostname ?? null })
+    log('granted')
     const expiresIn = Math.max(0, Math.round((new Date(expiresAt as string).getTime() - Date.now()) / 1000))
     return json({ device_code: deviceCode, expires_in: expiresIn })
   }
@@ -322,21 +326,21 @@ async function approveAs(userCode: string, userId: string): Promise<Approval> {
   })
   const outcome = decision as { status?: string; refusal?: MachineLimitRefusal } | null
   if (!error && outcome?.status === 'refused') {
-    log('machine_limit', { user_code: userCode, user_id: userId, refusal: outcome.refusal })
+    log('machine_limit')
     return { status: 'refused', refusal: outcome.refusal }
   }
   if (error || outcome?.status !== 'approved') {
-    log('approve_error', { user_code: userCode, error: error?.message ?? JSON.stringify(outcome) })
+    log('approve_error')
     return { status: 'failed' }
   }
-  log('approved_by_user', { user_code: userCode, user_id: userId })
+  log('approved_by_user')
   return { status: 'approved' }
 }
 
 async function deny(userCode: string): Promise<void> {
   const { error } = await admin().rpc('server_login_decide', { p_user_code: userCode, p_user_id: null, p_approve: false })
   if (error) throw new Error(error.message)
-  log('denied', { user_code: userCode })
+  log('denied')
 }
 
 async function gotrue(path: string, body: unknown, accessToken?: string): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
@@ -421,7 +425,7 @@ Deno.serve(async (req) => {
     if (req.method === 'POST' && path.endsWith('/server-login/decide')) return await handleAppDecide(req)
     return await handlePage(req)
   } catch (error) {
-    log('unhandled', { error: error instanceof Error ? error.message : String(error) })
+    log('unhandled')
     return appRoute ? json({ error: 'server_error' }, 500) : html(finalPage('error'))
   }
 })

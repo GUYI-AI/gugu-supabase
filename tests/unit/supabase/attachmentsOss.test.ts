@@ -752,8 +752,7 @@ describe('直传表单、签名链接、回收', () => {
     ]
     const { deps, calls, rpcs, removed, controls, order, events } = fakes({ claimed })
     expect(await handleGc(deps)).toEqual({ claimed: 2, deleted: 2, failed: 0 })
-    expect(events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'kick',
-      at: '2026-10-16T12:00:00.000Z', day: '2026-10-16', claimed: 2, deleted: 2, finished: 2, failed: 0, outcome: 'completed' }])
+    expect(events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'kick', claimed: 2, deleted: 2, finished: 2, failed: 0, outcome: 'completed' }])
     expect(controls.filter(r => r.fn === 'file_temporary_expire')).toEqual([{as:'service',fn:'file_temporary_expire',args:{p_limit:500}}])
     expect(order.indexOf('service:file_temporary_expire')).toBeLessThan(order.indexOf('service:file_transfer_expire'))
     expect(controls.filter(r => r.fn === 'file_transfer_expire')).toEqual([{as:'service',fn:'file_transfer_expire',args:{p_limit:500}}])
@@ -771,9 +770,8 @@ describe('直传表单、签名链接、回收', () => {
     const broken = fakes({ claimed })
     broken.deps.storageRemove = async () => { throw new Error('storage 500') }
     expect(await handleGc(broken.deps)).toEqual({ claimed: 2, deleted: 1, failed: 1 })
-    expect(broken.events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'kick',
-      at: '2026-10-16T12:00:00.000Z', day: '2026-10-16', claimed: 2, deleted: 1, finished: 1, failed: 1, outcome: 'completed' }])
-    expect(broken.rpcs.filter((r) => r.fn === 'file_blob_gc_fail').map((r) => r.args)).toEqual([{ p_blob_id: 'b2', p_claim_token: 't2', p_error: 'Error: storage 500' }])
+    expect(broken.events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'kick', claimed: 2, deleted: 1, finished: 1, failed: 1, outcome: 'completed' }])
+    expect(broken.rpcs.filter((r) => r.fn === 'file_blob_gc_fail').map((r) => r.args)).toEqual([{ p_blob_id: 'b2', p_claim_token: 't2', p_error: 'gc_operation_failed' }])
   })
   it('gc removes temporary ciphertext at the same private provider without invoking CDN or weakening claim confirmation',async()=>{
     const {deps,calls,rpcs,removed}=fakes({claimed:[{blob_id:'temporary',claim_token:'token',bucket_id:'temporary',object_name:'temporary/group/file/generation',content_type:'application/octet-stream'}]})
@@ -782,11 +780,11 @@ describe('直传表单、签名链接、回收', () => {
     expect(removed).toEqual([])
     expect(rpcs.filter(r=>r.fn==='file_blob_gc_finish').map(r=>r.args)).toEqual([{p_blob_id:'temporary',p_claim_token:'token'}])
   })
-  it('gc logs an empty invocation once with an explicit UTC day', async () => {
+  it('gc records empty invocation counters; the logger owns its timestamp', async () => {
     const f = fakes()
     f.deps.now = () => new Date('2026-11-07T00:30:00+09:00')
     expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 0, deleted: 0, failed: 0 })
-    expect(f.events).toEqual([{ stage: 'gc_result', entry: 'kick', at: '2026-11-06T15:30:00.000Z', day: '2026-11-06',
+    expect(f.events).toEqual([{ stage: 'gc_result', entry: 'kick',
       claimed: 0, deleted: 0, finished: 0, failed: 0, outcome: 'completed' }])
   })
   it('gc counts a successful physical deletion even if its finish confirmation fails, preserving the API result', async () => {
@@ -796,8 +794,7 @@ describe('直传表单、签名链接、回收', () => {
       ? Promise.resolve({ data: null, error: { message: 'finish unavailable' } }) : rpc(fn, args)
     expect(await handleGc(f.deps, 'file-accept')).toEqual({ claimed: 1, deleted: 0, failed: 1 })
     expect(f.removed).toEqual(['workspace/c/u/old'])
-    expect(f.events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'file-accept',
-      at: '2026-10-16T12:00:00.000Z', day: '2026-10-16', claimed: 1, deleted: 1, finished: 0, failed: 1, outcome: 'completed' }])
+    expect(f.events.filter(e => e.stage === 'gc_result')).toEqual([{ stage: 'gc_result', entry: 'file-accept', claimed: 1, deleted: 1, finished: 0, failed: 1, outcome: 'completed' }])
   })
   it.each(['file_temporary_expire', 'file_transfer_expire', 'file_blob_gc_run_claim'])('gc records unknown claims and rethrows a %s refusal', async failedRpc => {
     const f = fakes(), rpc = f.deps.serviceRpc
@@ -806,7 +803,7 @@ describe('直传表单、签名链接、回收', () => {
     await expect(handleGc(f.deps, 'kick')).rejects.toMatchObject({ status: 500 })
     expect(f.calls).toEqual([])
     expect(f.removed).toEqual([])
-    expect(f.events).toEqual([{ stage: 'gc_result', entry: 'kick', at: '2026-10-16T12:00:00.000Z', day: '2026-10-16',
+    expect(f.events).toEqual([{ stage: 'gc_result', entry: 'kick',
       claimed: null, deleted: 0, finished: 0, failed: 0, outcome: 'error' }])
   })
   it.each([false, true])('gc preserves a successful result when summary logging throws (stderr unavailable: %s)', async stderrFails => {
@@ -816,7 +813,8 @@ describe('直传表单、签名链接、回收', () => {
     try {
       expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 1, deleted: 1, failed: 0 })
       expect(f.removed).toEqual(['workspace/c/u/old'])
-      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
+      expect(stderr).toHaveBeenCalledTimes(1)
+      expect(JSON.parse(stderr.mock.calls[0]![0])).toMatchObject({ service: 'edge', function: 'attachments', event: 'gc_result_log_failed', reason: 'gc_result_log_failed', entry: 'kick', level: 'ERROR', count: 1 })
     } finally { stderr.mockRestore() }
   })
   it.each([false, true])('gc preserves the original exception when summary logging throws (stderr unavailable: %s)', async stderrFails => {
@@ -827,7 +825,8 @@ describe('直传表单、签名链接、回收', () => {
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => { if (stderrFails) throw new Error('stderr unavailable') })
     try {
       await expect(handleGc(f.deps, 'kick')).rejects.toBe(original)
-      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
+      expect(stderr).toHaveBeenCalledTimes(1)
+      expect(JSON.parse(stderr.mock.calls[0]![0])).toMatchObject({ service: 'edge', function: 'attachments', event: 'gc_result_log_failed', reason: 'gc_result_log_failed', entry: 'kick', level: 'ERROR', count: 1 })
     } finally { stderr.mockRestore() }
   })
   it('gc excludes sensitive exception fields from its fallback log', async () => {
@@ -842,7 +841,8 @@ describe('直传表单、签名链接、回收', () => {
       expect(await handleGc(f.deps, 'kick')).toEqual({ claimed: 0, deleted: 0, failed: 0 })
       const output = JSON.stringify(stderr.mock.calls)
       for (const value of sensitive) expect(output).not.toContain(value)
-      expect(stderr).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ fn: 'attachments', stage: 'gc_result_log_failed', entry: 'kick', error_type: 'object', message: 'GC summary logging failed' }))
+      expect(stderr).toHaveBeenCalledTimes(1)
+      expect(JSON.parse(stderr.mock.calls[0]![0])).toMatchObject({ service: 'edge', function: 'attachments', event: 'gc_result_log_failed', reason: 'gc_result_log_failed', entry: 'kick', level: 'ERROR', count: 1 })
     } finally { stderr.mockRestore() }
   })
 })
