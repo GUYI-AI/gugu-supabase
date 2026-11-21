@@ -203,6 +203,8 @@ describe('#6835 one whisper rule: every entry reads the same answer sheet', () =
           expect(direct, `message_visible_to ${row.id} for ${viewer}`).toBe(expected)
           const canRead = (await as<{ v: boolean }>(callerOf(w, viewer), 'SELECT chat.can_read_message($1,$2) AS v', [row.id, viewer])).rows[0]!.v
           expect(canRead, `can_read_message ${row.id} for ${viewer}`).toBe(expected)
+          const byId = await as<{ id: string }>(callerOf(w, viewer), 'SELECT id FROM chat.messages_by_id_as($1,$2,$2)', [viewer, row.id])
+          expect(byId.rows.map((r) => r.id), `messages_by_id_as ${row.id} for ${viewer}`).toEqual(expected ? [row.id] : [])
         }
         for (const chatId of [w.group, w.topic, w.lone]) {
           const expected = sorted(rows.filter((r) => r.chat_id === chatId && !r.thread_root_id && visible(r, viewer)).map((r) => r.id))
@@ -211,6 +213,11 @@ describe('#6835 one whisper rule: every entry reads the same answer sheet', () =
           const search = await as<{ id: string }>(callerOf(w, viewer), `SELECT id FROM chat.message_search_as($1,'6835x',$2,NULL,100)`, [chatId, viewer])
           expect(sorted(search.rows.map((r) => r.id)), `search ${chatId} for ${viewer}`).toEqual(
             sorted(rows.filter((r) => r.chat_id === chatId && (r.content ?? '').includes('6835x') && visible(r, viewer)).map((r) => r.id)))
+          // An id prefix is the range it spans: every seeded id starts with the tag, so the whole range is this world.
+          const range = await as<{ id: string }>(callerOf(w, viewer),
+            `SELECT id FROM chat.messages_by_id_as($1,'00000000','ffffffff',$2,100)`, [viewer, chatId])
+          expect(sorted(range.rows.map((r) => r.id)), `messages_by_id_as range ${chatId} for ${viewer}`).toEqual(
+            sorted(rows.filter((r) => r.chat_id === chatId && visible(r, viewer)).map((r) => r.id)))
           if (w.humans.includes(viewer)) {
             const rls = await as<{ id: string }>(viewer, 'SELECT id FROM chat.messages_view WHERE chat_id = $1', [chatId])
             expect(sorted(rls.rows.map((r) => r.id)), `RLS ${chatId} for ${viewer}`).toEqual(sorted(rows.filter((r) => r.chat_id === chatId && visible(r, viewer)).map((r) => r.id)))
@@ -260,6 +267,7 @@ describe('#6835 one whisper rule: every entry reads the same answer sheet', () =
         'chat.can_read_message(text,text)',
         'chat.list_topics_of_chat(text,text,text)',
         'chat.message_history_as(text,text,text,bigint,integer)',
+        'chat.messages_by_id_as(text,text,text,text,integer)',
         'chat.message_reply_preview_for(text,text)',
         'chat.message_search_as(text,text,text,bigint,integer)',
         'chat.topic_source_state(text,text)',

@@ -257,7 +257,16 @@ describe('widget identities', () => {
     expect(await as(owner, 'SELECT * FROM chat.widget_origin($1)', [id]))
       .toEqual([{ widget_id: id, origin_message_id: id, is_retracted: true }])
     expect(await as(peer, 'SELECT * FROM chat.widget_origin($1)', [id])).toEqual([])
-    await db.query('DELETE FROM chat.messages WHERE id=$1', [id])
+    // A whisper to the agent: its owner is no party to it, but asks as the agent and reads what the agent reads; nobody
+    // else may ask as that agent.
+    const toAgent = `legacy/widget-${randomUUID()}`
+    await as(peer, `INSERT INTO chat.messages(id,chat_id,sender_user_id,to_user_ids,is_whisper,content,content_type)
+      VALUES($1,$2,$3,$4,true,$5,'widget')`, [toAgent, group, peer, [agent], JSON.stringify({ v: 2, ...origin })])
+    expect(await as(owner, 'SELECT * FROM chat.widget_origin($1)', [toAgent])).toEqual([])
+    expect(await as(owner, 'SELECT * FROM chat.widget_origin($1,$2)', [toAgent, agent]))
+      .toEqual([{ widget_id: toAgent, origin_message_id: toAgent, is_retracted: false }])
+    expect(await as(outsider, 'SELECT * FROM chat.widget_origin($1,$2)', [toAgent, agent])).toEqual([])
+    await db.query('DELETE FROM chat.messages WHERE id = ANY($1)', [[id, toAgent]])
     expect(await as(owner, 'SELECT * FROM chat.widget_origin($1)', [id])).toEqual([])
   })
 
