@@ -115,6 +115,7 @@ ALTER FUNCTION chat.file_preview_offer(text,text,text) OWNER TO postgres;
 REVOKE ALL ON FUNCTION chat.file_preview_offer(text,text,text) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION chat.file_preview_offer(text,text,text) TO service_role;
 CREATE INDEX workspace_item_versions_sha_idx ON chat.workspace_item_versions(sha256) WHERE sha256 IS NOT NULL;
+CREATE INDEX file_blobs_holder_sha_idx ON chat.file_blobs(created_by, COALESCE(sha256, declared_sha256));
 
 -- ── 3. Readers ──
 -- The preview of the version a reference names, through the same doors as the file: an item of a room its reader is in,
