@@ -48,7 +48,7 @@ describe('download input and signed throttles',()=>{
     const deps={userRpc:vi.fn<AttachmentsDeps['userRpc']>(async(_name,args)=>({data:(args.p_ref as Record<string,unknown>).item_id?local:expired,error:null}))} as unknown as AttachmentsDeps
     const refs=[{message_id:'expired'},{item_id:'11111111-1111-4111-8111-111111111111'}]
     expect(await handleFileResolve(deps,'reader',{ref:refs[0]})).toEqual(expired)
-    expect(await handleFileResolve(deps,'reader',{refs})).toEqual({files:[{...expired,ref:refs[0]},{...local,thumbnail_available:false,ref:refs[1]}]})
+    expect(await handleFileResolve(deps,'reader',{refs})).toEqual({files:[{...expired,ref:refs[0]},{...local,ref:refs[1]}]})
   })
   it('metadata display calls only the read-only RPC and never invokes a provider or signing RPC',async()=>{
     const calls:string[]=[]
@@ -103,9 +103,9 @@ describe('one download contract with optional provider throttling',()=>{
   function fixture(bucket='oss',settings:Record<string,unknown>={},metadata:Record<string,unknown>={}) {
     const userRpc=vi.fn<AttachmentsDeps['userRpc']>(async()=>({data:{status:'ready',bucket_id:bucket,object_name:'ab/object',
       download_id:request,signed_at:at,expires_at:'2026-10-24T00:01:00Z',content_type:'application/octet-stream',...metadata},error:null}))
-    const sign=vi.fn(async(_key:string,image:boolean)=>({url:'https://bytes.example/file',thumbUrl:image?'https://bytes.example/thumb':null,expiresAt:'2026-10-24T00:01:00Z'}))
+    const sign=vi.fn(async(_key:string,_now:Date,_permit?:unknown)=>({url:'https://bytes.example/file',expiresAt:'2026-10-24T00:01:00Z'}))
     const storageSignedUrl=vi.fn(async()=> 'https://storage.example/file')
-    const deps={userRpc,serviceRpc:vi.fn(async()=>({data:settings,error:null})),objects:{sign,thumbnails:true},storageSignedUrl} as unknown as Parameters<typeof handleFileDownload>[0]
+    const deps={userRpc,serviceRpc:vi.fn(async()=>({data:settings,error:null})),objects:{sign},storageSignedUrl} as unknown as Parameters<typeof handleFileDownload>[0]
     return {deps,userRpc,sign,storageSignedUrl}
   }
   it.each(['oss','workspace','temporary'])('signs %s without a rate declaration after the same ACL/reservation RPC',async bucket=>{
@@ -116,62 +116,24 @@ describe('one download contract with optional provider throttling',()=>{
       expect(f.storageSignedUrl).toHaveBeenCalledExactlyOnceWith('workspace','ab/object',60,undefined)
       expect(f.sign).not.toHaveBeenCalled()
     }else {
-      expect(f.sign).toHaveBeenCalledExactlyOnceWith('ab/object',false,new Date(at),{requestId:request,expiresSeconds:60,...(bucket==='temporary'?{direct:true}:{})})
+      expect(f.sign).toHaveBeenCalledExactlyOnceWith('ab/object',new Date(at),{requestId:request,expiresSeconds:60,...(bucket==='temporary'?{direct:true}:{})})
       expect(f.storageSignedUrl).not.toHaveBeenCalled()
     }
   })
   it('passes an optional valid rate through the same signer and rejects invalid declarations before provider signing',async()=>{
     const f=fixture('oss',{download_link_bits_per_second:819200})
     await handleFileDownload(f.deps,'reader',{ref:{message_id:'m'},request_id:request})
-    expect(f.sign).toHaveBeenCalledExactlyOnceWith('ab/object',false,new Date(at),{requestId:request,expiresSeconds:60,trafficBits:819200})
+    expect(f.sign).toHaveBeenCalledExactlyOnceWith('ab/object',new Date(at),{requestId:request,expiresSeconds:60,trafficBits:819200})
     for(const rate of [null,0,819199,838860801,Infinity,'invalid']) {
       const bad=fixture('oss',{download_link_bits_per_second:rate})
       await expect(handleFileDownload(bad.deps,'reader',{ref:{message_id:'m'},request_id:request})).rejects.toMatchObject({status:503,code:'not_configured'})
       expect(bad.sign).not.toHaveBeenCalled();expect(bad.storageSignedUrl).not.toHaveBeenCalled()
     }
   })
-  it.each([
-    {label:'small image',size:2_971_868,thumbnail:true},
-    {label:'image just below the provider limit',size:20_164_008,thumbnail:true},
-    {label:'exactly 20 MiB',size:20_971_520,thumbnail:true},
-    {label:'20 MiB plus one byte',size:20_971_521,thumbnail:false},
-    {label:'reported 43 MB image',size:43_327_173,thumbnail:false},
-    {label:'missing size',size:undefined,thumbnail:false},
-    {label:'null size',size:null,thumbnail:false},
-    {label:'empty image',size:0,thumbnail:false},
-    {label:'negative size',size:-1,thumbnail:false},
-    {label:'fractional size',size:1.5,thumbnail:false},
-    {label:'numeric string',size:'100',thumbnail:false},
-    {label:'NaN size',size:NaN,thumbnail:false},
-    {label:'infinite size',size:Infinity,thumbnail:false},
-    {label:'unsafe integer',size:Number.MAX_SAFE_INTEGER+1,thumbnail:false},
-  ])('signs the original and limits thumbnails for $label',async({size,thumbnail})=>{
-    const f=fixture('oss',{}, {content_type:'image/png',...(size===undefined?{}:{size_bytes:size})})
+  it.each(['image/png','image/svg+xml','application/pdf'])('signs a %s original untransformed',async contentType=>{
+    const f=fixture('oss',{}, {content_type:contentType,size_bytes:48_685,width:1200,height:900})
     const result=await handleFileDownload(f.deps,'reader',{ref:{message_id:'m'},request_id:request})
-    expect(f.sign.mock.calls[0]?.[1]).toBe(thumbnail)
-    expect(result).toHaveProperty('thumb_url')
-    expect('thumb_url'in result&&result.thumb_url!==null).toBe(thumbnail)
-    expect(result).toHaveProperty('url','https://bytes.example/file')
-  })
-  it.each([
-    {label:'ordinary photo',width:4032,height:3024,thumbnail:true},
-    {label:'long screenshot',width:1170,height:40000,thumbnail:true},
-    {label:'narrow strip',width:100,height:65000,thumbnail:true},
-    {label:'pixels at the documented limit',width:15625,height:16000,thumbnail:true},
-    {label:'pixels above the documented limit',width:20000,height:20000,thumbnail:false},
-    {label:'unknown dimensions',width:null,height:null,thumbnail:true},
-  ])('limits thumbnails by source dimensions for a small-byte $label',async({width,height,thumbnail})=>{
-    const f=fixture('oss',{}, {content_type:'image/png',size_bytes:48_685,width,height})
-    const result=await handleFileDownload(f.deps,'reader',{ref:{message_id:'m'},request_id:request})
-    expect(f.sign.mock.calls[0]?.[1]).toBe(thumbnail)
-    expect('thumb_url'in result&&result.thumb_url!==null).toBe(thumbnail)
-    expect(result).toHaveProperty('url','https://bytes.example/file')
-  })
-  it('keeps SVG on the original-only path even when its known size is below the image-processing limit',async()=>{
-    const f=fixture('oss',{}, {content_type:'image/svg+xml',size_bytes:1024})
-    const result=await handleFileDownload(f.deps,'reader',{ref:{message_id:'m'},request_id:request})
-    expect(f.sign.mock.calls[0]?.[1]).toBe(false)
-    expect(result).toHaveProperty('thumb_url',null)
+    expect(f.sign).toHaveBeenCalledExactlyOnceWith('ab/object',new Date(at),{requestId:request,expiresSeconds:60})
     expect(result).toHaveProperty('url','https://bytes.example/file')
   })
   it('does not bypass denied or expired metadata when a rate is absent',async()=>{
@@ -190,36 +152,11 @@ describe('one download contract with optional provider throttling',()=>{
     expect(f.sign).not.toHaveBeenCalled();expect(f.storageSignedUrl).not.toHaveBeenCalled();expect(f.deps.serviceRpc).not.toHaveBeenCalled()
   })
 })
-describe('file-resolve says whether a download is signed with a thumbnail',()=>{
-  const image={status:'ready',source:'managed-object',bucket_id:'oss',object_name:'ab/object',content_type:'image/png',size_bytes:48_685,width:1200,height:900}
-  const rows:Array<[string,Record<string,unknown>,boolean]>=[
-    ['an OSS image',image,true],
-    ['an OSS image over the size limit',{...image,size_bytes:20_971_521},false],
-    ['an OSS SVG',{...image,content_type:'image/svg+xml'},false],
-    ['an OSS non-image',{...image,content_type:'application/pdf'},false],
-    ['a Supabase Storage object',{...image,bucket_id:'workspace'},false],
-    ['a temporary transfer',{...image,bucket_id:'temporary'},false],
-    ['a file kept on its sender\'s machine',{status:'ready',source:'local',content_type:'image/png',size_bytes:48_685},false],
-  ]
-  const deps=(row:Record<string,unknown>,thumbnails=true)=>({
-    userRpc:vi.fn(async(name:string)=>({data:name==='file_resolve_as'?row:{...row,download_id:'11111111-1111-4111-8111-111111111111',signed_at:'2026-10-24T00:00:00Z',expires_at:'2026-10-24T00:01:00Z'},error:null})),
-    serviceRpc:vi.fn(async()=>({data:{},error:null})),storageSignedUrl:vi.fn(async()=>'https://storage.example/file'),
-    objects:{...(thumbnails?{thumbnails:true}:{}),sign:vi.fn(async(_key:string,image:boolean)=>({url:'https://bytes.example/file',thumbUrl:image?'https://bytes.example/thumb':null,expiresAt:'2026-10-24T00:01:00Z'}))},
-  }) as unknown as AttachmentsDeps
-  it.each(rows)('%s',async(_label,row,expected)=>{
-    const d=deps(row)
-    expect(await handleFileResolve(d,'reader',{ref:{message_id:'m'}})).toMatchObject({thumbnail_available:expected})
-    expect(await handleFileResolve(d,'reader',{refs:[{message_id:'m'}]})).toMatchObject({files:[{thumbnail_available:expected}]})
-    if(row.source==='managed-object') {
-      // The same rule signs the download: a thumbnail URL exactly when resolve said so.
-      const signed=await handleFileDownload(d,'reader',{ref:{message_id:'m'},request_id:'11111111-1111-4111-8111-111111111111'})
-      expect('thumb_url'in signed&&signed.thumb_url!==null).toBe(expected)
-    }
-  })
-  it('is false for every row of a store that signs originals only (Supabase Storage)',async()=>{
-    expect(await handleFileResolve(deps(image,false),'reader',{ref:{message_id:'m'}})).toMatchObject({thumbnail_available:false})
-  })
-  it('is only on ready rows',async()=>{
-    expect(await handleFileResolve(deps({status:'gone'}),'reader',{ref:{message_id:'m'}})).toEqual({status:'gone'})
+describe('file-resolve passes the preview the database answers',()=>{
+  it('returns each row as the resolver answered it, preview included',async()=>{
+    const row={status:'ready',source:'local',content_type:'image/png',preview:{sha256:'ab'.repeat(32),size_bytes:2048,content_type:'image/webp'}}
+    const deps={userRpc:vi.fn(async()=>({data:row,error:null}))} as unknown as AttachmentsDeps
+    expect(await handleFileResolve(deps,'reader',{ref:{message_id:'m'}})).toEqual(row)
+    expect(await handleFileResolve(deps,'reader',{refs:[{message_id:'m'}]})).toEqual({files:[{...row,ref:{message_id:'m'}}]})
   })
 })

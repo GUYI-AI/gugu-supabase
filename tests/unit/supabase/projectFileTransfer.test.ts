@@ -13,7 +13,7 @@ function fixture() {
     ?{object_name:object,ciphertext_bytes:128,state:'uploading'}:fn==='file_temporary_key_for'?key:{},error:null}))
   const objects={uploadBounds:vi.fn(async()=>({maxBytes:128,expiresSeconds:120})),upload:vi.fn(async()=>({url:'https://origin.test',fields:{key:object},expiresAt:'2026-10-24T00:02:00Z'})),
     inspect:vi.fn(async()=>({bytes:new Uint8Array(128),sizeBytes:128,sha256:sha,revision:'immutable'})),promote:vi.fn(),head:vi.fn(),put:vi.fn(),exists:vi.fn(),remove:vi.fn(),
-    sign:vi.fn(async()=>({url:'https://origin.test/cipher',thumbUrl:null,expiresAt:'2026-10-24T00:01:00Z'})),invalidate:vi.fn()}
+    sign:vi.fn(async()=>({url:'https://origin.test/cipher',expiresAt:'2026-10-24T00:01:00Z'})),invalidate:vi.fn()}
   const deps:AttachmentsDeps={objects,userRpc,serviceRpc,fetch:vi.fn(),storageSignedUrl:vi.fn(),storageRemove:vi.fn(),now:()=>new Date('2026-10-24T00:00:00Z'),uuid:()=>download,log:vi.fn()}
   return {deps,objects,userRpc,serviceRpc}
 }
@@ -124,7 +124,7 @@ describe('temporary file HTTP protocol',()=>{
       signed_at:'2026-10-24T00:00:00Z',expires_at:'2026-10-24T00:01:00Z',content_type:'application/octet-stream'},error:null})
     const row=await handleProjectFiles(f.deps,host,'file-download',{ref:{message_id:'message'},request_id:download})
     expect(row).toMatchObject({codec:'secretstream-v1',key,url:'https://origin.test/cipher'})
-    expect(f.objects.sign).toHaveBeenCalledWith(object,false,new Date('2026-10-24T00:00:00Z'),{requestId:download,expiresSeconds:60,direct:true})
+    expect(f.objects.sign).toHaveBeenCalledWith(object,new Date('2026-10-24T00:00:00Z'),{requestId:download,expiresSeconds:60,direct:true})
     expect(f.serviceRpc).toHaveBeenLastCalledWith('file_temporary_key_for',{p_download:download,p_account:host})
   })
   it('never returns a key when signing fails closed, and never signs a pending or gone file',async()=>{

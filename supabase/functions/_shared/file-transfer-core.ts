@@ -1,5 +1,4 @@
 import { type AttachmentsDeps, type Rpc, call, objectStorage, Refusal } from './attachments-core.ts'
-import { canSignThumbnail } from './blob-sniff.ts'
 import { type AttachmentObjectStorage, ObjectStorageError } from './object-storage.ts'
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -14,29 +13,19 @@ export function fileRef(value:unknown):Record<string,unknown> {
   throw new Refusal(400,'invalid','Expected an exact item/version, attachment or message reference')
 }
 
-type SignedRow={bucket_id?:unknown;content_type?:unknown;size_bytes?:unknown;width?:unknown;height?:unknown}
-/** Whether a download of this row is signed with a thumbnail: the signer's one rule, which file-resolve also tells readers. */
-export const thumbnailAvailable=(store:()=>AttachmentObjectStorage,row:SignedRow):boolean=>
-  row.bucket_id==='oss'&&store().thumbnails===true&&canSignThumbnail(String(row.content_type),row.size_bytes,row.width,row.height)
-
 export async function handleFileResolve(deps:AttachmentsDeps,user:string,body:Record<string,unknown>) {
   const refs='refs'in body?body.refs:[body.ref]
   if (!Array.isArray(refs)||refs.length<1||refs.length>200||'refs'in body&&'ref'in body) throw new Refusal(400,'invalid','Expected 1 to 200 file references')
   const exact=refs.map(fileRef),actor=typeof body.as==='string'?body.as:user
-  // The store is made once for the whole batch, and only when an OSS row asks.
-  let made:AttachmentObjectStorage|undefined
-  const store=()=>made??=objectStorage(deps)
-  const rows=(await Promise.all(exact.map(ref=>call(deps.userRpc,'file_resolve_as',{p_ref:ref,p_as:actor})))).map(value=>{
-    const row=value as Record<string,unknown>
-    return row.status==='ready'?{...row,thumbnail_available:thumbnailAvailable(store,row)}:row
-  })
+  const rows=await Promise.all(exact.map(ref=>call(deps.userRpc,'file_resolve_as',{p_ref:ref,p_as:actor}))) as Record<string,unknown>[]
   return 'refs'in body?{files:rows.map((row,i)=>({...row,ref:exact[i]}))}:rows[0]
 }
 
 export async function handleFileDownload(deps:AttachmentsDeps,user:string,body:Record<string,unknown>) {
   if (typeof body.request_id!=='string'||!UUID.test(body.request_id)) throw new Refusal(400,'invalid','request_id must be a uuid')
   if (body.origin!==undefined&&typeof body.origin!=='boolean') throw new Refusal(400,'invalid','origin must be a boolean')
-  const row=await call(deps.userRpc,'file_transfer_download_as',{
+  // `preview`: the small copy its sender uploaded with an image, signed like any managed object.
+  const row=await call(deps.userRpc,body.preview===true?'file_preview_download_as':'file_transfer_download_as',{
     p_ref:fileRef(body.ref),p_as:typeof body.as==='string'?body.as:user,p_id:body.request_id,
   }) as {status:string;bucket_id:string;object_name:string;download_id:string;signed_at:string;expires_at:string;content_type:string;size_bytes:unknown;width?:unknown;height?:unknown;transfer_id?:string}
   if (row.status!=='ready') return row
@@ -48,12 +37,12 @@ export async function handleFileDownload(deps:AttachmentsDeps,user:string,body:R
   const store=()=>made??=objectStorage(deps)
   try {
     const signed=row.bucket_id==='oss'||row.bucket_id==='temporary'
-      ?await store().sign(row.object_name,thumbnailAvailable(store,row),new Date(row.signed_at),{
+      ?await store().sign(row.object_name,new Date(row.signed_at),{
         requestId:row.download_id,expiresSeconds:60,...(traffic===undefined?{}:{trafficBits:traffic}),...(row.bucket_id==='temporary'||body.origin===true?{direct:true}:{}),
       })
-      :{url:await deps.storageSignedUrl(row.bucket_id,row.object_name,60,traffic),thumbUrl:null}
+      :{url:await deps.storageSignedUrl(row.bucket_id,row.object_name,60,traffic)}
     const key=row.transfer_id?await call(deps.serviceRpc,'file_temporary_key_for',{p_download:row.download_id,p_account:user}):undefined
-    return {...row,url:signed.url,thumb_url:signed.thumbUrl,expires_at:body.origin===true&&'expiresAt' in signed?signed.expiresAt:row.expires_at,...('originAvailable' in signed&&signed.originAvailable?{origin_available:true}:{}),...(key?{key,codec:'secretstream-v1'}:{})}
+    return {...row,url:signed.url,expires_at:body.origin===true&&'expiresAt' in signed?signed.expiresAt:row.expires_at,...('originAvailable' in signed&&signed.originAvailable?{origin_available:true}:{}),...(key?{key,codec:'secretstream-v1'}:{})}
   } catch(error) {
     if(error instanceof ObjectStorageError&&error.status===503) throw new Refusal(503,'not_configured',error.message)
     if(error instanceof ObjectStorageError&&error.status===410) throw new Refusal(410,'expired',error.message)

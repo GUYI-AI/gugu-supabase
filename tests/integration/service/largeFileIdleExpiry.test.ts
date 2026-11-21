@@ -67,7 +67,7 @@ beforeEach(async()=>{
   await db.query("INSERT INTO chat.file_transfer_limits(scope,scope_id,settings) VALUES('global','*',$1) ON CONFLICT(scope,scope_id) DO UPDATE SET settings=EXCLUDED.settings",[{...settings,storage_global_bytes:baseline+settings.storage_global_bytes}])
 })
 afterEach(async()=>{await db.query('ROLLBACK')})
-describe('non-project idle expiry, not quota eviction',()=>{
+describe('idle expiry of cloud copies, not quota eviction',()=>{
   it('discovers idle files on the original scheduler tick even with no due GC entries',async()=>{
     const file=await upload();await age(file.stored)
     await db.query("UPDATE chat.file_blob_gc SET status='pending',next_attempt_at=now()+interval '1 day'")
@@ -134,15 +134,16 @@ describe('non-project idle expiry, not quota eviction',()=>{
     expect((await state(permanent.stored)).expired_at).toBeNull()
     expect((await state(permanent.stored)).state).toBe('ready')
   })
-  it('excludes project-bound groups using the authoritative project registry',async()=>{
+  it('expires a project group\'s cloud copy too: it removes the copy, never the file',async()=>{
     const file=await upload();await age(file.stored)
     const device=randomUUID()
     await db.query("INSERT INTO identity.gugu_devices(device_id,user_id,label,hostname,platform) VALUES($1,$2,$3,'fixture','linux')",[device,owner,'fixture'])
     await db.query("INSERT INTO identity.device_projects(device_id,user_id,local_project_id,name,root_path,created_at,chat_id) VALUES($1,$2,'root','fixture','/fixture',now(),$3)",[device,owner,group])
     // What publish_device_projects records for a bound project (20261109210000_project_groups).
     await db.query('INSERT INTO chat.project_groups(chat_id) VALUES($1) ON CONFLICT DO NOTHING',[group])
-    expect(await expire()).toBe(0)
-    expect((await state(file.stored)).expired_at).toBeNull()
+    expect(await expire()).toBe(1)
+    expect((await state(file.stored)).expired_at).not.toBeNull()
+    expect((await db.query('SELECT count(*)::int AS n FROM chat.messages WHERE id=$1',[file.message])).rows[0].n).toBe(1)
   })
   it('stamps only a fresh authorized download; retries, outsider attempts and provider observations do not renew it',async()=>{
     const file=await upload(),id=randomUUID();await age(file.stored)

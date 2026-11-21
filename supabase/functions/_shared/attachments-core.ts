@@ -17,7 +17,7 @@
 import { ossObjectStorage } from './attachment-object-storage.ts'
 import { type AttachmentObjectStorage, type MultipartStorage, ObjectStorageError, type InspectedObject } from './object-storage.ts'
 import type { Inspector } from './file-inspection.ts'
-import { hasThumbnail, objectHeaders, sniff } from './blob-sniff.ts'
+import { objectHeaders, sniff } from './blob-sniff.ts'
 import { fileRef, handleFileDownload } from './file-transfer-core.ts'
 import {
   CDN_SIGN_TTL_SECONDS,
@@ -483,6 +483,16 @@ export async function handlePlace(deps: AttachmentsDeps, userId: string, body: R
   return item ?? null
 }
 
+/**
+ * An image's preview: its sender uploaded it (with no chat) under `staging_key`; registered here like any upload and
+ * offered for the image's bytes (`sha256`), whose versions take it as they are written (chat.file_previews).
+ */
+export async function handlePreviewOffer(deps: AttachmentsDeps, userId: string, body: Record<string, unknown>) {
+  const stagingKey = stagingOf(body, userId)
+  await registerStaged(deps, userId, stagingKey, null, 'preview')
+  return await call(deps.serviceRpc, 'file_preview_offer', { p_uploader: userId, p_key: stagingKey, p_sha256: str(body, 'sha256') })
+}
+
 function stagingOf(body: Record<string, unknown>, userId: string): string {
   const stagingKey = str(body, 'staging_key')!
   if (STAGING.exec(stagingKey)?.[1] !== userId) throw new Refusal(400, 'invalid', 'staging_key is not an upload of yours')
@@ -857,7 +867,7 @@ export async function handleGc(deps: AttachmentsDeps, entry: 'kick' | 'file-acce
           await objectStorage(deps).remove(job.object_name)
           removed++
           // 清边缘缓存只是清理(见 refreshCdn):失败了记一行,不挡回收。
-          if (job.bucket_id === 'oss') await objectStorage(deps).invalidate(job.object_name, hasThumbnail(job.content_type))
+          if (job.bucket_id === 'oss') await objectStorage(deps).invalidate(job.object_name)
             .catch((error) => deps.log('cdn_refresh_failed', { blob: job.blob_id, error: String(error) }))
         } else {
           await deps.storageRemove(job.bucket_id, job.object_name)

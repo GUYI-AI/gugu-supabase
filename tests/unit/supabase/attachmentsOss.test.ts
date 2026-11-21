@@ -13,9 +13,8 @@ import {
   ossSign,
   postObjectForm,
   sha256Hex,
-  THUMB_PROCESS,
 } from '../../../supabase/functions/_shared/oss'
-import { hasThumbnail, objectHeaders, sniff } from '../../../supabase/functions/_shared/blob-sniff'
+import { objectHeaders, sniff } from '../../../supabase/functions/_shared/blob-sniff'
 import {
   type AttachmentsDeps,
   handleCommit,
@@ -55,37 +54,15 @@ describe('签名', () => {
     expect(md5Hex(bytes)).toBe(createHash('md5').update(bytes).digest('hex'))
   })
 
-  it('the thumbnail fits a box OSS can encode, so long screenshots and narrow strips are bounded on both sides', () => {
-    // OSS: resize output side ≥ 16384 → ZoomSizeInvalid; webp side ≥ 16383 → WebpExceedRange (both 400 on devdb).
-    const box = Object.fromEntries(THUMB_PROCESS.split('/')[1]!.split(',').slice(1).map(part => part.split('_') as [string, string]))
-    expect(box.m).toBe('lfit')
-    expect(Number(box.w)).toBe(560)
-    expect(Number(box.h)).toBeLessThan(16383)
-    expect(THUMB_PROCESS.endsWith('/format,webp')).toBe(true)
-  })
-
-  // The sources that came back 400 (ZoomSizeInvalid / WebpExceedRange) on devdb with `resize,w_560`: fitted into
-  // THUMB_PROCESS's box the way OSS's m_lfit does (keep aspect, fit inside, never enlarge), every side stays encodable.
-  it.each([[1170, 40000], [560, 16383], [8, 30001], [100, 31000], [100, 65000], [4032, 3024], [40000, 100]])(
-    'a %i × %i source fits the thumbnail box below OSS limits', (width, height) => {
-      const box = Object.fromEntries(THUMB_PROCESS.split('/')[1]!.split(',').slice(1).map(part => part.split('_') as [string, string]))
-      const scale = Math.min(Number(box.w) / width, Number(box.h) / height, 1)
-      const [w, h] = [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))]
-      expect(w).toBeLessThanOrEqual(560)
-      expect(Math.max(w, h)).toBeLessThan(16383)
-    })
-
-  it('CDN 鉴权 A 对阿里云文档的样例;签名链接只签路径,缩略图在同一个签名后面加 x-oss-process,有效期 1800 s', () => {
+  it('CDN 鉴权 A 对阿里云文档的样例;签名链接只签路径,有效期 1800 s', () => {
     expect(cdnAuthKey('/video/standard/test.mp4', 'aliyuncdnexp1234', { ts: 1444435200, rand: '0', uid: '0' }))
       .toBe('1444435200-0-0-23bf85053008f5c0e791667a313e28ce')
     const sha = 'ab'.repeat(32)
     const now = new Date('2026-10-16T12:00:00Z')
-    const signed = cdnSignedUrl(CDN, `ab/${sha}`, { image: true, now, rand: 'r0' })
+    const signed = cdnSignedUrl(CDN, `ab/${sha}`, { now, rand: 'r0' })
     const ts = Math.floor(now.getTime() / 1000)
     expect(signed.url).toBe(`https://${CDN.domain}/ab/${sha}?auth_key=${ts}-r0-0-${md5Hex(`/ab/${sha}-${ts}-r0-0-${CDN.authKey}`)}`)
-    expect(signed.thumbUrl).toBe(`${signed.url}&x-oss-process=${THUMB_PROCESS}`)
     expect(signed.expiresAt).toBe('2026-10-16T12:30:00.000Z')
-    expect(cdnSignedUrl(CDN, `ab/${sha}`, { image: false, now, rand: 'r0' }).thumbUrl).toBeNull()
   })
 
   it('OSS V4:规范请求对阿里云文档的样例(签名钥匙那一步文档用的是示意值,实测请求全过)', async () => {
@@ -170,7 +147,6 @@ describe('字节是什么(看文件头)', () => {
     expect(svg('see <svg> below').image).toBe(false)
     expect(svg('<html><body><svg></svg><script>alert(1)</script></body></html>').image).toBe(false)
     expect(objectHeaders(svg('<svg/>'), IMMUTABLE)).toEqual({ 'Content-Type': 'image/svg+xml', 'Cache-Control': IMMUTABLE, 'Content-Disposition': 'attachment' })
-    expect([hasThumbnail('image/png'), hasThumbnail('image/webp'), hasThumbnail('image/svg+xml'), hasThumbnail('application/pdf')]).toEqual([true, true, false, false])
   })
 })
 
@@ -707,9 +683,9 @@ describe('直传表单、签名链接、回收', () => {
     expect(f.rpcs.find(r => r.fn === 'file_blob_register')!.args.p_staging_key).toBe(STAGING)
     const signed = await ossSign(f.deps.oss, { method: 'GET', key: logical })
     expect(signed.canonical).toContain(`/${OSS.bucket}/production/${logical}`)
-    const url = cdnSignedUrl(f.deps.cdn, logical, { image: true, now: f.deps.now(), rand: 'r0' })
+    const url = cdnSignedUrl(f.deps.cdn, logical, { now: f.deps.now(), rand: 'r0' })
     expect(url.url).toContain(`/production/${logical}?auth_key=`)
-    expect(url.url).not.toBe(cdnSignedUrl(CDN, logical, { image: true, now: f.deps.now(), rand: 'r0' }).url)
+    expect(url.url).not.toBe(cdnSignedUrl(CDN, logical, { now: f.deps.now(), rand: 'r0' }).url)
     f.calls.length = 0
     expect(await handleGc(f.deps)).toEqual({ claimed: 1, deleted: 1, failed: 0 })
     expect(f.calls[0]!.url).toBe(`https://${OSS.bucket}.${OSS.endpointPublic}/production/${logical}`)
@@ -728,16 +704,16 @@ describe('直传表单、签名链接、回收', () => {
     expect(up.fields.key).toBe(STAGING)
   })
 
-  it('urls:OSS 的走 CDN 鉴权 A(图片另给缩略图),老对象走存储的签名链接;悄悄话附件按消息要;refs 不对就 400', async () => {
+  it('urls:OSS 的走 CDN 鉴权 A,老对象走存储的签名链接;悄悄话附件按消息要;refs 不对就 400', async () => {
     const { deps, controls } = fakes()
     const refs = [{ item_id: '44444444-4444-4444-8444-444444444444' }, { item_id: '55555555-5555-4555-8555-555555555555', version: 2 }, { message_id: 'm1' }]
     const { urls } = await handleUrls(deps, USER, { refs })
     expect(controls.filter(r=>r.fn==='file_transfer_download_as').map(r=>r.args.p_ref)).toEqual(refs)
     expect(urls[0]).toMatchObject({ item_id: refs[0]!.item_id, version: 1, message_id: null, current_version: 3, size_bytes: 10, content_type: 'image/png', width: 640, expires_at: '2026-10-16T12:01:00.000Z' })
     expect(urls[0]!.url).toMatch(new RegExp(`^https://${CDN.domain}/ab/(ab){32}\\?auth_key=\\d+-[0-9a-f]+-0-[0-9a-f]{32}$`))
-    expect(urls[0]!.thumb_url).toBe(`${urls[0]!.url}&x-oss-process=${THUMB_PROCESS}`)
-    expect(urls[1]).toMatchObject({ item_id: refs[1]!.item_id, thumb_url: null, url: 'https://db.example/storage/v1/object/sign/workspace/c/u/x-b.pptx?expires=60' })
-    expect(urls[2]).toMatchObject({ item_id: null, version: null, message_id: 'm1', current_version: null, file_name: 'w.pdf', thumb_url: null })
+    expect(urls[0]!.url).not.toContain('x-oss-process')
+    expect(urls[1]).toMatchObject({ item_id: refs[1]!.item_id, url: 'https://db.example/storage/v1/object/sign/workspace/c/u/x-b.pptx?expires=60' })
+    expect(urls[2]).toMatchObject({ item_id: null, version: null, message_id: 'm1', current_version: null, file_name: 'w.pdf' })
     expect(urls[2]!.url).toMatch(new RegExp(`^https://${CDN.domain}/cd/(cd){32}\\?auth_key=`))
     const both = { item_id: '44444444-4444-4444-8444-444444444444', message_id: 'm1' }
     for (const refs of [[], [{ item_id: 'not-a-uuid' }], [{ message_id: '' }], [{ message_id: 7 }], [both], Array(201).fill({ item_id: '44444444-4444-4444-8444-444444444444' }), 'x']) {
@@ -745,7 +721,7 @@ describe('直传表单、签名链接、回收', () => {
     }
   })
 
-  it('gc:OSS 的删对象、图片用 IgnoreParams 清 CDN、报完成;老对象从存储里删;删失败报失败,不挡下一个', async () => {
+  it('gc:OSS 的删对象、按 File 清 CDN、报完成;老对象从存储里删;删失败报失败,不挡下一个', async () => {
     const claimed = [
       { blob_id: 'b1', claim_token: 't1', bucket_id: 'oss', object_name: 'ab/x', content_type: 'image/png' },
       { blob_id: 'b2', claim_token: 't2', bucket_id: 'workspace', object_name: 'c/u/old', content_type: 'application/x' },
@@ -763,7 +739,7 @@ describe('直传表单、签名链接、回收', () => {
       'DELETE https://gugu-files-test.oss-cn-wulanchabu.aliyuncs.com/ab/x',
       'POST https://cdn.aliyuncs.com/',
     ])
-    expect(decodeURIComponent(calls[1]!.url)).toContain('ObjectType=IgnoreParams')
+    expect(decodeURIComponent(calls[1]!.url)).toContain('ObjectType=File')
     expect(removed).toEqual(['workspace/c/u/old'])
     expect(rpcs.filter((r) => r.fn === 'file_blob_gc_finish').map((r) => r.args.p_blob_id)).toEqual(['b1', 'b2'])
 
