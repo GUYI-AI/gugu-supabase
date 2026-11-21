@@ -342,7 +342,7 @@ describe('within one transaction', () => {
         row('a-note.md', 7, {}),
         row('a-kept.pdf', 7, kept),
         row('b-temporary.pdf', 7, { storage_class: 'temporary', copy_account_id: ownerAccount, is_mine: true, expires_at: new Date(expiresAt) }),
-        row('c-image.png', 7, { ...kept, storage_class: 'image' }),
+        row('c-image.png', 7, kept),
         row('d-reclaimed.pdf', 7, { copy_account_id: memberAccount, copy_expired_at: new Date(expiredAt) }),
         row('e-device.pdf', 7, { host_device_id: device }),
         row('f-two-copies.pdf', 7, kept),

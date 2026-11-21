@@ -16,7 +16,6 @@ export const IMMUTABLE = 'public, max-age=31536000, immutable'
 /** 气泡里的缩略图:装进 560 × 16000 的框、webp(OSS 图片处理现做,CDN 按这个参数各缓存一份)。高的上限:OSS 缩放结果
  * 边长 ≥ 16384 回 400 ZoomSizeInvalid、转 webp 边长 ≥ 16383 回 400 WebpExceedRange —— 只限宽时,长截图(1170×40000)和
  * 比 560 还窄的长条(不放大,8×30001)都会撞上(devdb 实测)。 */
-export const THUMB_PROCESS = 'image/resize,m_lfit,w_560,h_16000/format,webp'
 /** CDN 鉴权 A 的有效期(在 CDN 上配的;签名只带签发时间,过期由 CDN 判)。 */
 export const CDN_SIGN_TTL_SECONDS = 1800
 
@@ -252,13 +251,11 @@ export function cdnAuthKey(path: string, key: string, opts: { ts: number; rand: 
 
 export interface CdnUrl {
   url: string
-  /** 图片才有:同一个签名加上 x-oss-process。 */
-  thumbUrl: string | null
   expiresAt: string
 }
 
 /** 一个对象的 CDN 签名链接;签发时间用服务器时钟(CDN 也认将来的时间戳,所以这里的钟要准 —— 依赖 NTP)。 */
-export function cdnSignedUrl(cdn: CdnConfig, objectName: string, opts: { image: boolean; now?: Date; rand?: string; expiresSeconds?: number }): CdnUrl {
+export function cdnSignedUrl(cdn: CdnConfig, objectName: string, opts: { now?: Date; rand?: string; expiresSeconds?: number }): CdnUrl {
   const now = opts.now ?? new Date()
   const edgeTtl=cdn.authTtlSeconds
   const lifetime=opts.expiresSeconds??edgeTtl
@@ -270,7 +267,6 @@ export function cdnSignedUrl(cdn: CdnConfig, objectName: string, opts: { image: 
   const url = `https://${cdn.domain}${uriEncode(path, true)}?auth_key=${cdnAuthKey(path, cdn.authKey, { ts, rand })}`
   return {
     url,
-    thumbUrl: opts.image ? `${url}&x-oss-process=${THUMB_PROCESS}` : null,
     expiresAt: new Date((ts + edgeTtl) * 1000).toISOString(),
   }
 }
@@ -319,14 +315,13 @@ export async function acsCall(cfg: OssConfig, fetchFn: FetchLike, req: {
 }
 
 /**
- * 删了对象以后清 CDN 边缘缓存(只是清理:签名先于缓存验,不再签新链接以后 1800 s 谁也拿不到)。实测:按普通 URL 刷只清原图,
- * 带 x-oss-process 的缩略图清不掉;IgnoreParams 连同所有参数变体一起清(每天默认 100 次)。所以图片用 IgnoreParams,别的用 File。
+ * 删了对象以后清 CDN 边缘缓存(只是清理:签名先于缓存验,不再签新链接以后 1800 s 谁也拿不到)。只签原对象,按 File 刷。
  * 回 RefreshTaskId(不等它完成,也不查状态)。
  */
-export async function refreshCdn(cfg: OssConfig, fetchFn: FetchLike, cdn: CdnConfig, objectName: string, image: boolean): Promise<string | null> {
+export async function refreshCdn(cfg: OssConfig, fetchFn: FetchLike, cdn: CdnConfig, objectName: string): Promise<string | null> {
   const r = await acsCall(cfg, fetchFn, {
     action: 'RefreshObjectCaches',
-    params: { ObjectPath: `https://${cdn.domain}/${objectKey(cdn, objectName)}`, ObjectType: image ? 'IgnoreParams' : 'File' },
+    params: { ObjectPath: `https://${cdn.domain}/${objectKey(cdn, objectName)}`, ObjectType: 'File' },
   })
   if (r.status >= 300) {
     throw new OssError(r.status, typeof r.json?.Code === 'string' ? r.json.Code : null, `CDN refresh ${r.status}: ${String(r.json?.Message ?? '').slice(0, 160)}`)

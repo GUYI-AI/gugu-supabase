@@ -1,6 +1,5 @@
-// 一份字节是什么:看文件头,不信客户端报的类型。图片(PNG、JPEG、GIF、WebP)给真实类型和宽高(气泡先按比例留位置、
-// CDN 上按图片处理出缩略图);SVG 也是图片(image/svg+xml,宽高不读),但 OSS 的图片处理不认它(实测 400「This image
-// format is not supported」),没有缩略图;别的一律 application/octet-stream,由 CDN 当附件下载(不在 CDN 的域名上当页面跑)。
+// 一份字节是什么:看文件头,不信客户端报的类型。图片(PNG、JPEG、GIF、WebP)给真实类型和宽高(气泡先按比例留位置);
+// SVG 也是图片(image/svg+xml,宽高不读);别的一律 application/octet-stream,由 CDN 当附件下载(不在 CDN 的域名上当页面跑)。
 
 export interface Sniffed {
   contentType: string
@@ -25,20 +24,6 @@ const SVG_START = /^\uFEFF?\s*(?:<\?xml[^>]*\?>\s*)?(?:(?:<!--[\s\S]*?-->|<!DOCT
 function isSvg(b: Uint8Array): boolean {
   return SVG_START.test(new TextDecoder('utf-8', { fatal: false }).decode(b.subarray(0, 4096)))
 }
-
-/** 这种图片在 CDN 上有没有缩略图(x-oss-process):SVG 没有,客户端直接用原图。 */
-export const hasThumbnail = (contentType: string): boolean => contentType.startsWith('image/') && contentType !== SVG
-
-// OSS rejects image processing above 20 MiB (ImageTooLarge, 0040-00000001), and decoding sources above its documented
-// 250 million px (MemLimitExceeded, 0040-00000012; devdb: 342M px decoded, 360M px refused) — small-byte images can exceed
-// that. Long or wide sources are THUMB_PROCESS's job, not a reason to skip. Unknown dimensions: only the bytes limit is known.
-export const OSS_IMAGE_PROCESS_MAX_BYTES = 20 * 1024 * 1024
-export const OSS_IMAGE_PROCESS_MAX_PIXELS = 250_000_000
-const withinPixels = (width: unknown, height: unknown): boolean =>
-  !Number.isSafeInteger(width) || !Number.isSafeInteger(height) || (width as number) * (height as number) <= OSS_IMAGE_PROCESS_MAX_PIXELS
-export const canSignThumbnail = (contentType: string, sizeBytes: unknown, width?: unknown, height?: unknown): boolean =>
-  hasThumbnail(contentType) && typeof sizeBytes === 'number' && Number.isSafeInteger(sizeBytes)
-    && sizeBytes > 0 && sizeBytes <= OSS_IMAGE_PROCESS_MAX_BYTES && withinPixels(width, height)
 
 /**
  * EXIF orientation (tag 0x0112 in IFD0) of an APP1 segment whose payload starts at `at`: null when the segment is not EXIF

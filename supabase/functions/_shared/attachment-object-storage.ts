@@ -34,7 +34,6 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
         || /<Status>\s*(Enabled|Suspended)\s*<\/Status>/.test(body)) throw new ObjectStorageError(503,'not_configured','Immutable OSS uploads require a bucket that has never enabled versioning')
       return {maxBytes:requestedBytes,expiresSeconds:requestedSeconds}
     },
-    thumbnails: true,
     upload: (key, date, limits) => postObjectForm(oss, { key, date, maxBytes: limits?.maxBytes ?? MAX_ATTACHMENT_BYTES,
       minBytes: limits?.minBytes, expiresInSeconds: limits?.expiresSeconds }),
     sizeEnforced: true,
@@ -64,16 +63,16 @@ export function ossObjectStorage(config: { oss: OssConfig; cdn: CdnConfig; fetch
       return { size: head.size, checksum }
     },
     remove: (key, signal) => ossDelete(oss, signal ? (input, init) => fetch(input, { ...init, signal }) : fetch, key),
-    sign: async (key, image, now, permit) => {
+    sign: async (key, now, permit) => {
       if(permit?.direct) {
         if(!config.directSign) throw new ObjectStorageError(503,'not_configured','Origin signing is not configured')
-        return config.directSign(key,image,now,permit)
+        return config.directSign(key,now,permit)
       }
-      const signed=cdnSignedUrl(cdn,key,{image,now,rand:permit?.requestId.replace(/-/g,''),expiresSeconds:permit?.expiresSeconds})
+      const signed=cdnSignedUrl(cdn,key,{now,rand:permit?.requestId.replace(/-/g,''),expiresSeconds:permit?.expiresSeconds})
       // Advertise the existing direct signer; never invoke it on the primary CDN path.
       return {...signed,...(permit&&config.directSign?{originAvailable:true}:{})}
     },
-    invalidate: async (key, image) => { await refreshCdn(oss, fetch, cdn, key, image) },
+    invalidate: async (key) => { await refreshCdn(oss, fetch, cdn, key) },
     parts: ossMultipart(oss, fetch),
   }
   return store
@@ -297,8 +296,8 @@ export function supabaseObjectStorage(config: SupabaseObjectConfig): AttachmentO
       await check(response)
       await response.body?.cancel()
     },
-    sign: async (key, _image, now, permit) => ({
-      url: await config.signDownload(key, permit?.expiresSeconds ?? CDN_SIGN_TTL_SECONDS,permit?.trafficBits), thumbUrl: null,
+    sign: async (key, now, permit) => ({
+      url: await config.signDownload(key, permit?.expiresSeconds ?? CDN_SIGN_TTL_SECONDS,permit?.trafficBits),
       expiresAt: new Date(now.getTime() + (permit?.expiresSeconds ?? CDN_SIGN_TTL_SECONDS) * 1000).toISOString(),
     }),
     invalidate: async () => { /* Supabase signed reads expire; no external CDN purge is configured. */ },

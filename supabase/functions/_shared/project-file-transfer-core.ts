@@ -1,4 +1,4 @@
-import { type AttachmentsDeps,call,handleGc,objectStorage,Refusal } from './attachments-core.ts'
+import { type AttachmentsDeps,call,handleGc,handlePreviewOffer,objectStorage,Refusal } from './attachments-core.ts'
 import { fileRef,handleFileDownload } from './file-transfer-core.ts'
 import { ObjectStorageError } from './object-storage.ts'
 
@@ -14,6 +14,7 @@ function id(body:Record<string,unknown>,name:string) {
 export async function handleProjectFiles(deps:AttachmentsDeps,user:string,route:string,body:Record<string,unknown>) {
   const actor=typeof body.as==='string'?body.as:user
   if(route==='file-download') return handleFileDownload(deps,user,body)
+  if(route==='file-preview') return handlePreviewOffer(deps,user,body)
   if(route==='file-request') {
     const state=await call(deps.userRpc,'file_temporary_request',{p_ref:fileRef(body.ref),p_as:actor,p_id:id(body,'request_id')}) as Record<string,unknown>
     if(body.download_request_id===undefined) return state

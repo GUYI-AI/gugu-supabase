@@ -81,12 +81,12 @@ beforeEach(async()=>{
 afterEach(async()=>{await db.query('ROLLBACK')})
 
 describe('temporary and kept copies on the reference ledger',()=>{
-  it('keeps images and temporary files on separate retention keys, always the uploader\'s own',async()=>{
-    // The project owner's setting does not apply to what a member uploads.
+  it('keeps an image like any file, and temporary files on the uploader\'s own retention',async()=>{
+    // The project owner's setting does not apply to what a member uploads; image_retention is read by nothing.
     await storage({image_retention:'30d',temporary_retention:'30d'})
     await storage({image_retention:'1d',temporary_retention:'1d'},member)
     const image=await send(project,'image/png')
-    expect((await seconds(image.stored,project)).s).toBeLessThanOrEqual(DAY)
+    expect((await seconds(image.stored,project)).expires_at).toBeNull()
     const doc=await send(project)
     expect((await seconds(doc.stored,project)).expires_at).toBeNull()
     expect(await mark([{message_id:doc.message}],'temporary')).toBe(1)
@@ -97,9 +97,9 @@ describe('temporary and kept copies on the reference ledger',()=>{
     expect((await seconds(note.stored,plain)).s).toBeLessThanOrEqual(DAY)
     expect(await mark([{message_id:note.message}],'permanent')).toBe(1)
     expect((await seconds(note.stored,plain)).expires_at).toBeNull()
-    // An image a project chat would expire can be kept.
-    expect(await mark([{message_id:image.message}],'permanent')).toBe(1)
-    expect((await seconds(image.stored,project)).expires_at).toBeNull()
+    // An image is marked like any file.
+    expect(await mark([{message_id:image.message}],'temporary')).toBe(1)
+    expect((await seconds(image.stored,project)).s).toBeLessThanOrEqual(DAY)
   })
   it('lets only the uploader mark a copy, through the readers of that message or file',async()=>{
     const note=await send(plain)
@@ -133,26 +133,28 @@ describe('temporary and kept copies on the reference ledger',()=>{
     expect(await db.query('SELECT chat.file_blob_in_use($1) AS used',[shared.blob]).then(r=>r.rows[0].used)).toBe(true)
   })
   it('marks every own copy of a class at once, in one chat or all, and nobody else\'s',async()=>{
-    const a=await send(plain),b=await send(plain),mine=await send(plain,'image/png')
+    const a=await send(plain),b=await send(plain),image=await send(plain,'image/png')
     const theirs=await send(plain,'application/pdf',undefined,host)
-    expect(await mark([{class:'kept',chat_id:plain}],'temporary')).toBe(2)
-    expect(await mark([{class:'temporary'}],'release')).toBe(2)
-    for (const f of [a,b]) expect((await seconds(f.stored,plain)).expired_at).not.toBeNull()
-    expect((await seconds(mine.stored,plain)).expired_at).toBeNull()
+    // A released client may still name the old 'image' class: it is empty.
+    expect(await mark([{class:'image'}],'release')).toBe(0)
+    expect(await mark([{class:'kept',chat_id:plain}],'temporary')).toBe(3)
+    expect(await mark([{class:'temporary'}],'release')).toBe(3)
+    for (const f of [a,b,image]) expect((await seconds(f.stored,plain)).expired_at).not.toBeNull()
     expect((await seconds(theirs.stored,plain)).expired_at).toBeNull()
   })
   it('summarizes only the caller\'s own copies: classes, groups, what expires soonest, and the machines\' project files',async()=>{
     // Retention belongs to the uploader; otherwise both copies expire in 7d and their tie order is undefined.
-    await storage({image_retention:'1d'},member)
+    await storage({temporary_retention:'1d'},member)
     const image=await send(project,'image/png'),kept=await send(plain),temp=await send(plain)
+    await mark([{message_id:image.message}],'temporary')
     await mark([{message_id:temp.message}],'temporary')
     await send(plain,'application/pdf',undefined,host)
     const r=await overview()
     expect(r).toMatchObject({total_bytes:180,count:3,expiring_7d_bytes:120,
-      classes:{image:{bytes:60,count:1},temporary:{bytes:60,count:1},kept:{bytes:60,count:1}}})
+      classes:{image:{bytes:0,count:0},temporary:{bytes:120,count:2},kept:{bytes:60,count:1}}})
     expect(r.groups).toEqual([expect.objectContaining({chat_id:plain,name:'plain',project:false,bytes:120,count:2}),
       expect.objectContaining({chat_id:project,project:true,bytes:60,count:1})])
-    expect(r.expiring.map((e:{class:string})=>e.class)).toEqual(['image','temporary'])
+    expect(r.expiring.map((e:{class:string})=>e.class)).toEqual(['temporary','temporary'])
     expect(r.expiring[0]).toMatchObject({chat_id:project,item_id:expect.any(String),file_name:expect.any(String)})
     expect(r.machines).toEqual([])
     // The idle-expiry policy the panel states: none set → null; set → exactly what chat.file_transfer_expire reads.
@@ -195,7 +197,7 @@ describe('temporary and kept copies on the reference ledger',()=>{
     const of=(item:string)=>rows.find((row)=>row.id===item)
     expect(of(temporary.item)).toMatchObject({storage_class:'temporary',copy_expired_at:null,copy_account_id:member,host_device_id:null})
     expect(of(kept.item)).toMatchObject({storage_class:'kept',copy_expired_at:null,copy_account_id:member})
-    expect(of(image.item)).toMatchObject({storage_class:'image',copy_account_id:member})
+    expect(of(image.item)).toMatchObject({storage_class:'kept',copy_account_id:member})
     // A reclaimed copy has no class; when it went and whose it was stay.
     expect(of(gone.item)).toMatchObject({storage_class:null,copy_account_id:member})
     expect(of(gone.item).copy_expired_at).not.toBeNull()

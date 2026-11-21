@@ -89,7 +89,7 @@ describe('attachment storage configuration', () => {
     const { urls } = await handleUrls(deps, 'u1', { refs: [{ message_id: 'm1' }] })
     expect(urls).toHaveLength(1)
     expect(urls[0]!.url).toMatch(/^https:\/\/files\.example\.test\/ab\/abcdef\?auth_key=/)
-    expect(urls[0]!.thumb_url).toContain('x-oss-process=')
+    expect(urls[0]!.url).not.toContain('x-oss-process=')
     const timestamp=Number(new URL(urls[0]!.url).searchParams.get('auth_key')!.split('-')[0])
     expect(timestamp+1800).toBe(Date.parse('2026-10-21T00:01:00Z')/1000)
   })
